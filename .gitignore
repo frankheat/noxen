@@ -1,0 +1,11 @@
+node_modules/
+build/
+__pycache__/
+*.pyc
+*.egg-info/
+*.noxen
+*.noxen-shm
+*.noxen-wal
+*.db
+*.db-shm
+*.db-wal

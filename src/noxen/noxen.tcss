@@ -1,0 +1,581 @@
+Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
+    scrollbar-background: $surface;
+    scrollbar-color: #2C3E3A;
+    scrollbar-color-hover: #26A368;
+    scrollbar-color-active: #26A368;
+}
+#intercept_header {
+    height: 3;
+    background: $panel;
+    padding: 0 1;
+    align: left middle;
+}
+#intercept_header Button {
+    width: auto;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    margin: 0 1 0 0;
+}
+#intercept_header Button:focus {
+    border: none;
+    text-style: bold;
+    background-tint: $surface 0%;
+}
+#intercept_header #intercept_toggle,
+#intercept_header #btn_forward,
+#intercept_header #btn_drop,
+#intercept_header #btn_edit {
+    height: 3;
+    margin: 0 1 0 0;
+    border: round $panel-lighten-2;
+    background: $panel;
+    color: #8A8F8D;
+    text-style: bold;
+}
+#intercept_header #intercept_toggle:focus,
+#intercept_header #btn_forward:focus,
+#intercept_header #btn_drop:focus,
+#intercept_header #btn_edit:focus,
+#intercept_header #intercept_toggle:hover,
+#intercept_header #btn_forward:hover,
+#intercept_header #btn_drop:hover,
+#intercept_header #btn_edit:hover {
+    border: round $panel-lighten-2;
+    background: $panel;
+    background-tint: $surface 0%;
+}
+#intercept_header #intercept_toggle.intercept-on,
+#intercept_header #intercept_toggle.intercept-on:focus,
+#intercept_header #intercept_toggle.intercept-on:hover {
+    border: round #26A368;
+    background: $panel;
+    color: #26A368;
+}
+#intercept_header #intercept_toggle.intercept-off,
+#intercept_header #intercept_toggle.intercept-off:focus,
+#intercept_header #intercept_toggle.intercept-off:hover {
+    border: round #F2C94C;
+    background: $panel;
+    color: #F2C94C;
+}
+#intercept_header #btn_forward.forward-ready,
+#intercept_header #btn_forward.forward-ready:focus,
+#intercept_header #btn_forward.forward-ready:hover {
+    border: round #0D8BD9;
+    background: $panel;
+    color: #58C4FF;
+}
+#intercept_header #btn_drop.drop-ready,
+#intercept_header #btn_drop.drop-ready:focus,
+#intercept_header #btn_drop.drop-ready:hover {
+    border: round #B95B5B;
+    background: $panel;
+    color: #FFB1B1;
+}
+#intercept_header #btn_edit.edit-ready,
+#intercept_header #btn_edit.edit-ready:focus,
+#intercept_header #btn_edit.edit-ready:hover {
+    border: round #9B8CFF;
+    background: $panel;
+    color: #D8D1FF;
+}
+#intercept_header #btn_forward:disabled,
+#intercept_header #btn_drop:disabled,
+#intercept_header #btn_edit:disabled {
+    border: round $panel-lighten-2;
+    background: $panel;
+    color: #8A8F8D;
+}
+#intercept_header #btn_intercept_filters,
+#intercept_header #btn_intercept_stack {
+    height: 3;
+    border: round $panel-lighten-2;
+    background: transparent;
+}
+#intercept_header #btn_intercept_filters:focus,
+#intercept_header #btn_intercept_stack:focus,
+#intercept_header #btn_intercept_filters:hover,
+#intercept_header #btn_intercept_stack:hover {
+    border: round $accent;
+    background: transparent;
+}
+#session_bar {
+    height: 1;
+    background: #2C3E3A;
+    padding: 0 1;
+    align: right middle;
+}
+#session_bar.connected {
+    background: #26a368;
+}
+#session_info {
+    color: #F5F7F6;
+    height: 1;
+}
+#session_bar.connected #session_info {
+    color: #000000;
+}
+#intercept_header #intercept_toggle {
+    width: 21;
+}
+#intercept_header_spacer { width: 1fr; }
+TabbedContent {
+    height: 1fr;
+}
+Tabs .underline--bar {
+    color: #26a368;
+}
+Tab { text-style: bold; }
+Tab.-active { background: $panel; color: $text; }
+Tab.-active:focus { background: $panel; color: $text; }
+Tab.intercepted { color: #C94A8A; }
+TabPane {
+    padding: 0;
+    layout: vertical;
+}
+#intercept_output {
+    background: $surface;
+    height: 1fr;
+    margin: 1 1 0 1;
+}
+#log_header {
+    height: 3;
+    background: $panel;
+    padding: 0 1;
+    align: left middle;
+}
+#log_verbose_label {
+    width: auto;
+    height: 1;
+    content-align: left middle;
+    margin-right: 2;
+}
+#log_output {
+    background: $surface;
+    height: 1fr;
+    margin: 1 1 0 1;
+}
+#history_table {
+    height: 1fr;
+    margin: 1 1 0 1;
+    border: solid #2C3E3A;
+}
+#history_detail {
+    height: 1fr;
+    margin: 0 1 0 1;
+    background: $surface;
+    border: solid #2C3E3A;
+}
+#history_header {
+    height: 3;
+    background: $panel;
+    padding: 0 1;
+    align: left middle;
+}
+#history_header Button {
+    width: auto;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    margin: 0 1 0 0;
+}
+#history_header Button:focus {
+    border: none;
+    text-style: bold;
+    background-tint: $surface 0%;
+}
+#filter_bar_spacer { width: 0; }
+#history_search {
+    width: 1fr;
+    height: 3;
+    padding: 0 1;
+    margin-right: 1;
+    background: $panel;
+    border: round $panel-lighten-2;
+}
+#history_header #btn_history_filters,
+#history_header #btn_history_stack {
+    height: 3;
+    border: round $panel-lighten-2;
+    background: transparent;
+}
+#history_header #btn_history_filters:focus,
+#history_header #btn_history_stack:focus,
+#history_header #btn_history_filters:hover,
+#history_header #btn_history_stack:hover {
+    border: round $accent;
+    background: transparent;
+}
+#history_header #btn_columns {
+    margin: 0;
+    padding: 0 1;
+    width: auto;
+    min-width: 0;
+    height: 3;
+    border: round $panel-lighten-2;
+    background: $panel;
+    text-style: bold;
+}
+#history_header #btn_columns:hover {
+    border: round $accent;
+    background: transparent;
+}
+#intercept_cmd_output {
+    height: 7;
+    margin: 0 1;
+    background: $surface;
+    border-top: solid $panel;
+}
+#intercept_input_wrapper {
+    height: 4;
+    padding: 0 1 0 1;
+}
+#intercept_input_bar {
+    height: 3;
+    border: round #F2C94C;
+    padding: 0 1;
+    align: left middle;
+    background: $surface;
+}
+#intercept_prompt_char {
+    width: auto;
+    height: 100%;
+    content-align: left middle;
+    margin-right: 1;
+    color: #F2C94C;
+}
+Input {
+    border: none;
+    width: 1fr;
+}
+Input:focus {
+    border: none;
+    background-tint: $surface 0%;
+}
+#intercept_input_bar.intercepted {
+    border: round red;
+}
+#intercept_input_bar.intercepted #intercept_prompt_char {
+    color: red;
+}
+#intercept_cmd_suggestions {
+    display: none;
+    height: auto;
+    max-height: 8;
+    margin: 0 1;
+    border: none;
+    background: $surface;
+}
+DataTable > .datatable--cursor {
+    background: #C94A8A;
+    color: #ffffff;
+}
+DataTable > .datatable--header-hover {
+    background: #2C3E3A;
+}
+SelectOverlay {
+    border: tall #2C3E3A;
+}
+OptionList > .option-list--option-highlighted {
+    background: #C94A8A;
+    color: #ffffff;
+}
+#history_bar_container {
+    display: none;
+    height: auto;
+}
+#history_cmd_output {
+    height: 4;
+    margin: 0 1;
+    background: $surface;
+    border-top: solid $panel;
+}
+#history_cmd_suggestions {
+    display: none;
+    height: auto;
+    max-height: 8;
+    margin: 0 1;
+    border: none;
+    background: $surface;
+}
+#history_input_wrapper {
+    height: 4;
+    padding: 0 1 0 1;
+}
+#history_input_bar {
+    height: 3;
+    border: round #F2C94C;
+    padding: 0 1;
+    align: left middle;
+    background: $surface;
+}
+#history_prompt_char {
+    width: auto;
+    height: 100%;
+    content-align: left middle;
+    margin-right: 1;
+    color: #F2C94C;
+}
+#settings_pane {
+    padding: 1 2;
+}
+#settings_title {
+    text-style: bold;
+    color: #26a368;
+    margin-bottom: 1;
+}
+#settings_pane Rule {
+    color: #2C3E3A;
+    margin: 0 0 1 0;
+}
+.settings_row {
+    height: auto;
+    align: left middle;
+    margin-bottom: 1;
+}
+.settings_row Label {
+    width: 30;
+    content-align: left middle;
+}
+.settings_switch_row Label {
+    width: 28;
+}
+Switch {
+    border: none;
+    background: transparent;
+}
+Switch:focus {
+    background-tint: $surface 0%;
+}
+Switch > .switch--slider {
+    color: #C94A8A;
+    background: #2C3E3A;
+}
+Switch.-on > .switch--slider {
+    color: #26a368;
+}
+#settings_depth_input {
+    width: 10;
+    height: 1;
+    border: none;
+    background: $panel;
+}
+#settings_depth_error {
+    height: 1;
+    color: $error;
+    margin-left: 30;
+}
+#settings_save {
+    width: auto;
+    height: 3;
+    border: round $panel-lighten-2;
+    padding: 0 2;
+    background: transparent;
+    text-style: bold;
+}
+#settings_save:hover,
+#settings_save:focus {
+    border: round #26a368;
+    background: transparent;
+    color: #26a368;
+    background-tint: $surface 0%;
+}
+#home_split {
+    height: 1fr;
+}
+#home_sidebar {
+    width: 1fr;
+    height: 1fr;
+    border-right: solid $panel-lighten-2;
+}
+#home_logo {
+    width: 1fr;
+    height: auto;
+    text-align: center;
+}
+#home_info {
+    width: 1fr;
+    height: auto;
+    margin-top: 2;
+    padding: 0 2;
+}
+#home_form {
+    width: 2fr;
+    padding: 1 2;
+}
+#home_title {
+    text-style: bold;
+    color: #26a368;
+    margin-bottom: 1;
+}
+#home_form Rule {
+    color: #2C3E3A;
+    margin: 1 0;
+}
+.connect_row {
+    height: auto;
+    align: left middle;
+    margin-bottom: 1;
+}
+.connect_label {
+    width: 12;
+    height: 3;
+    content-align: left middle;
+    margin-right: 1;
+}
+.wide_connect_label {
+    width: 18;
+}
+#home_device {
+    width: 1fr;
+}
+#home_hooks_path, #home_script_path {
+    width: 1fr;
+    height: 3;
+    border: tall #2C3E3A;
+    background: $surface;
+    padding: 0 1;
+}
+#home_hooks_browse, #home_script_browse,
+#home_hooks_clear, #home_script_clear {
+    width: auto;
+    height: 3;
+    border: round $panel-lighten-2;
+    padding: 0 1;
+    margin-left: 1;
+    background: transparent;
+    text-style: bold;
+}
+#home_hooks_browse:hover, #home_hooks_browse:focus,
+#home_script_browse:hover, #home_script_browse:focus {
+    border: round $accent;
+    background: transparent;
+}
+#home_hooks_clear:hover, #home_hooks_clear:focus,
+#home_script_clear:hover, #home_script_clear:focus {
+    border: round #B95B5B;
+    color: #FFB1B1;
+    background: transparent;
+}
+#home_refresh, #home_target_refresh {
+    width: auto;
+    height: 3;
+    border: round $panel-lighten-2;
+    padding: 0 1;
+    margin-left: 1;
+    background: transparent;
+    text-style: bold;
+}
+#home_refresh:hover, #home_target_refresh:hover,
+#home_refresh:focus, #home_target_refresh:focus {
+    border: round $accent;
+    background: transparent;
+}
+#home_anr_row {
+    height: 3;
+}
+#home_anr_bypass_label {
+    width: auto;
+    height: 1;
+    content-align: left middle;
+    margin-right: 2;
+}
+#home_system_anr_bypass {
+    margin-right: 2;
+}
+#home_mode {
+    width: 1fr;
+}
+#home_target_select {
+    width: 1fr;
+}
+#home_form Select > SelectCurrent {
+    border: tall #2C3E3A;
+    background: $surface;
+}
+#home_form Select:focus > SelectCurrent {
+    border: tall #2C3E3A;
+}
+#home_btn {
+    width: auto;
+    height: 3;
+    border: round $panel-lighten-2;
+    padding: 0 2;
+    background: transparent;
+    text-style: bold;
+}
+#home_btn:hover,
+#home_btn:focus {
+    border: round #26a368;
+    background: transparent;
+    color: #26a368;
+    background-tint: $surface 0%;
+}
+#home_btn_row {
+    height: auto;
+    margin: 0;
+}
+#home_disconnect {
+    width: auto;
+    height: 3;
+    border: round $panel-lighten-2;
+    padding: 0 2;
+    background: transparent;
+    text-style: bold;
+    margin-left: 1;
+}
+#home_disconnect:hover,
+#home_disconnect:focus {
+    border: round #B95B5B;
+    background: transparent;
+    color: #FFB1B1;
+    background-tint: $surface 0%;
+}
+#home_error {
+    height: 1;
+    color: #C94A8A;
+    margin-top: 1;
+}
+#edit_form {
+    display: none;
+    height: 1fr;
+    margin: 1 1 0 1;
+    background: $surface;
+    padding: 1 2;
+    overflow-y: auto;
+}
+.ef_row { height: 1; align: left middle; margin-bottom: 1; }
+.ef_label { width: 12; content-align: left middle; }
+.ef_section { text-style: bold; color: #F2C94C; margin: 1 0; }
+.ef_x_row { height: 1; align: left middle; margin-bottom: 1; }
+.ef_x_key_label { width: 18; }
+.ef_x_type_label { width: 14; color: $text-muted; }
+.ef_x_key_input { width: 18; padding: 0; }
+.ef_x_type_select { width: 14; height: 1; }
+.ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
+.ef_x_rm { width: 3; height: 1; border: none; min-width: 3; padding: 0; }
+#ef_extras { height: auto; }
+#ef_categories { height: auto; }
+#ef_add_extra { width: auto; height: 1; border: none; padding: 0 1; color: #F2C94C; }
+#ef_add_cat { width: auto; height: 1; border: none; padding: 0 1; color: #F2C94C; }
+.ef_cat_row { height: 1; align: left middle; margin-bottom: 1; }
+.ef_cat_input { padding: 0; }
+#edit_form Rule { margin: 0 2 0 0; color: #2C3E3A; }
+#app_footer {
+    dock: bottom;
+    height: 1;
+}
+Footer {
+    dock: none;
+    height: 1;
+    width: 1fr;
+}
+#filter_count_label {
+    width: auto;
+    height: 1;
+    background: $panel;
+    color: #8A8F8D;
+    content-align: right middle;
+    padding: 0 2;
+}

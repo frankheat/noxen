@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noxen"
+version = "0.1.0"
+description = "Android runtime interception for mapping component communication and attack-surface behavior."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "frankheat" }
+]
+dependencies = [
+    "rich>=13",
+    "tabulate>=0.9",
+    "textual>=0.80",
+]
+
+[project.optional-dependencies]
+analyze = ["androguard>=4"]
+
+[project.scripts]
+noxen = "noxen.__main__:main"
+noxen-analyze = "noxen.analysis:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+noxen = [
+    "noxen.tcss",
+    "runtime/agent/*.js",
+    "runtime/config/*.json",
+]

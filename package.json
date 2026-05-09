@@ -1,0 +1,16 @@
+{
+  "name": "noxen-agent",
+  "private": true,
+  "scripts": {
+    "build": "npm run build:app && npm run build:system-server && npm run sync:runtime",
+    "build:app": "frida-compile agent/script.js -o agent/script_bundle.js -T none --bundle-format iife",
+    "build:system-server": "frida-compile agent/system_server.js -o agent/system_server_bundle.js -T none --bundle-format iife",
+    "sync:runtime": "node scripts/sync-runtime-assets.js"
+  },
+  "devDependencies": {
+    "frida-compile": "^19"
+  },
+  "dependencies": {
+    "frida-java-bridge": "^7"
+  }
+}

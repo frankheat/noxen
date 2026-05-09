@@ -1,0 +1,158 @@
+[
+  {
+    "clazz": "android.app.Activity",
+    "method": "startActivityForResult",
+    "args": ["android.content.Intent", "int", "android.os.Bundle"],
+    "minApi": 16
+  },
+  {
+    "clazz": "android.app.Activity",
+    "method": "setResult",
+    "args": ["int", "android.content.Intent"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.app.Activity",
+    "method": "onActivityResult",
+    "args": ["int", "int", "android.content.Intent"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.app.Activity",
+    "method": "onNewIntent",
+    "args": ["android.content.Intent"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.app.Activity",
+    "method": "getIntent",
+    "args": [],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "startActivity",
+    "args": ["android.content.Intent"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "startActivity",
+    "args": ["android.content.Intent", "android.os.Bundle"],
+    "minApi": 16
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendBroadcast",
+    "args": ["android.content.Intent"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendBroadcast",
+    "args": ["android.content.Intent", "java.lang.String"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendBroadcast",
+    "args": ["android.content.Intent", "java.lang.String", "android.os.Bundle"],
+    "minApi": 34
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendOrderedBroadcast",
+    "args": ["android.content.Intent", "java.lang.String"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendOrderedBroadcast",
+    "args": ["android.content.Intent", "java.lang.String", "android.content.BroadcastReceiver", "android.os.Handler", "int", "java.lang.String", "android.os.Bundle"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendOrderedBroadcast",
+    "args": ["android.content.Intent", "java.lang.String", "java.lang.String", "android.content.BroadcastReceiver", "android.os.Handler", "int", "java.lang.String", "android.os.Bundle"],
+    "minApi": 30
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendOrderedBroadcast",
+    "args": ["android.content.Intent", "int", "java.lang.String", "java.lang.String", "android.content.BroadcastReceiver", "android.os.Handler", "java.lang.String", "android.os.Bundle", "android.os.Bundle"],
+    "minApi": 30
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendOrderedBroadcast",
+    "args": ["android.content.Intent", "java.lang.String", "android.os.Bundle"],
+    "minApi": 34
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "sendOrderedBroadcast",
+    "args": ["android.content.Intent", "java.lang.String", "android.os.Bundle", "android.content.BroadcastReceiver", "android.os.Handler", "int", "java.lang.String", "android.os.Bundle"],
+    "minApi": 34
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "bindService",
+    "args": ["android.content.Intent", "android.content.ServiceConnection", "int"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "bindService",
+    "args": ["android.content.Intent", "int", "java.util.concurrent.Executor", "android.content.ServiceConnection"],
+    "minApi": 29
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "bindService",
+    "args": ["android.content.Intent", "android.content.ServiceConnection", "android.content.Context$BindServiceFlags"],
+    "minApi": 34
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "bindService",
+    "args": ["android.content.Intent", "android.content.Context$BindServiceFlags", "java.util.concurrent.Executor", "android.content.ServiceConnection"],
+    "minApi": 34
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "startService",
+    "args": ["android.content.Intent"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.content.ContextWrapper",
+    "method": "startForegroundService",
+    "args": ["android.content.Intent"],
+    "minApi": 26
+  },
+  {
+    "clazz": "android.app.PendingIntent",
+    "method": "getActivity",
+    "args": ["android.content.Context", "int", "android.content.Intent", "int"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.app.PendingIntent",
+    "method": "getActivity",
+    "args": ["android.content.Context", "int", "android.content.Intent", "int", "android.os.Bundle"],
+    "minApi": 16
+  },
+  {
+    "clazz": "android.app.PendingIntent",
+    "method": "getBroadcast",
+    "args": ["android.content.Context", "int", "android.content.Intent", "int"],
+    "minApi": 1
+  },
+  {
+    "clazz": "android.app.PendingIntent",
+    "method": "getService",
+    "args": ["android.content.Context", "int", "android.content.Intent", "int"],
+    "minApi": 1
+  }
+]
