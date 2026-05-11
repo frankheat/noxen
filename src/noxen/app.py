@@ -53,7 +53,7 @@ from noxen.intent_mods import (
     parse_flag_value,
     parse_intent_mod_command,
 )
-from noxen.logging_ui import is_debug_log, log_debug, log_error, log_info, log_success, log_warning
+from noxen.logging_ui import is_debug_log, log_debug, log_info, log_success, log_warning
 from noxen.modals import (
     ColumnSelectModal,
     FileBrowserModal,
@@ -255,33 +255,31 @@ class NoxenApp(App):
         self._history_filter_manager = FilterManager.from_saved(self.db.load_history_filters())
 
     def _init_project(self, cli_args) -> tuple:
-        """Resolve DB path, open or create the project, return (ProjectDB, intents)."""
+        """Resolve DB path, open or create the project, return (ProjectDB, intents).
+
+        Propagates FileNotFoundError (--project path missing) and FileExistsError
+        (--new-project path already taken) so the caller can refuse to launch the
+        TUI against a stub DB whose writes would be silently dropped.
+        """
         project = getattr(cli_args, "project", None)
         new_project = getattr(cli_args, "new_project", None)
 
         if project:
             path = project if project.endswith(".noxen") else project + ".noxen"
             db = ProjectDB(path)
-            try:
-                intents = db.open_existing()
-                for warning in db.load_warnings:
-                    self._startup_messages.append(log_warning(warning, "project"))
-                self._startup_messages.append(
-                    log_success(f"Opened project '{db.name or path}' ({len(intents)} intent(s))", "project")
-                )
-                return db, intents
-            except FileNotFoundError as e:
-                self._startup_messages.append(log_error(str(e), "project"))
-                return db, []
+            intents = db.open_existing()
+            for warning in db.load_warnings:
+                self._startup_messages.append(log_warning(warning, "project"))
+            self._startup_messages.append(
+                log_success(f"Opened project '{db.name or path}' ({len(intents)} intent(s))", "project")
+            )
+            return db, intents
 
         if new_project:
             path = new_project if new_project.endswith(".noxen") else new_project + ".noxen"
             db = ProjectDB(path)
-            try:
-                db.create(new_project)
-                self._startup_messages.append(log_success(f"Created project '{new_project}' at {path}", "project"))
-            except FileExistsError as e:
-                self._startup_messages.append(log_error(str(e), "project"))
+            db.create(new_project)
+            self._startup_messages.append(log_success(f"Created project '{new_project}' at {path}", "project"))
             return db, []
 
         # Auto-create with timestamp

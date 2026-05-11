@@ -11,8 +11,8 @@ from noxen.textual_compat import SELECT_EMPTY
 
 def project_args(path: str) -> SimpleNamespace:
     return SimpleNamespace(
-        project=path,
-        new_project=None,
+        project=None,
+        new_project=path,
     )
 
 

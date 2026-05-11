@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 
 def main():
@@ -20,8 +21,14 @@ def main():
     )
     args = parser.parse_args()
     from noxen.app import NoxenApp
-    NoxenApp(args).run()
+    try:
+        app = NoxenApp(args)
+    except (FileNotFoundError, FileExistsError) as exc:
+        print(f"noxen: {exc}", file=sys.stderr)
+        return 1
+    app.run()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

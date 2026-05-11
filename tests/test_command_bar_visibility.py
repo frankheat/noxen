@@ -10,8 +10,8 @@ from noxen.settings import load_settings, settings_file_path
 
 def project_args_without_device_scan(path: str) -> SimpleNamespace:
     return SimpleNamespace(
-        project=path,
-        new_project=None,
+        project=None,
+        new_project=path,
         skip_device_scan=True,
     )
 
