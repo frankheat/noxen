@@ -32,6 +32,8 @@ then lets you inspect, modify, forward, or drop them from a terminal UI.
 
 ## Quick Start
 
+> **Windows:** [Windows Terminal](https://apps.microsoft.com/detail/9n0dx20hk701) is required. The classic console host (cmd.exe, old PowerShell window) does not support true color or the Unicode characters used by the TUI.
+
 Clone the repository:
 
 ```bash
