@@ -150,7 +150,7 @@ def _render_caller_surface(attack_surface: dict) -> str | None:
     """Surface line for receiving methods — shown near Method/Class."""
     caller_exported = attack_surface.get("callerExported")
     if caller_exported is True:
-        return "[bold]Surface:[/bold]   [#C94A8A]Exported — reachable from other apps[/#C94A8A]"
+        return "[bold]Surface:[/bold]   [#C94A8A]Exported[/#C94A8A]"
     if caller_exported is False:
         return "[bold]Surface:[/bold]   [#26a368]Not exported[/#26a368]"
     return None
@@ -160,7 +160,7 @@ def _render_intent_surface(attack_surface: dict) -> str | None:
     """Surface line for sending methods — shown near the target Component."""
     intent_explicit = attack_surface.get("intentExplicit")
     if intent_explicit is False:
-        return "[bold]Surface:[/bold]   [#C94A8A]Implicit — target resolved by Android[/#C94A8A]"
+        return "[bold]Surface:[/bold]   [#C94A8A]Implicit[/#C94A8A]"
     if intent_explicit is True:
         return "[bold]Surface:[/bold]   [#26a368]Explicit[/#26a368]"
     return None
