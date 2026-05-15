@@ -570,6 +570,7 @@ class NoxenApp(App):
             target = "home_hooks_path" if event.button.id == "home_hooks_clear" else "home_script_path"
             try:
                 self.query_one(f"#{target}", Input).value = ""
+                self._save_home_path(target, "")
             except Exception:
                 pass
             return
@@ -798,13 +799,23 @@ class NoxenApp(App):
 
                         with Horizontal(classes="connect_row"):
                             yield Label("Hook config", classes="connect_label")
-                            yield Input(id="home_hooks_path", placeholder="additional hook definitions (.json)", select_on_focus=False)
+                            yield Input(
+                                id="home_hooks_path",
+                                value=self.db.load_hook_config_path(),
+                                placeholder="additional hook definitions (.json)",
+                                select_on_focus=False,
+                            )
                             yield Button("Browse", id="home_hooks_browse")
                             yield Button("✕", id="home_hooks_clear")
 
                         with Horizontal(classes="connect_row"):
                             yield Label("Extra script", classes="connect_label")
-                            yield Input(id="home_script_path", placeholder="appended Frida agent (.js)", select_on_focus=False)
+                            yield Input(
+                                id="home_script_path",
+                                value=self.db.load_extra_script_path(),
+                                placeholder="appended Frida agent (.js)",
+                                select_on_focus=False,
+                            )
                             yield Button("Browse", id="home_script_browse")
                             yield Button("✕", id="home_script_clear")
 
@@ -952,8 +963,19 @@ class NoxenApp(App):
         if path:
             try:
                 self.query_one(f"#{widget_id}", Input).value = path
+                self._save_home_path(widget_id, path)
             except Exception:
                 pass
+
+    def _save_home_path(self, widget_id: str, path: str) -> None:
+        if widget_id == "home_hooks_path":
+            self.db.save_hook_config_path(path)
+        elif widget_id == "home_script_path":
+            self.db.save_extra_script_path(path)
+
+    def _save_home_paths(self, hooks_path: str, script_path: str) -> None:
+        self.db.save_hook_config_path(hooks_path)
+        self.db.save_extra_script_path(script_path)
 
     def _try_connect(self):
         device_id = self.query_one("#home_device", Select).value
@@ -977,8 +999,11 @@ class NoxenApp(App):
         self._startup_messages.clear()
         self.set_intercept_state(False)
 
-        hooks_path = self.query_one("#home_hooks_path", Input).value.strip() or None
-        script_path = self.query_one("#home_script_path", Input).value.strip() or None
+        hooks_path_raw = self.query_one("#home_hooks_path", Input).value.strip()
+        script_path_raw = self.query_one("#home_script_path", Input).value.strip()
+        self._save_home_paths(hooks_path_raw, script_path_raw)
+        hooks_path = hooks_path_raw or None
+        script_path = script_path_raw or None
         self._init_session(SessionConfig(
             spawn_package=target if mode == "f" else None,
             attach_name=target if mode == "n" else None,

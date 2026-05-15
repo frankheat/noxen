@@ -251,6 +251,30 @@ class ProjectDBTests(unittest.TestCase):
             self.assertEqual(reopened.load_history_filters(), filters)
             reopened.close()
 
+    def test_session_file_paths_roundtrip_through_project_info(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "project.noxen")
+            db = ProjectDB(path)
+            db.create("project")
+            db.save_hook_config_path("/tmp/hooks.json")
+            db.save_extra_script_path("/tmp/extra.js")
+            db.close()
+
+            reopened = ProjectDB(path)
+            reopened.open_existing()
+            self.assertEqual(reopened.load_hook_config_path(), "/tmp/hooks.json")
+            self.assertEqual(reopened.load_extra_script_path(), "/tmp/extra.js")
+
+            reopened.save_hook_config_path("")
+            reopened.save_extra_script_path("")
+            reopened.close()
+
+            cleared = ProjectDB(path)
+            cleared.open_existing()
+            self.assertEqual(cleared.load_hook_config_path(), "")
+            self.assertEqual(cleared.load_extra_script_path(), "")
+            cleared.close()
+
     def test_invalid_project_info_json_falls_back_to_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "project.noxen")

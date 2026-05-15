@@ -59,6 +59,18 @@ class ProjectDB:
             )
             self._conn.commit()
 
+    def get_info(self, key: str, default: str = "") -> str:
+        """Return a metadata value from project_info."""
+        if self._conn is None:
+            return default
+        row = self._conn.execute(
+            "SELECT value FROM project_info WHERE key=?",
+            (key,),
+        ).fetchone()
+        if not row or row[0] is None:
+            return default
+        return str(row[0])
+
     def close(self) -> None:
         if self._conn:
             try:
@@ -227,6 +239,22 @@ class ProjectDB:
     def load_history_filters(self) -> list:
         """Return the saved history filter list, or [] if none."""
         return self._load_json_info("history_filters", [], list)
+
+    def save_hook_config_path(self, path: str) -> None:
+        """Persist the project-specific custom hook config path."""
+        self.set_info("hook_config_path", path)
+
+    def load_hook_config_path(self) -> str:
+        """Return the saved project-specific custom hook config path."""
+        return self.get_info("hook_config_path")
+
+    def save_extra_script_path(self, path: str) -> None:
+        """Persist the project-specific extra script path."""
+        self.set_info("extra_script_path", path)
+
+    def load_extra_script_path(self) -> str:
+        """Return the saved project-specific extra script path."""
+        return self.get_info("extra_script_path")
 
     def _load_json_info(self, key: str, default, expected_type: type):
         if self._conn is None:
