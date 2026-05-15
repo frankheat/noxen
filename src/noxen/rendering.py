@@ -146,23 +146,21 @@ def history_row_values(entry: dict, visible_columns: set[str], columns: list[tup
     return [all_values[key] for key, _label in columns if key in visible_columns]
 
 
-def _render_caller_surface(attack_surface: dict) -> str | None:
-    """Surface line for receiving methods — shown near Method/Class."""
+def _render_caller_surface_label(attack_surface: dict) -> str | None:
     caller_exported = attack_surface.get("callerExported")
     if caller_exported is True:
-        return "[bold]Surface:[/bold]   [#C94A8A]Exported[/#C94A8A]"
+        return "[#C94A8A][Exported][/#C94A8A]"
     if caller_exported is False:
-        return "[bold]Surface:[/bold]   [#26a368]Not exported[/#26a368]"
+        return "[#26a368][Not exported][/#26a368]"
     return None
 
 
-def _render_intent_surface(attack_surface: dict) -> str | None:
-    """Surface line for sending methods — shown near the target Component."""
+def _render_intent_surface_label(attack_surface: dict) -> str | None:
     intent_explicit = attack_surface.get("intentExplicit")
     if intent_explicit is False:
-        return "[bold]Surface:[/bold]   [#C94A8A]Implicit[/#C94A8A]"
+        return "[#C94A8A][Implicit][/#C94A8A]"
     if intent_explicit is True:
-        return "[bold]Surface:[/bold]   [#26a368]Explicit[/#26a368]"
+        return "[#26a368][Explicit][/#26a368]"
     return None
 
 
@@ -195,23 +193,21 @@ def render_intercept_block(payload: dict, intercept_counter: int, show_stack: bo
     pi_flags = decode_pending_intent_flags(payload.get("pendingIntentFlags"))
 
     attack_surface = payload.get("attackSurface") or {}
+    caller_label = _render_caller_surface_label(attack_surface)
+    intent_label = _render_intent_surface_label(attack_surface)
     out.append(f"[bold]Method:[/bold]    {context['method']}")
-    out.append(f"[bold]Class:[/bold]     {context['class']}")
-
-    caller_line = _render_caller_surface(attack_surface)
-    if caller_line:
-        out.append(caller_line)
+    class_label = f"  {caller_label}" if caller_label else ""
+    out.append(f"[bold]Class:[/bold]     {context['class']}{class_label}")
 
     if pi_flags is not None:
         flags_str = " | ".join(pi_flags) if pi_flags else "(none)"
         color = _pending_intent_flag_color(pi_flags)
         out.append(f"[bold]PI Flags:[/bold]  [{color}]{flags_str}[/{color}]")
 
+    if intent_label:
+        out.append(f"[bold]Intent:[/bold]    {intent_label}")
     if context["component"]:
         out.append(f"[bold]Component:[/bold] [secondary]{context['component']}[/secondary]")
-    intent_line = _render_intent_surface(attack_surface)
-    if intent_line:
-        out.append(intent_line)
     if context["action"]:
         out.append(f"[bold]Action:[/bold]    {context['action']}")
     if context["data"]:
@@ -265,25 +261,26 @@ def render_intent_detail(entry: dict, show_stack: bool = False, stack_depth: int
     )
     out.append(sep)
 
-    out.append(f"  [bold]Method[/bold]     {_markup(entry.get('method'))}")
-    out.append(f"  [bold]Class[/bold]      [dim]{_markup(entry.get('class'))}[/dim]")
-
     attack_surface = entry.get("attackSurface") or {}
-    caller_line = _render_caller_surface(attack_surface)
-    if caller_line:
-        out.append(f"  {caller_line}")
+    caller_label = _render_caller_surface_label(attack_surface)
+    intent_label = _render_intent_surface_label(attack_surface)
 
-    has_intent = any(info.get(key) for key in ("action", "component", "data", "flags", "categories"))
+    out.append(f"  [bold]Method[/bold]     {_markup(entry.get('method'))}")
+    class_label = f"  {caller_label}" if caller_label else ""
+    out.append(f"  [bold]Class[/bold]      [dim]{_markup(entry.get('class'))}[/dim]{class_label}")
+
+    has_intent = (
+        any(info.get(key) for key in ("action", "component", "data", "flags", "categories")) or
+        intent_label is not None
+    )
     if has_intent:
         out.append("")
-        out.append("  [bold dim]INTENT[/bold dim]")
+        intent_title = f"  [bold dim]INTENT[/bold dim]  {intent_label}" if intent_label else "  [bold dim]INTENT[/bold dim]"
+        out.append(intent_title)
         if info.get("action"):
             out.append(f"  [bold]Action[/bold]     {_markup(info.get('action'))}")
         if info.get("component"):
             out.append(f"  [bold]Component[/bold]  {_markup(info.get('component'))}")
-        intent_line = _render_intent_surface(attack_surface)
-        if intent_line:
-            out.append(f"  {intent_line}")
         if info.get("data"):
             out.append(f"  [bold]Data[/bold]       {_markup(info.get('data'))}")
         if info.get("flags"):

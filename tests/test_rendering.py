@@ -253,6 +253,21 @@ class RenderingTests(unittest.TestCase):
         Text.from_markup(rendered)
         self.assertIn("\\[/system/lib64", rendered)
 
+    def test_render_intercept_block_shows_surface_labels_inline(self):
+        payload = {
+            "className": "com.example.MainActivity",
+            "methodName": "startActivity",
+            "stackTrace": [],
+            "attackSurface": {"callerExported": True, "intentExplicit": False},
+            "infoIntent": {"action": "android.intent.action.VIEW"},
+        }
+
+        rendered = render_intercept_block(payload, 1, show_stack=False, stack_depth=1)
+
+        self.assertIn("[bold]Class:[/bold]     com.example.MainActivity  [#C94A8A][Exported][/#C94A8A]", rendered)
+        self.assertIn("[bold]Intent:[/bold]    [#C94A8A][Implicit][/#C94A8A]", rendered)
+        self.assertNotIn("Surface:", rendered)
+
     def test_render_intent_detail_includes_changes(self):
         entry = {
             "id": 3,
@@ -323,6 +338,23 @@ class RenderingTests(unittest.TestCase):
 
         Text.from_markup(rendered)
         self.assertIn("\\[/system/lib64", rendered)
+
+    def test_render_intent_detail_shows_surface_labels_inline(self):
+        entry = {
+            "id": 10,
+            "timestamp": "2026-04-27T12:34:56+00:00",
+            "class": "com.example.MainActivity",
+            "method": "getIntent",
+            "intent": {},
+            "attackSurface": {"callerExported": False, "intentExplicit": True},
+            "stackTrace": [],
+        }
+
+        rendered = render_intent_detail(entry, show_stack=False, stack_depth=1)
+
+        self.assertIn("[bold]Class[/bold]      [dim]com.example.MainActivity[/dim]  [#26a368][Not exported][/#26a368]", rendered)
+        self.assertIn("[bold dim]INTENT[/bold dim]  [#26a368][Explicit][/#26a368]", rendered)
+        self.assertNotIn("Surface:", rendered)
 
 
 if __name__ == "__main__":
