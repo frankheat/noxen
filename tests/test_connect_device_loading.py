@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from noxen.app import NoxenApp
+from noxen.frida_devices import enumerate_preferred_devices
 from noxen.textual_compat import SELECT_EMPTY
 
 
@@ -31,6 +32,20 @@ class FakeSelect:
 
     def set_options(self, options):
         self.options = options
+
+
+class FakeDeviceManager:
+    def __init__(self, devices, usb_device=None):
+        self._devices = devices
+        self._usb_device = usb_device
+
+    def enumerate_devices(self):
+        return self._devices
+
+    def get_usb_device(self, timeout=0):
+        if self._usb_device is None:
+            raise Exception("no usb device")
+        return self._usb_device
 
 
 class ConnectDeviceLoadingTests(unittest.IsolatedAsyncioTestCase):
@@ -154,6 +169,17 @@ class ConnectDeviceLoadingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(select.value, SELECT_EMPTY)
         self.assertEqual(fake_app._home_devices, [])
+
+    def test_device_scan_waits_for_usb_device_when_initial_list_is_stale(self):
+        socket_device = SimpleNamespace(name="Local Socket", type="remote", id="socket")
+        usb_device = SimpleNamespace(name="Android Emulator", type="usb", id="emulator-5554")
+        fake_frida = SimpleNamespace(
+            get_device_manager=lambda: FakeDeviceManager([socket_device], usb_device=usb_device),
+        )
+
+        devices = enumerate_preferred_devices(fake_frida, usb_timeout=1)
+
+        self.assertEqual(devices, [socket_device, usb_device])
 
 
 if __name__ == "__main__":

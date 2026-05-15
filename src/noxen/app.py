@@ -43,7 +43,7 @@ from noxen.exporting import (
     write_history_export,
 )
 from noxen.filters import FilterManager
-from noxen.frida_devices import prefer_non_local_devices
+from noxen.frida_devices import enumerate_preferred_devices
 from noxen.frida_session import FridaSession, SessionConfig
 from noxen.intent_mods import (
     JAVA_TYPE_TO_SIMPLE,
@@ -1100,7 +1100,7 @@ class NoxenApp(App):
     def _populate_home_devices_worker(self, generation: int):
         try:
             import frida
-            candidates = prefer_non_local_devices(frida.enumerate_devices())
+            candidates = enumerate_preferred_devices(frida)
             options = [(f"{d.name}  ({d.type})", d.id) for d in candidates]
 
             def _update():
