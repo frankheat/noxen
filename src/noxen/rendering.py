@@ -14,6 +14,44 @@ PENDING_INTENT_FLAGS = [
     (0x01000000, "FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT"),
 ]
 
+# Values from AOSP android.content.Intent.java. Some bits intentionally have
+# multiple names because Android reuses them for activity, broadcast, or hidden
+# framework contexts.
+INTENT_FLAGS = [
+    (0x00000001, ["FLAG_GRANT_READ_URI_PERMISSION"]),
+    (0x00000002, ["FLAG_GRANT_WRITE_URI_PERMISSION"]),
+    (0x00000004, ["FLAG_FROM_BACKGROUND"]),
+    (0x00000008, ["FLAG_DEBUG_LOG_RESOLUTION"]),
+    (0x00000010, ["FLAG_EXCLUDE_STOPPED_PACKAGES"]),
+    (0x00000020, ["FLAG_INCLUDE_STOPPED_PACKAGES"]),
+    (0x00000040, ["FLAG_GRANT_PERSISTABLE_URI_PERMISSION"]),
+    (0x00000080, ["FLAG_GRANT_PREFIX_URI_PERMISSION"]),
+    (0x00000100, ["FLAG_DIRECT_BOOT_AUTO", "FLAG_DEBUG_TRIAGED_MISSING"]),
+    (0x00000200, ["FLAG_ACTIVITY_REQUIRE_DEFAULT"]),
+    (0x00000400, ["FLAG_ACTIVITY_REQUIRE_NON_BROWSER"]),
+    (0x00000800, ["FLAG_ACTIVITY_MATCH_EXTERNAL", "FLAG_RECEIVER_OFFLOAD_FOREGROUND"]),
+    (0x00001000, ["FLAG_ACTIVITY_LAUNCH_ADJACENT"]),
+    (0x00002000, ["FLAG_ACTIVITY_RETAIN_IN_RECENTS"]),
+    (0x00004000, ["FLAG_ACTIVITY_TASK_ON_HOME"]),
+    (0x00008000, ["FLAG_ACTIVITY_CLEAR_TASK"]),
+    (0x00010000, ["FLAG_ACTIVITY_NO_ANIMATION"]),
+    (0x00020000, ["FLAG_ACTIVITY_REORDER_TO_FRONT"]),
+    (0x00040000, ["FLAG_ACTIVITY_NO_USER_ACTION"]),
+    (0x00080000, ["FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET", "FLAG_ACTIVITY_NEW_DOCUMENT"]),
+    (0x00100000, ["FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY"]),
+    (0x00200000, ["FLAG_ACTIVITY_RESET_TASK_IF_NEEDED", "FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS"]),
+    (0x00400000, ["FLAG_ACTIVITY_BROUGHT_TO_FRONT", "FLAG_RECEIVER_FROM_SHELL"]),
+    (0x00800000, ["FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS", "FLAG_RECEIVER_EXCLUDE_BACKGROUND"]),
+    (0x01000000, ["FLAG_ACTIVITY_PREVIOUS_IS_TOP", "FLAG_RECEIVER_INCLUDE_BACKGROUND"]),
+    (0x02000000, ["FLAG_ACTIVITY_FORWARD_RESULT", "FLAG_RECEIVER_BOOT_UPGRADE"]),
+    (0x04000000, ["FLAG_ACTIVITY_CLEAR_TOP", "FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT"]),
+    (0x08000000, ["FLAG_ACTIVITY_MULTIPLE_TASK", "FLAG_RECEIVER_NO_ABORT"]),
+    (0x10000000, ["FLAG_ACTIVITY_NEW_TASK", "FLAG_RECEIVER_FOREGROUND"]),
+    (0x20000000, ["FLAG_ACTIVITY_SINGLE_TOP", "FLAG_RECEIVER_REPLACE_PENDING"]),
+    (0x40000000, ["FLAG_ACTIVITY_NO_HISTORY", "FLAG_RECEIVER_REGISTERED_ONLY"]),
+    (0x80000000, ["FLAG_IGNORE_EPHEMERAL", "FLAG_RECEIVER_OFFLOAD"]),
+]
+
 HISTORY_OUTCOME_CELL = {
     "forwarded":          Text("→",  style="bold #26a368"),
     "modified_forwarded": Text("✎→", style="bold #26a368"),
@@ -25,6 +63,25 @@ def decode_pending_intent_flags(raw_flags):
     if raw_flags is None:
         return None
     return [name for mask, name in PENDING_INTENT_FLAGS if raw_flags & mask]
+
+
+def decode_intent_flags(raw_flags):
+    flags = _parse_flag_int(raw_flags)
+    if flags is None:
+        return None
+
+    normalized_flags = flags & 0xFFFFFFFF
+    decoded = []
+    known_mask = 0
+    for mask, names in INTENT_FLAGS:
+        known_mask |= mask
+        if normalized_flags & mask:
+            decoded.append(" / ".join(names))
+
+    unknown_bits = normalized_flags & ~known_mask
+    if unknown_bits:
+        decoded.append(f"UNKNOWN_BITS(0x{unknown_bits:08X})")
+    return decoded
 
 
 def entry_to_filter_context(entry: dict) -> dict:
@@ -176,6 +233,30 @@ def _markup(value) -> str:
     return "" if value is None else escape(str(value))
 
 
+def _parse_flag_int(raw_flags):
+    if raw_flags is None or raw_flags == "":
+        return None
+    try:
+        if isinstance(raw_flags, str):
+            return int(raw_flags.strip(), 0)
+        return int(raw_flags)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_intent_flags(raw_flags) -> str:
+    flags = _parse_flag_int(raw_flags)
+    if flags is None:
+        return _markup(raw_flags)
+
+    normalized_flags = flags & 0xFFFFFFFF
+    decoded = decode_intent_flags(flags)
+    hex_value = f"0x{normalized_flags:08X}"
+    if not decoded:
+        return hex_value
+    return f"{hex_value}  [#F2C94C]{_markup(' | '.join(decoded))}[/#F2C94C]"
+
+
 def render_intercept_block(payload: dict, intercept_counter: int, show_stack: bool, stack_depth: int) -> str:
     info = payload.get("infoIntent", {}) or {}
     context = {
@@ -213,7 +294,7 @@ def render_intercept_block(payload: dict, intercept_counter: int, show_stack: bo
     if context["data"]:
         out.append(f"[bold]Data:[/bold]      {context['data']}")
     if info.get("flags"):
-        out.append(f"[bold]Flags:[/bold]     {_markup(info.get('flags'))}")
+        out.append(f"[bold]Flags:[/bold]     {_format_intent_flags(info.get('flags'))}")
 
     if info.get("categories"):
         out.append(f"[bold]Categories:[/bold] {', '.join(_markup(category) for category in info['categories'])}")
@@ -284,7 +365,7 @@ def render_intent_detail(entry: dict, show_stack: bool = False, stack_depth: int
         if info.get("data"):
             out.append(f"  [bold]Data[/bold]       {_markup(info.get('data'))}")
         if info.get("flags"):
-            out.append(f"  [bold]Flags[/bold]      {_markup(info.get('flags'))}")
+            out.append(f"  [bold]Flags[/bold]      {_format_intent_flags(info.get('flags'))}")
         if info.get("categories"):
             for category in info["categories"]:
                 out.append(f"  [bold]Category[/bold]   {_markup(category)}")

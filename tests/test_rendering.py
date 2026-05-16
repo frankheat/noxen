@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from rich.text import Text
 
 from noxen.rendering import (
+    decode_intent_flags,
     decode_pending_intent_flags,
     entry_to_filter_context,
     filter_sort_history_entries,
@@ -208,6 +209,18 @@ class RenderingTests(unittest.TestCase):
         )
         self.assertIsNone(decode_pending_intent_flags(None))
 
+    def test_decode_intent_flags_includes_combinations_aliases_and_signed_values(self):
+        flags = 0x10000000 | 0x04000000
+        self.assertEqual(
+            decode_intent_flags(flags),
+            [
+                "FLAG_ACTIVITY_CLEAR_TOP / FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT",
+                "FLAG_ACTIVITY_NEW_TASK / FLAG_RECEIVER_FOREGROUND",
+            ],
+        )
+        self.assertIn("FLAG_IGNORE_EPHEMERAL / FLAG_RECEIVER_OFFLOAD", decode_intent_flags(-2147483648))
+        self.assertEqual(decode_intent_flags(None), None)
+
     def test_render_intercept_block_includes_stack_limit(self):
         payload = {
             "className": "com.example.MainActivity",
@@ -229,6 +242,8 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("INTERCEPTED", rendered)
         self.assertIn("#7", rendered)
         self.assertIn("[#FFB1B1]FLAG_MUTABLE[/#FFB1B1]", rendered)
+        self.assertIn("0x00000001", rendered)
+        self.assertIn("FLAG_GRANT_READ_URI_PERMISSION", rendered)
         self.assertIn("frame1", rendered)
         self.assertIn("frame2", rendered)
         self.assertIn("... (+1 more)", rendered)
@@ -280,6 +295,7 @@ class RenderingTests(unittest.TestCase):
                 "action": "new.action",
                 "component": "com.example/.Target",
                 "data": "https://new.example",
+                "flags": 0x10000000,
                 "categories": ["new.category"],
                 "extras": {
                     "changed": {"type": "string", "value": "new"},
@@ -309,6 +325,7 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("removed", rendered)
         self.assertIn("added", rendered)
         self.assertIn("FLAG_IMMUTABLE", rendered)
+        self.assertIn("FLAG_ACTIVITY_NEW_TASK", rendered)
         self.assertIn("frame1", rendered)
         self.assertIn("... (+1 more)", rendered)
 
