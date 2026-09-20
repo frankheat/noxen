@@ -13645,7 +13645,104 @@ std_string_c_str (StdString * self)
     "onStartCommand": true,
     "onBind": true
   };
-  function buildAttackSurface(methodName, intent, self, firstArg) {
+  var SENDING_TARGET_TYPE = {
+    "startActivity": "activity",
+    "startActivityForResult": "activity",
+    "getActivity": "activity",
+    "startService": "service",
+    "startForegroundService": "service",
+    "bindService": "service",
+    "getService": "service",
+    "sendBroadcast": "receiver",
+    "sendOrderedBroadcast": "receiver",
+    "getBroadcast": "receiver"
+  };
+  var PROTECTION_LEVELS = {
+    0: "normal",
+    1: "dangerous",
+    2: "signature",
+    3: "signatureOrSystem",
+    4: "internal"
+  };
+  function describePermission(pm, permName) {
+    if (!permName) return null;
+    var level = "unknown";
+    try {
+      level = PROTECTION_LEVELS[pm.getPermissionInfo(permName, 0).protectionLevel.value & 15] || "unknown";
+    } catch (e) {
+    }
+    return { name: String(permName), level };
+  }
+  function effectiveComponentPermission(componentInfo) {
+    try {
+      var own = componentInfo.permission.value;
+      if (own) return String(own);
+    } catch (e) {
+    }
+    try {
+      var appPerm = componentInfo.applicationInfo.value.permission.value;
+      if (appPerm) return String(appPerm);
+    } catch (e) {
+    }
+    return null;
+  }
+  function getPackageManagerSafe(context) {
+    try {
+      if (context && context.getPackageManager) return context.getPackageManager();
+    } catch (e) {
+    }
+    try {
+      var app = Java.use("android.app.ActivityThread").currentApplication();
+      if (app) return app.getPackageManager();
+    } catch (e) {
+    }
+    return null;
+  }
+  function componentInfoFor(pm, targetType, cn) {
+    if (targetType === "service") return pm.getServiceInfo(cn, 0);
+    if (targetType === "receiver") return pm.getReceiverInfo(cn, 0);
+    return pm.getActivityInfo(cn, 0);
+  }
+  function fillTargetFromInfo(result, info, pm) {
+    result.targetExported = info.exported.value;
+    result.targetPermission = describePermission(pm, effectiveComponentPermission(info));
+  }
+  function resolveSendTarget(pm, targetType, intent, result) {
+    var cn = intent.getComponent();
+    if (cn !== null) {
+      result.targetComponent = cn.getPackageName() + "/" + cn.getClassName();
+      try {
+        fillTargetFromInfo(result, componentInfoFor(pm, targetType, cn), pm);
+      } catch (e) {
+        result.targetUnreadable = true;
+      }
+      return;
+    }
+    try {
+      if (targetType === "activity") {
+        var ria = pm.resolveActivity(intent, 0);
+        if (ria !== null) fillTargetFromResolveInfo(result, ria, "activityInfo", pm);
+      } else if (targetType === "service") {
+        var ris = pm.resolveService(intent, 0);
+        if (ris !== null) fillTargetFromResolveInfo(result, ris, "serviceInfo", pm);
+      } else {
+        var list = pm.queryBroadcastReceivers(intent, 0);
+        if (list !== null && list.size() === 1) {
+          fillTargetFromResolveInfo(result, list.get(0), "activityInfo", pm);
+        } else if (list !== null && list.size() > 1) {
+          result.targetReceiverCount = list.size();
+        }
+      }
+    } catch (e) {
+    }
+  }
+  function fillTargetFromResolveInfo(result, resolveInfo, infoField, pm) {
+    var info = resolveInfo[infoField].value;
+    result.targetComponent = info.packageName.value + "/" + info.name.value;
+    result.targetResolved = true;
+    fillTargetFromInfo(result, info, pm);
+  }
+  function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) {
     var result = {};
     try {
       if (RECEIVING_METHODS[methodName]) {
@@ -13655,17 +13752,25 @@ std_string_c_str (StdString * self)
         var runtimeClass = self.$className;
         var ComponentName = Java.use("android.content.ComponentName");
         var cn = ComponentName.$new(pkgName, runtimeClass);
-        var exported;
+        var info;
         if (methodName === "onReceive") {
-          exported = pm.getReceiverInfo(cn, 0).exported.value;
+          info = pm.getReceiverInfo(cn, 0);
         } else if (methodName === "onStartCommand" || methodName === "onBind") {
-          exported = pm.getServiceInfo(cn, 0).exported.value;
+          info = pm.getServiceInfo(cn, 0);
         } else {
-          exported = pm.getActivityInfo(cn, 0).exported.value;
+          info = pm.getActivityInfo(cn, 0);
         }
-        result.callerExported = exported;
+        result.callerExported = info.exported.value;
+        result.callerPermission = describePermission(pm, effectiveComponentPermission(info));
       } else if (intent !== null) {
         result.intentExplicit = intent.getComponent() !== null;
+        var targetType = SENDING_TARGET_TYPE[methodName];
+        var sendContext = self && self.getPackageManager ? self : firstArg;
+        var sendPm = getPackageManagerSafe(sendContext);
+        if (sendPm && targetType) {
+          resolveSendTarget(sendPm, targetType, intent, result);
+          if (sendPermission) result.broadcastPermission = describePermission(sendPm, sendPermission);
+        }
       }
     } catch (e) {
     }
@@ -13747,11 +13852,15 @@ std_string_c_str (StdString * self)
     const method = targetWrapper[methodName].overload.apply(targetWrapper[methodName], overloadArgs);
     const returnType = returnTypeName(method);
     const isPendingIntent = className === "android.app.PendingIntent";
+    let broadcastPermIndex = -1;
+    if (methodName === "sendBroadcast" || methodName === "sendOrderedBroadcast") {
+      broadcastPermIndex = overloadArgs.indexOf("java.lang.String");
+    }
     method.implementation = function() {
       var firstArg = arguments.length > 0 ? arguments[0] : null;
       if (methodName === "getIntent") {
         var resultIntent = method.apply(this, arguments);
-        var as = buildAttackSurface(methodName, resultIntent, this, null);
+        var as = buildAttackSurface(methodName, resultIntent, this, null, null);
         var shouldDrop = processIntercept(this.$className, methodName, resultIntent, null, as);
         if (shouldDrop) return null;
         return resultIntent;
@@ -13769,7 +13878,12 @@ std_string_c_str (StdString * self)
           }
         }
       }
-      var as = buildAttackSurface(methodName, intent, this, firstArg);
+      var sendPermission = null;
+      if (broadcastPermIndex >= 0 && arguments.length > broadcastPermIndex) {
+        var permArg = arguments[broadcastPermIndex];
+        if (permArg) sendPermission = String(permArg);
+      }
+      var as = buildAttackSurface(methodName, intent, this, firstArg, sendPermission);
       var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as);
       if (shouldDrop) return defaultReturn(returnType);
       try {

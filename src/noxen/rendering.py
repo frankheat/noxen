@@ -203,30 +203,162 @@ def history_row_values(entry: dict, visible_columns: set[str], columns: list[tup
     return [all_values[key] for key, _label in columns if key in visible_columns]
 
 
-def _render_caller_surface_label(attack_surface: dict) -> str | None:
-    caller_exported = attack_surface.get("callerExported")
-    if caller_exported is True:
-        return "[#C94A8A][Exported][/#C94A8A]"
-    if caller_exported is False:
-        return "[#26a368][Not exported][/#26a368]"
-    return None
+_LABEL_WIDTH = 13          # fixed label column so ":" aligns across every event
+_CHILD_WIDTH = 19          # tree child column ("Required Permission")
+_TREE_INDENT = " " * 18    # tree hangs under the parent's value column
+
+_OUTCOME_LABEL = {
+    "forwarded": "FORWARDED",
+    "modified_forwarded": "MODIFIED",
+    "dropped": "DROPPED",
+}
 
 
-def _render_intent_surface_label(attack_surface: dict) -> str | None:
-    intent_explicit = attack_surface.get("intentExplicit")
-    if intent_explicit is False:
-        return "[#C94A8A][Implicit][/#C94A8A]"
-    if intent_explicit is True:
-        return "[#26a368][Explicit][/#26a368]"
-    return None
+def _section(title: str) -> str:
+    """A `[SECTION]` header (brackets escaped so Rich renders them literally)."""
+    return f"[bold]\\[{title}][/bold]"
 
 
-def _pending_intent_flag_color(flags: list[str]) -> str:
-    if "FLAG_MUTABLE" in flags:
-        return "#FFB1B1"
-    if "FLAG_IMMUTABLE" in flags:
-        return "#26a368"
-    return "#F2C94C"
+def _row(label: str, value: str) -> str:
+    """An aligned `  label : value` row on the fixed label column."""
+    return f"  {label:<{_LABEL_WIDTH}} : {value}"
+
+
+def _format_permission(perm: dict | None) -> str | None:
+    """`name (level)` for a {name, level} permission, or None when absent."""
+    if not perm:
+        return None
+    name = _markup(perm.get("name"))
+    if not name:
+        return None
+    level = perm.get("level")
+    return f"{name} ({_markup(level)})" if level else name
+
+
+def _subject_tree(exported, permission: dict | None) -> list[str]:
+    """Tree lines for a component's Exported flag and optional Required Permission.
+
+    The permission line is omitted when the component has none, leaving only Exported.
+    """
+    children = []
+    if exported is not None:
+        children.append(("Exported", "true" if exported else "false"))
+    formatted = _format_permission(permission)
+    if formatted:
+        children.append(("Required Permission", formatted))
+    lines = []
+    for index, (label, value) in enumerate(children):
+        branch = "└─" if index == len(children) - 1 else "├─"
+        lines.append(f"{_TREE_INDENT}{branch} {label:<{_CHILD_WIDTH}} : {value}")
+    return lines
+
+
+def _simple_type(java_type) -> str:
+    """Compact type name for the EXTRAS table: `java.lang.String` -> `String`."""
+    if not java_type:
+        return "?"
+    return str(java_type).rsplit(".", 1)[-1].split("$", 1)[0]
+
+
+def _format_pending_flags(raw_flags) -> str | None:
+    """`0x...  [NAME | NAME]` for PendingIntent flags, or None when not applicable."""
+    names = decode_pending_intent_flags(raw_flags)
+    if names is None:
+        return None
+    hex_value = f"0x{int(raw_flags) & 0xFFFFFFFF:08X}"
+    if not names:
+        return f"{hex_value}  (none)"
+    return f"{hex_value}  \\[{_markup(' | '.join(names))}]"
+
+
+def _target_lines(attack_surface: dict) -> list[str]:
+    """The `Target` row (+ its exported/permission tree) for a sending event."""
+    component = attack_surface.get("targetComponent")
+    if component and attack_surface.get("targetUnreadable"):
+        return [_row("Target", f"{_markup(component)} (couldn't read — not visible)")]
+    if component:
+        suffix = " (resolved)" if attack_surface.get("targetResolved") else ""
+        lines = [_row("Target", f"{_markup(component)}{suffix}")]
+        lines += _subject_tree(attack_surface.get("targetExported"), attack_surface.get("targetPermission"))
+        return lines
+    if attack_surface.get("targetReceiverCount"):
+        return [_row("Target", f"(resolved) {attack_surface['targetReceiverCount']} receivers")]
+    return [_row("Target", "(unresolved)")]
+
+
+def _hook_caller_lines(class_name, method, attack_surface: dict) -> list[str]:
+    lines = [_row("Class", _markup(class_name))]
+    # Receiving methods: the exposed component is the caller, so its tree hangs here.
+    if "callerExported" in attack_surface:
+        lines += _subject_tree(attack_surface.get("callerExported"), attack_surface.get("callerPermission"))
+    lines.append(_row("Method", f"{_markup(method)}()"))
+    return lines
+
+
+def _payload_lines(info: dict, attack_surface: dict) -> list[str]:
+    lines = []
+    # Type + Target only apply to sending methods.
+    if "intentExplicit" in attack_surface:
+        lines.append(_row("Type", "EXPLICIT" if attack_surface.get("intentExplicit") else "IMPLICIT"))
+        lines += _target_lines(attack_surface)
+        enforced = _format_permission(attack_surface.get("broadcastPermission"))
+        if enforced:
+            lines.append(_row("Enforced Perm", enforced))
+    lines.append(_row("Action", _markup(info.get("action")) if info.get("action") else "None"))
+    lines.append(_row("Data (URI)", _markup(info.get("data")) if info.get("data") else "None"))
+    lines.append(_row("Flags", _format_intent_flags(info.get("flags") or 0)))
+    for category in info.get("categories") or []:
+        lines.append(_row("Category", _markup(category)))
+    return lines
+
+
+def _extras_lines(extras: dict) -> list[str]:
+    if not extras:
+        return []
+    rows = []
+    for key, value in extras.items():
+        value = value or {}
+        simple = _simple_type(value.get("type"))
+        raw = value.get("value")
+        shown = f'"{_markup(raw)}"' if simple == "String" and raw is not None else _markup(raw)
+        rows.append((_markup(key), simple, shown))
+    key_w = max([len("KEY")] + [len(k) for k, _, _ in rows])
+    type_w = max([len("TYPE")] + [len(t) for _, t, _ in rows])
+    value_w = min(max([len("VALUE")] + [len(v) for _, _, v in rows]), 50)
+    lines = [f"{_section('EXTRAS')} ({len(extras)})"]
+    lines.append(f"  {'KEY':<{key_w}}   {'TYPE':<{type_w}}   VALUE")
+    lines.append("  " + "-" * (key_w + type_w + value_w + 6))
+    for key, simple, shown in rows:
+        lines.append(f"  {key:<{key_w}}   {simple:<{type_w}}   {shown}")
+    return lines
+
+
+def _stack_lines(trace: list, stack_depth: int, show_empty: bool = False) -> list[str]:
+    if not trace:
+        return ["", _section("STACK TRACE"), "  [dim]No stack trace captured.[/dim]"] if show_empty else []
+    lines = ["", _section("STACK TRACE")]
+    for line in trace[:stack_depth]:
+        lines.append(f"  [dim]{_markup(line)}[/dim]")
+    if len(trace) > stack_depth:
+        lines.append(f"  [dim]... (+{len(trace) - stack_depth} more)[/dim]")
+    return lines
+
+
+def _event_body(class_name, method, info: dict, attack_surface: dict, pending_flags_raw) -> list[str]:
+    """The shared section stack: caller context, payload, pending intent, extras."""
+    out = [_section("HOOK")]
+    out += _hook_caller_lines(class_name, method, attack_surface)
+    out.append("")
+    out.append(_section("CAPTURED INTENT PAYLOAD"))
+    out += _payload_lines(info, attack_surface)
+    pending = _format_pending_flags(pending_flags_raw)
+    if pending is not None:
+        out += ["", _section("PENDING INTENT"), _row("Flags", pending)]
+    extras = _extras_lines(info.get("extras") or {})
+    if extras:
+        out.append("")
+        out += extras
+    return out
 
 
 def _markup(value) -> str:
@@ -254,224 +386,106 @@ def _format_intent_flags(raw_flags) -> str:
     hex_value = f"0x{normalized_flags:08X}"
     if not decoded:
         return hex_value
-    return f"{hex_value}  [#F2C94C]{_markup(' | '.join(decoded))}[/#F2C94C]"
+    return f"{hex_value}  \\[{_markup(' | '.join(decoded))}]"
+
+
+def _changes_lines(original: dict, info: dict) -> list[str]:
+    """The [CHANGES] diff for a modified-then-forwarded intent (History detail)."""
+    out = ["", _section("CHANGES")]
+    has_changes = False
+
+    orig_action = original.get("action") or ""
+    mod_action = info.get("action") or ""
+    if orig_action != mod_action:
+        has_changes = True
+        out.append(_row("Action", f"[dim]{_markup(orig_action or '(none)')}[/dim] → {_markup(mod_action or '(none)')}"))
+
+    orig_data = original.get("data") or ""
+    mod_data = info.get("data") or ""
+    if orig_data != mod_data:
+        has_changes = True
+        out.append(_row("Data (URI)", f"[dim]{_markup(orig_data or '(none)')}[/dim] → {_markup(mod_data or '(none)')}"))
+
+    orig_categories = list(original.get("categories") or [])
+    mod_categories = list(info.get("categories") or [])
+    removed_categories = [c for c in orig_categories if c not in mod_categories]
+    added_categories = [c for c in mod_categories if c not in orig_categories]
+    if removed_categories or added_categories:
+        has_changes = True
+        out += ["", _section("CATEGORIES")]
+        for category in removed_categories:
+            out.append(f"  \\[-] [dim]{_markup(category)}[/dim]")
+        for category in added_categories:
+            out.append(f"  \\[+] {_markup(category)}")
+
+    orig_extras = original.get("extras") or {}
+    mod_extras = info.get("extras") or {}
+    removed_keys = [k for k in orig_extras if k not in mod_extras]
+    added_keys = [k for k in mod_extras if k not in orig_extras]
+    changed_keys = [
+        k for k in orig_extras
+        if k in mod_extras and str(orig_extras[k].get("value", "")) != str(mod_extras[k].get("value", ""))
+    ]
+    if removed_keys or added_keys or changed_keys:
+        has_changes = True
+        out += ["", _section("EXTRAS")]
+        for key in changed_keys:
+            old_value, new_value = orig_extras[key], mod_extras[key]
+            out.append(
+                f"  \\[~] [bold]{_markup(key)}[/bold]  [dim]({_simple_type(old_value.get('type'))})[/dim]  "
+                f"[dim]{_markup(old_value.get('value'))}[/dim] → {_markup(new_value.get('value'))}"
+            )
+        for key in removed_keys:
+            value = orig_extras[key]
+            out.append(
+                f"  \\[-] [bold]{_markup(key)}[/bold]  [dim]({_simple_type(value.get('type'))})[/dim]  "
+                f"[dim]{_markup(value.get('value'))}[/dim]"
+            )
+        for key in added_keys:
+            value = mod_extras[key]
+            out.append(f"  \\[+] [bold]{_markup(key)}[/bold]  [dim]({_simple_type(value.get('type'))})[/dim]  {_markup(value.get('value'))}")
+
+    if not has_changes:
+        out.append("  [dim](forwarded without changes)[/dim]")
+    return out
 
 
 def render_intercept_block(payload: dict, intercept_counter: int, show_stack: bool, stack_depth: int) -> str:
     info = payload.get("infoIntent", {}) or {}
-    context = {
-        "class": _markup(payload.get("className")),
-        "method": _markup(payload.get("methodName")),
-        "action": _markup(info.get("action")),
-        "component": _markup(info.get("component")),
-        "data": _markup(info.get("data")),
-    }
-
-    out = []
-    out.append("[bold #F2C94C]" + "━" * 50 + "[/bold #F2C94C]")
-    out.append(f"[bold #F2C94C]  INTERCEPTED[/bold #F2C94C] [#F2C94C]#{intercept_counter}[/#F2C94C]")
-
-    pi_flags = decode_pending_intent_flags(payload.get("pendingIntentFlags"))
-
     attack_surface = payload.get("attackSurface") or {}
-    caller_label = _render_caller_surface_label(attack_surface)
-    intent_label = _render_intent_surface_label(attack_surface)
-    out.append(f"[bold]Method:[/bold]    {context['method']}")
-    class_label = f"  {caller_label}" if caller_label else ""
-    out.append(f"[bold]Class:[/bold]     {context['class']}{class_label}")
 
-    if pi_flags is not None:
-        flags_str = " | ".join(pi_flags) if pi_flags else "(none)"
-        color = _pending_intent_flag_color(pi_flags)
-        out.append(f"[bold]PI Flags:[/bold]  [{color}]{flags_str}[/{color}]")
-
-    if intent_label:
-        out.append(f"[bold]Intent:[/bold]    {intent_label}")
-    if context["component"]:
-        out.append(f"[bold]Component:[/bold] [secondary]{context['component']}[/secondary]")
-    if context["action"]:
-        out.append(f"[bold]Action:[/bold]    {context['action']}")
-    if context["data"]:
-        out.append(f"[bold]Data:[/bold]      {context['data']}")
-    if info.get("flags"):
-        out.append(f"[bold]Flags:[/bold]     {_format_intent_flags(info.get('flags'))}")
-
-    if info.get("categories"):
-        out.append(f"[bold]Categories:[/bold] {', '.join(_markup(category) for category in info['categories'])}")
-
-    if info.get("extras"):
-        out.append("[bold]Extras:[/bold]")
-        for key, value in info["extras"].items():
-            out.append(f"  - {_markup(key)} ({_markup(value.get('type'))}): {_markup(value.get('value'))}")
-
+    out = [
+        "[bold #F2C94C]" + "━" * 50 + "[/bold #F2C94C]",
+        f"[bold]INTERCEPTED #{intercept_counter}[/bold]",
+        "",
+    ]
+    out += _event_body(
+        payload.get("className"), payload.get("methodName"), info, attack_surface, payload.get("pendingIntentFlags")
+    )
     if show_stack:
-        trace = payload.get("stackTrace", [])
-        if trace:
-            out.append("\n[bold]Stack Trace:[/bold]")
-            for line in trace[:stack_depth]:
-                out.append(f"  {_markup(line)}")
-            if len(trace) > stack_depth:
-                out.append(f"  ... (+{len(trace)-stack_depth} more)")
-
+        out += _stack_lines(payload.get("stackTrace") or [], stack_depth)
     out.append("")
     return "\n".join(out)
 
 
 def render_intent_detail(entry: dict, show_stack: bool = False, stack_depth: int = 15) -> str:
     info = entry.get("intent", {}) or {}
-    pi_flags = decode_pending_intent_flags(entry.get("pendingIntentFlags"))
-
-    outcome = entry.get("outcome")
-    outcome_str = {
-        "forwarded":          "[#26a368]→ forwarded[/#26a368]",
-        "modified_forwarded": "[#26a368]✎→ forwarded (modified)[/#26a368]",
-        "dropped":            "[#FFB1B1]✗ dropped[/#FFB1B1]",
-    }.get(outcome or "", "[dim]pending[/dim]")
-
+    attack_surface = entry.get("attackSurface") or {}
+    outcome_label = _OUTCOME_LABEL.get(entry.get("outcome") or "", "PENDING")
     timestamp = entry.get("timestamp", "")
     time_str = timestamp[:19].replace("T", " ") if len(timestamp) >= 19 else timestamp
 
-    sep = "[dim]─[/dim]" * 50
-
-    out = []
-    out.append("")
-    out.append(
-        f"[bold #F2C94C]#{entry['id']}[/bold #F2C94C]"
-        f"  [dim]{time_str}[/dim]"
-        f"  {outcome_str}"
+    out = [
+        "",
+        f"[bold]#{entry['id']}[/bold] | {_markup(time_str)} | {outcome_label}",
+        "",
+    ]
+    out += _event_body(
+        entry.get("class"), entry.get("method"), info, attack_surface, entry.get("pendingIntentFlags")
     )
-    out.append(sep)
-
-    attack_surface = entry.get("attackSurface") or {}
-    caller_label = _render_caller_surface_label(attack_surface)
-    intent_label = _render_intent_surface_label(attack_surface)
-
-    out.append(f"  [bold]Method[/bold]     {_markup(entry.get('method'))}")
-    class_label = f"  {caller_label}" if caller_label else ""
-    out.append(f"  [bold]Class[/bold]      [dim]{_markup(entry.get('class'))}[/dim]{class_label}")
-
-    has_intent = (
-        any(info.get(key) for key in ("action", "component", "data", "flags", "categories")) or
-        intent_label is not None
-    )
-    if has_intent:
-        out.append("")
-        intent_title = f"  [bold dim]INTENT[/bold dim]  {intent_label}" if intent_label else "  [bold dim]INTENT[/bold dim]"
-        out.append(intent_title)
-        if info.get("action"):
-            out.append(f"  [bold]Action[/bold]     {_markup(info.get('action'))}")
-        if info.get("component"):
-            out.append(f"  [bold]Component[/bold]  {_markup(info.get('component'))}")
-        if info.get("data"):
-            out.append(f"  [bold]Data[/bold]       {_markup(info.get('data'))}")
-        if info.get("flags"):
-            out.append(f"  [bold]Flags[/bold]      {_format_intent_flags(info.get('flags'))}")
-        if info.get("categories"):
-            for category in info["categories"]:
-                out.append(f"  [bold]Category[/bold]   {_markup(category)}")
-
-    if pi_flags is not None:
-        out.append("")
-        out.append("  [bold dim]PENDING INTENT[/bold dim]")
-        flags_str = " | ".join(pi_flags) if pi_flags else "(none)"
-        color = _pending_intent_flag_color(pi_flags)
-        out.append(f"  [bold]Flags[/bold]      [{color}]{flags_str}[/{color}]")
-
-    if info.get("extras"):
-        out.append("")
-        out.append("  [bold dim]EXTRAS[/bold dim]")
-        for key, value in info["extras"].items():
-            out.append(
-                f"  [bold]{_markup(key)}[/bold]  "
-                f"[dim]({_markup(value.get('type'))})[/dim]  {_markup(value.get('value'))}"
-            )
-
-    original = entry.get("original_intent")
-    if original:
-        out.append("")
-        out.append("  [bold dim]CHANGES[/bold dim]")
-        out.append(sep)
-        has_changes = False
-
-        orig_action = original.get("action") or ""
-        mod_action = info.get("action") or ""
-        if orig_action != mod_action:
-            has_changes = True
-            out.append(
-                f"  [bold]Action[/bold]     "
-                f"[dim]{_markup(orig_action or '(none)')}[/dim] → {_markup(mod_action or '(none)')}"
-            )
-
-        orig_data = original.get("data") or ""
-        mod_data = info.get("data") or ""
-        if orig_data != mod_data:
-            has_changes = True
-            out.append(
-                f"  [bold]Data[/bold]       "
-                f"[dim]{_markup(orig_data or '(none)')}[/dim] → {_markup(mod_data or '(none)')}"
-            )
-
-        orig_categories = list(original.get("categories") or [])
-        mod_categories = list(info.get("categories") or [])
-        removed_categories = [category for category in orig_categories if category not in mod_categories]
-        added_categories = [category for category in mod_categories if category not in orig_categories]
-        if removed_categories or added_categories:
-            has_changes = True
-            out.append("")
-            out.append("  [bold dim]CATEGORIES[/bold dim]")
-            for category in removed_categories:
-                out.append(f"  [#FFB1B1][-][/#FFB1B1]  [dim]{_markup(category)}[/dim]")
-            for category in added_categories:
-                out.append(f"  [#26a368][+][/#26a368]  {_markup(category)}")
-
-        orig_extras = original.get("extras") or {}
-        mod_extras = info.get("extras") or {}
-        removed_keys = [key for key in orig_extras if key not in mod_extras]
-        added_keys = [key for key in mod_extras if key not in orig_extras]
-        changed_keys = [
-            key for key in orig_extras
-            if key in mod_extras and
-            str(orig_extras[key].get("value", "")) != str(mod_extras[key].get("value", ""))
-        ]
-        if removed_keys or added_keys or changed_keys:
-            has_changes = True
-            out.append("")
-            out.append("  [bold dim]EXTRAS[/bold dim]")
-            for key in changed_keys:
-                old_value = orig_extras[key]
-                new_value = mod_extras[key]
-                out.append(
-                    f"  [#F2C94C][~][/#F2C94C] [bold]{_markup(key)}[/bold]  "
-                    f"[dim]({_markup(old_value.get('type'))})[/dim]  "
-                    f"[dim]{_markup(old_value.get('value'))}[/dim] → {_markup(new_value.get('value'))}"
-                )
-            for key in removed_keys:
-                value = orig_extras[key]
-                out.append(
-                    f"  [#FFB1B1][-][/#FFB1B1] [bold]{_markup(key)}[/bold]  "
-                    f"[dim]({_markup(value.get('type'))})[/dim]  [dim]{_markup(value.get('value'))}[/dim]"
-                )
-            for key in added_keys:
-                value = mod_extras[key]
-                out.append(
-                    f"  [#26a368][+][/#26a368] [bold]{_markup(key)}[/bold]  "
-                    f"[dim]({_markup(value.get('type'))})[/dim]  {_markup(value.get('value'))}"
-                )
-
-        if not has_changes:
-            out.append("  [dim](forwarded without changes)[/dim]")
-
-    trace = entry.get("stackTrace", [])
+    if entry.get("original_intent"):
+        out += _changes_lines(entry["original_intent"], info)
     if show_stack:
-        out.append("")
-        if trace:
-            out.append("  [bold dim]STACK TRACE[/bold dim]")
-            for line in trace[:stack_depth]:
-                out.append(f"  [dim]{_markup(line)}[/dim]")
-            if len(trace) > stack_depth:
-                out.append(f"  [dim]... (+{len(trace)-stack_depth} more)[/dim]")
-        else:
-            out.append("  [dim]No stack trace captured.[/dim]")
-
+        out += _stack_lines(entry.get("stackTrace") or [], stack_depth, show_empty=True)
     out.append("")
     return "\n".join(out)

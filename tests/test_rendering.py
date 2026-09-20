@@ -239,9 +239,9 @@ class RenderingTests(unittest.TestCase):
 
         rendered = render_intercept_block(payload, 7, show_stack=True, stack_depth=2)
 
-        self.assertIn("INTERCEPTED", rendered)
-        self.assertIn("#7", rendered)
-        self.assertIn("[#FFB1B1]FLAG_MUTABLE[/#FFB1B1]", rendered)
+        Text.from_markup(rendered)
+        self.assertIn("INTERCEPTED #7", rendered)
+        self.assertIn("FLAG_MUTABLE", rendered)
         self.assertIn("0x00000001", rendered)
         self.assertIn("FLAG_GRANT_READ_URI_PERMISSION", rendered)
         self.assertIn("frame1", rendered)
@@ -268,20 +268,26 @@ class RenderingTests(unittest.TestCase):
         Text.from_markup(rendered)
         self.assertIn("\\[/system/lib64", rendered)
 
-    def test_render_intercept_block_shows_surface_labels_inline(self):
+    def test_render_intercept_block_sections_and_receiver_tree(self):
         payload = {
-            "className": "com.example.MainActivity",
-            "methodName": "startActivity",
+            "className": "com.example.Receiver2",
+            "methodName": "onReceive",
             "stackTrace": [],
-            "attackSurface": {"callerExported": True, "intentExplicit": False},
-            "infoIntent": {"action": "android.intent.action.VIEW"},
+            "attackSurface": {"callerExported": True, "callerPermission": {"name": "com.x.PERM", "level": "signature"}},
+            "infoIntent": {},
         }
 
         rendered = render_intercept_block(payload, 1, show_stack=False, stack_depth=1)
 
-        self.assertIn("[bold]Class:[/bold]     com.example.MainActivity  [#C94A8A][Exported][/#C94A8A]", rendered)
-        self.assertIn("[bold]Intent:[/bold]    [#C94A8A][Implicit][/#C94A8A]", rendered)
-        self.assertNotIn("Surface:", rendered)
+        Text.from_markup(rendered)
+        self.assertIn("[bold]\\[HOOK][/bold]", rendered)
+        self.assertIn("[bold]\\[CAPTURED INTENT PAYLOAD][/bold]", rendered)
+        # Receiving: the exposed component's tree hangs under Class.
+        self.assertIn("  Class         : com.example.Receiver2", rendered)
+        self.assertIn("                  ├─ Exported            : true", rendered)
+        self.assertIn("                  └─ Required Permission : com.x.PERM (signature)", rendered)
+        # No Type row on a receiving capture.
+        self.assertNotIn("Type ", rendered)
 
     def test_render_intent_detail_includes_changes(self):
         entry = {
@@ -316,7 +322,8 @@ class RenderingTests(unittest.TestCase):
 
         rendered = render_intent_detail(entry, show_stack=True, stack_depth=1)
 
-        self.assertIn("forwarded (modified)", rendered)
+        Text.from_markup(rendered)
+        self.assertIn("| MODIFIED", rendered)
         self.assertIn("old.action", rendered)
         self.assertIn("new.action", rendered)
         self.assertIn("old.category", rendered)
@@ -356,22 +363,73 @@ class RenderingTests(unittest.TestCase):
         Text.from_markup(rendered)
         self.assertIn("\\[/system/lib64", rendered)
 
-    def test_render_intent_detail_shows_surface_labels_inline(self):
+    def test_render_intent_detail_receiving_tree(self):
         entry = {
             "id": 10,
             "timestamp": "2026-04-27T12:34:56+00:00",
-            "class": "com.example.MainActivity",
+            "class": "com.example.Activity1",
             "method": "getIntent",
             "intent": {},
-            "attackSurface": {"callerExported": False, "intentExplicit": True},
+            "attackSurface": {"callerExported": False},
             "stackTrace": [],
         }
 
         rendered = render_intent_detail(entry, show_stack=False, stack_depth=1)
 
-        self.assertIn("[bold]Class[/bold]      [dim]com.example.MainActivity[/dim]  [#26a368][Not exported][/#26a368]", rendered)
-        self.assertIn("[bold dim]INTENT[/bold dim]  [#26a368][Explicit][/#26a368]", rendered)
-        self.assertNotIn("Surface:", rendered)
+        Text.from_markup(rendered)
+        self.assertIn("[bold]#10[/bold] | 2026-04-27 12:34:56 | PENDING", rendered)
+        self.assertIn("  Class         : com.example.Activity1", rendered)
+        self.assertIn("                  └─ Exported            : false", rendered)
+        self.assertNotIn("Required Permission", rendered)  # omitted when none
+
+    def test_render_intent_detail_sending_target_tree(self):
+        entry = {
+            "id": 7,
+            "timestamp": "2026-04-27T12:34:56+00:00",
+            "class": "com.example.MainActivity",
+            "method": "sendBroadcast",
+            "intent": {"component": "com.example/.Receiver2"},
+            "attackSurface": {
+                "intentExplicit": True,
+                "targetComponent": "com.example/.Receiver2",
+                "targetExported": True,
+                "targetPermission": {"name": "com.x.PERM", "level": "normal"},
+                "broadcastPermission": {"name": "com.x.PERM", "level": "normal"},
+            },
+            "stackTrace": [],
+        }
+
+        rendered = render_intent_detail(entry, show_stack=False, stack_depth=1)
+
+        Text.from_markup(rendered)
+        self.assertIn("  Type          : EXPLICIT", rendered)
+        self.assertIn("  Target        : com.example/.Receiver2", rendered)
+        self.assertIn("                  ├─ Exported            : true", rendered)
+        self.assertIn("                  └─ Required Permission : com.x.PERM (normal)", rendered)
+        self.assertIn("  Enforced Perm : com.x.PERM (normal)", rendered)
+
+    def test_render_intent_detail_target_states(self):
+        base = {
+            "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",
+            "class": "com.example.MainActivity", "method": "startActivity", "stackTrace": [],
+            "intent": {},
+        }
+        implicit_multi = dict(base, attackSurface={"intentExplicit": False, "targetReceiverCount": 3})
+        self.assertIn("  Target        : (resolved) 3 receivers", render_intent_detail(implicit_multi))
+
+        unresolved = dict(base, attackSurface={"intentExplicit": False})
+        self.assertIn("  Target        : (unresolved)", render_intent_detail(unresolved))
+
+        unreadable = dict(base, attackSurface={
+            "intentExplicit": True, "targetComponent": "com.other/.X", "targetUnreadable": True,
+        })
+        self.assertIn("  Target        : com.other/.X (couldn't read — not visible)", render_intent_detail(unreadable))
+
+        resolved_single = dict(base, attackSurface={
+            "intentExplicit": False, "targetComponent": "com.example/.Activity8",
+            "targetResolved": True, "targetExported": True,
+        })
+        self.assertIn("  Target        : com.example/.Activity8 (resolved)", render_intent_detail(resolved_single))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,10 @@ then lets you inspect, modify, forward, or drop them from a terminal UI.
 - Intercepts common Android runtime entry points such as `getIntent`, `startActivity`,
   `sendBroadcast`, `startService`, and `PendingIntent` creation paths.
 - Shows action, component, data URI, flags, categories, extras, PendingIntent flags,
-  optional Java stack traces, and attack-surface labels where available.
+  and optional Java stack traces in a plain, section-based detail layout.
+- Attaches each exposed component's `Exported` flag and required permission (with its
+  protection level) to the component that matters — the receiver for inbound events,
+  the resolved target for outbound ones — plus any broadcast `receiverPermission`.
 - Lets you modify intent action, data, categories, flags, and extras before forwarding.
 - Lets you drop intercepted intents.
 - Stores captured history, outcomes, filters, columns, and modified intent snapshots
