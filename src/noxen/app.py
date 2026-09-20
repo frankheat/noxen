@@ -1790,7 +1790,7 @@ class NoxenApp(App):
 
     def check_action(self, action: str, parameters) -> bool | None:
         if action in ("info_refresh", "info_toggle_rail"):
-            return True if self._active_tab == "tab_info" else None
+            return self._active_tab == "tab_info"
         if action == "clear_log":
             return self._active_tab in ("tab_log", "tab_history")
         if action == "toggle_command_bar":
@@ -1798,7 +1798,7 @@ class NoxenApp(App):
         if action in ("resize_panel_up", "resize_panel_down"):
             if self._active_tab == "tab_intercept":
                 return True if self._intercept_command_bar_visible else None
-            return True if self._active_tab == "tab_history" else None
+            return self._active_tab == "tab_history"
         return True
 
     def on_resize(self, _event: events.Resize) -> None:
