@@ -579,3 +579,61 @@ Footer {
     content-align: right middle;
     padding: 0 2;
 }
+
+/* Info app tab */
+#info_split { height: 1fr; }
+#info_rail {
+    width: 22;
+    height: 1fr;
+    border-right: solid #2C3E3A;
+    padding: 1 0;
+}
+.info-nav {
+    width: 100%;
+    border: none;
+    background: transparent;
+}
+.info-nav.active {
+    background: $boost;
+    text-style: bold;
+}
+#info_main { width: 1fr; height: 1fr; }
+#info_empty { padding: 1 2; text-style: dim; }
+#info_switcher { height: 1fr; }
+.info_controls {
+    height: 3;
+    background: $panel;
+    padding: 0 1;
+    align: left middle;
+}
+.info_controls Input {
+    width: 1fr;
+    height: 3;
+    padding: 0 1;
+    margin-right: 1;
+    background: $panel;
+    border: round $panel-lighten-2;
+}
+.info_controls Input:focus {
+    border: round $accent;
+    background-tint: $surface 0%;
+}
+.info_controls Select {
+    height: 3;
+    margin-right: 1;
+}
+/* width = longest option + a couple of extra chars (Select chrome ~8 cells) */
+#info_comp_type { width: 19; }
+#info_perm_source { width: 21; }
+.info_controls Select > SelectCurrent {
+    border: round $panel-lighten-2;
+    background: $panel;
+}
+.info_controls Select:focus > SelectCurrent {
+    border: round $accent;
+}
+.info_controls Switch { margin-top: 1; }
+.info_switch_label { height: 3; content-align: left middle; margin-left: 1; }
+#info_perm_table, #info_comp_table { height: 1fr; margin: 1 1 0 1; border: solid #2C3E3A; }
+#info_comp_detail { height: 12; margin: 0 1 1 1; border: solid #2C3E3A; background: $surface; }
+#info_overview_log { height: 1fr; padding: 1 2; }

@@ -567,5 +567,152 @@ rpc.exports = {
       sdkInt = Java.use("android.os.Build$VERSION").SDK_INT.value;
     });
     return sdkInt;
+  },
+
+  // Snapshot of the hooked app: identity, build flags, signing, permissions, components.
+  // Read-only PackageManager queries on our own package (no package-visibility limits).
+  getAppInfo: function () {
+    var out = {};
+    Java.performNow(function () {
+      function s(v) { return (v === null || v === undefined) ? null : String(v); }
+      function tryGet(fn) { try { return fn(); } catch (e) { return null; } }
+      try {
+        var ActivityThread = Java.use("android.app.ActivityThread");
+        var ctx = ActivityThread.currentApplication();
+        var pm = ctx.getPackageManager();
+        var pkg = String(ctx.getPackageName());
+        var sdkInt = Java.use("android.os.Build$VERSION").SDK_INT.value;
+
+        var GET_ACTIVITIES = 1, GET_RECEIVERS = 2, GET_SERVICES = 4, GET_PROVIDERS = 8,
+            GET_META_DATA = 128, GET_SIGNATURES = 64, GET_PERMISSIONS = 4096,
+            GET_SIGNING_CERTIFICATES = 134217728;
+        var flags = GET_ACTIVITIES | GET_RECEIVERS | GET_SERVICES | GET_PROVIDERS |
+                    GET_META_DATA | GET_PERMISSIONS |
+                    (sdkInt >= 28 ? GET_SIGNING_CERTIFICATES : GET_SIGNATURES);
+        var pi = pm.getPackageInfo(pkg, flags);
+        var ai = pi.applicationInfo.value;
+
+        out.identity = {
+          package: pkg,
+          label: tryGet(function () { return String(pm.getApplicationLabel(ai)); }),
+          versionName: tryGet(function () { return s(pi.versionName.value); }),
+          versionCode: tryGet(function () { return sdkInt >= 28 ? String(pi.getLongVersionCode()) : String(pi.versionCode.value); }),
+          uid: tryGet(function () { return ai.uid.value; }),
+          pid: Process.id,
+          processName: tryGet(function () { var n = ActivityThread.currentProcessName(); return n ? String(n) : null; }),
+          sharedUserId: tryGet(function () { return s(pi.sharedUserId.value); }),
+          installer: tryGet(function () {
+            if (sdkInt >= 30) return s(pm.getInstallSourceInfo(pkg).getInstallingPackageName());
+            return s(pm.getInstallerPackageName(pkg));
+          }),
+          firstInstallTime: tryGet(function () { return pi.firstInstallTime.value; }),
+          lastUpdateTime: tryGet(function () { return pi.lastUpdateTime.value; })
+        };
+
+        var f = ai.flags.value;
+        out.build = {
+          deviceSdk: sdkInt,
+          targetSdk: tryGet(function () { return ai.targetSdkVersion.value; }),
+          minSdk: tryGet(function () { return ai.minSdkVersion.value; }),
+          compileSdk: tryGet(function () { return ai.compileSdkVersion.value; }),
+          debuggable: (f & 2) !== 0,
+          allowBackup: (f & 32768) !== 0,
+          testOnly: (f & 256) !== 0,
+          extractNativeLibs: (f & 268435456) !== 0,
+          cleartextPermitted: tryGet(function () { return Java.use("android.security.NetworkSecurityPolicy").getInstance().isCleartextTrafficPermitted(); }),
+          nscPresent: tryGet(function () { return ai.networkSecurityConfigRes.value !== 0; })
+        };
+
+        out.signing = tryGet(function () {
+          var MD = Java.use("java.security.MessageDigest");
+          function sha256(bytes) {
+            var md = MD.getInstance("SHA-256");
+            var d = md.digest.overload("[B").call(md, bytes);
+            var h = "";
+            for (var i = 0; i < d.length; i++) { var b = d[i] & 0xff; h += (b < 16 ? "0" : "") + b.toString(16); }
+            return h.toUpperCase();
+          }
+          var digs = [], multiple = false;
+          if (sdkInt >= 28 && pi.signingInfo.value !== null) {
+            var si = pi.signingInfo.value;
+            var signers = si.getApkContentsSigners();
+            for (var i = 0; i < signers.length; i++) digs.push(sha256(signers[i].toByteArray()));
+            multiple = si.hasMultipleSigners();
+          } else if (pi.signatures.value !== null) {
+            var sigs = pi.signatures.value;
+            for (var j = 0; j < sigs.length; j++) digs.push(sha256(sigs[j].toByteArray()));
+          }
+          return { sha256: digs, multipleSigners: multiple };
+        }) || { sha256: [], multipleSigners: false };
+
+        var perms = [];
+        tryGet(function () {
+          var req = pi.requestedPermissions.value, fl = pi.requestedPermissionsFlags.value;
+          if (req !== null) {
+            for (var i = 0; i < req.length; i++) {
+              var nm = String(req[i]);
+              var granted = fl !== null ? ((fl[i] & 2) !== 0) : null;
+              var dp = describePermission(pm, nm);
+              perms.push({ name: nm, source: "requested", granted: granted, level: dp ? dp.level : "unknown" });
+            }
+          }
+        });
+        tryGet(function () {
+          var defs = pi.permissions.value;
+          if (defs !== null) {
+            for (var i = 0; i < defs.length; i++) {
+              var p = defs[i];
+              perms.push({ name: String(p.name.value), source: "defined", granted: null,
+                           level: (PROTECTION_LEVELS[p.protectionLevel.value & 0xf] || "unknown") });
+            }
+          }
+        });
+        out.permissions = perms;
+
+        var ComponentName = Java.use("android.content.ComponentName");
+        function enumComponents(arr, type) {
+          var res = [];
+          if (arr === null) return res;
+          for (var i = 0; i < arr.length; i++) {
+            var ci = arr[i];
+            var name = tryGet(function () { return String(ci.name.value); });
+            var c = {
+              name: name,
+              type: type,
+              exported: tryGet(function () { return ci.exported.value; }),
+              permission: describePermission(pm, effectiveComponentPermission(ci)),
+              enabled: tryGet(function () { return ci.enabled.value; }),
+              enabledRuntime: tryGet(function () { return pm.getComponentEnabledSetting(ComponentName.$new(pkg, name)); }),
+              processName: tryGet(function () { return s(ci.processName.value); }),
+              directBootAware: tryGet(function () { return ci.directBootAware.value; })
+            };
+            if (type === "activity") {
+              c.launchMode = tryGet(function () { return ci.launchMode.value; });
+              c.taskAffinity = tryGet(function () { return s(ci.taskAffinity.value); });
+              c.targetActivity = tryGet(function () { return s(ci.targetActivity.value); });
+            } else if (type === "service") {
+              c.foregroundServiceType = tryGet(function () { return ci.foregroundServiceType.value; });
+            } else if (type === "provider") {
+              c.authority = tryGet(function () { return s(ci.authority.value); });
+              c.readPermission = tryGet(function () { return s(ci.readPermission.value); });
+              c.writePermission = tryGet(function () { return s(ci.writePermission.value); });
+              c.grantUriPermissions = tryGet(function () { return ci.grantUriPermissions.value; });
+              c.multiprocess = tryGet(function () { return ci.multiprocess.value; });
+            }
+            res.push(c);
+          }
+          return res;
+        }
+        var comps = [];
+        comps = comps.concat(enumComponents(pi.activities.value, "activity"));
+        comps = comps.concat(enumComponents(pi.services.value, "service"));
+        comps = comps.concat(enumComponents(pi.receivers.value, "receiver"));
+        comps = comps.concat(enumComponents(pi.providers.value, "provider"));
+        out.components = comps;
+      } catch (e) {
+        out.error = String(e);
+      }
+    });
+    return out;
   }
 };

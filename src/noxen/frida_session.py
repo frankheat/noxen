@@ -327,6 +327,12 @@ class FridaSession:
     def stage_mod(self, mod_type, key, val, extra_type, decision_id=None):
         return bool(self._script.exports_sync.stage_mod(mod_type, key, val, extra_type, decision_id))
 
+    def get_app_info(self):
+        script = self._script
+        if script is None:
+            return None
+        return script.exports_sync.get_app_info()
+
     def intercept_on(self):
         self._blocking_enabled = True
         self._script.exports_sync.intercepton()

@@ -3,15 +3,17 @@ import os
 import re
 import sys
 import threading
+import time
 from datetime import datetime
 from importlib.metadata import version as pkg_version, PackageNotFoundError
 
 from textual import events
 from textual import work
+from textual.worker import get_current_worker
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import (
-    Button, DataTable, Footer, Input, Label,
+    Button, ContentSwitcher, DataTable, Footer, Input, Label,
     OptionList, RichLog, Rule, Select, Static, Switch, TabbedContent, TabPane,
 )
 from textual.binding import Binding
@@ -35,6 +37,14 @@ from noxen.commands import (
     parse_stack_command,
     parse_theme_command,
     resolve_submitted_command,
+)
+from noxen.app_info import (
+    component_row,
+    filter_components,
+    filter_permissions,
+    permission_row,
+    render_component_detail,
+    render_overview,
 )
 from noxen.db import ProjectDB
 from noxen.exporting import (
@@ -202,6 +212,8 @@ class NoxenApp(App):
         Binding("alt+up", "resize_panel_up", "▲", show=True),
         Binding("alt+down", "resize_panel_down", "▼", show=True),
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
+        Binding("ctrl+r", "info_refresh", "Refresh", show=True, priority=True),
+        Binding("ctrl+t", "info_toggle_rail", "Panel", show=True, priority=True),
     ]
 
     def __init__(self, cli_args):
@@ -212,6 +224,7 @@ class NoxenApp(App):
         self.show_stack = self._settings["stack"]
         self.stack_depth = self._settings["stack_depth"]
         self._all_intents = []
+        self._app_info: dict | None = None
         self._history_refresh_pending = False
         self._pending_append: list = []
         self._sort_column: str | None = "id"
@@ -557,6 +570,9 @@ class NoxenApp(App):
         elif event.button.id == "home_disconnect":
             self._do_disconnect()
             return
+        elif event.button.id in ("info_nav_overview", "info_nav_permissions", "info_nav_components"):
+            self._switch_info_view(event.button.id)
+            return
         elif event.button.id == "home_hooks_browse":
             self.app.push_screen(
                 FileBrowserModal("Select custom hooks file"),
@@ -894,6 +910,37 @@ class NoxenApp(App):
                     yield Button("⊟", id="btn_columns")
                 yield DataTable(id="history_table", cursor_type="row")
                 yield RichLog(id="history_detail", markup=True, highlight=False, auto_scroll=False)
+            with TabPane(" Info app ", id="tab_info"):
+                with Horizontal(id="info_split"):
+                    with Vertical(id="info_rail"):
+                        yield Button("Overview", id="info_nav_overview", classes="info-nav active")
+                        yield Button("Permissions", id="info_nav_permissions", classes="info-nav")
+                        yield Button("Components", id="info_nav_components", classes="info-nav")
+                    with Vertical(id="info_main"):
+                        yield Label("Connect to a target to inspect it.", id="info_empty")
+                        with ContentSwitcher(initial="info_view_overview", id="info_switcher"):
+                            with VerticalScroll(id="info_view_overview"):
+                                yield RichLog(id="info_overview_log", markup=True, highlight=False, auto_scroll=False)
+                            with Vertical(id="info_view_permissions"):
+                                with Horizontal(classes="info_controls"):
+                                    yield Input(id="info_perm_search", placeholder="Search permissions", select_on_focus=False)
+                                    yield Select(
+                                        [("All sources", "all"), ("requested", "requested"), ("defined", "defined")],
+                                        id="info_perm_source", value="all", allow_blank=False,
+                                    )
+                                yield DataTable(id="info_perm_table", cursor_type="row")
+                            with Vertical(id="info_view_components"):
+                                with Horizontal(classes="info_controls"):
+                                    yield Input(id="info_comp_search", placeholder="Search components", select_on_focus=False)
+                                    yield Select(
+                                        [("All types", "all"), ("activity", "activity"), ("service", "service"),
+                                         ("receiver", "receiver"), ("provider", "provider")],
+                                        id="info_comp_type", value="all", allow_blank=False,
+                                    )
+                                    yield Switch(value=False, id="info_comp_exposed")
+                                    yield Label("Exposed only", classes="info_switch_label")
+                                yield DataTable(id="info_comp_table", cursor_type="row")
+                                yield RichLog(id="info_comp_detail", markup=True, highlight=False, auto_scroll=False)
             with TabPane(" Log ", id="tab_log"):
                 with Horizontal(id="log_header"):
                     yield Label("Verbose logs", id="log_verbose_label")
@@ -954,6 +1001,7 @@ class NoxenApp(App):
             self.query_one(f"#{btn_id}", Button).active_effect_duration = 0
         self._apply_command_bar_visibility()
         self._refresh_history_table()
+        self._init_info_tab()
         self._update_filter_count()
         self.query_one("#session_info", Label).update("Not connected")
         self.write_log(log_info("Ready", "noxen"))
@@ -1026,6 +1074,10 @@ class NoxenApp(App):
     def on_select_changed(self, event: Select.Changed):
         if event.select.id in ("home_device", "home_mode"):
             self._populate_target_apps()
+        elif event.select.id == "info_perm_source":
+            self._refresh_info_permissions()
+        elif event.select.id == "info_comp_type":
+            self._refresh_info_components()
 
     def on_device_selected(self, device_id):
         if not device_id:
@@ -1052,6 +1104,9 @@ class NoxenApp(App):
         session.connect(device_id)
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id == "info_comp_exposed":
+            self._refresh_info_components()
+            return
         if event.switch.id == "log_verbose":
             self._log_verbose = event.value
             self._refresh_log_output()
@@ -1209,6 +1264,7 @@ class NoxenApp(App):
                 self.query_one("#home_disconnect", Button).disabled = False
             except Exception:
                 pass
+            self._fetch_app_info_worker()
         try:
             self.call_from_thread(_do)
         except Exception:
@@ -1228,6 +1284,7 @@ class NoxenApp(App):
                 self.query_one("#home_disconnect", Button).disabled = True
             except Exception:
                 pass
+            self._clear_info_tab()
         try:
             self.call_from_thread(_do)
         except Exception:
@@ -1243,6 +1300,109 @@ class NoxenApp(App):
             self.query_one("#session_bar").remove_class("connected")
             self.query_one("#session_info", Label).update("Not connected")
             self.query_one("#home_disconnect", Button).disabled = True
+        except Exception:
+            pass
+        self._clear_info_tab()
+
+    # --- Info app tab ---
+
+    def _init_info_tab(self) -> None:
+        self.query_one("#info_perm_table", DataTable).add_columns("Permission", "Source", "Granted", "Level")
+        self.query_one("#info_comp_table", DataTable).add_columns("Name", "Type", "Exported", "Permission", "Enabled")
+        self.query_one("#info_switcher", ContentSwitcher).display = False
+
+    def _switch_info_view(self, nav_id: str) -> None:
+        mapping = {
+            "info_nav_overview": "info_view_overview",
+            "info_nav_permissions": "info_view_permissions",
+            "info_nav_components": "info_view_components",
+        }
+        view = mapping.get(nav_id)
+        if not view:
+            return
+        self.query_one("#info_switcher", ContentSwitcher).current = view
+        for button in self.query(".info-nav"):
+            button.set_class(button.id == nav_id, "active")
+
+    def action_info_refresh(self) -> None:
+        self._fetch_app_info_worker()
+
+    def action_info_toggle_rail(self) -> None:
+        rail = self.query_one("#info_rail")
+        rail.display = not rail.display
+
+    @work(thread=True, exclusive=True, group="app_info")
+    def _fetch_app_info_worker(self) -> None:
+        # Connect fires right after resume; in spawn mode the app's Application context
+        # may not exist yet, so poll a few times until the snapshot is ready.
+        worker = get_current_worker()
+        for _ in range(8):
+            if worker.is_cancelled:
+                return
+            session = self.frida_session
+            if session is None or not session.is_ready():
+                return
+            try:
+                info = session.get_app_info()
+            except Exception:
+                info = None
+            if info and not info.get("error") and (info.get("identity") or {}).get("package"):
+                self.call_from_thread(self._apply_app_info, info)
+                return
+            time.sleep(0.4)
+        self.call_from_thread(
+            self.write_log, log_warning("App info not ready yet — use Refresh", "info")
+        )
+
+    def _apply_app_info(self, info: dict) -> None:
+        self._app_info = info
+        try:
+            self.query_one("#info_empty", Label).display = False
+            self.query_one("#info_switcher", ContentSwitcher).display = True
+            overview = self.query_one("#info_overview_log", RichLog)
+            overview.clear()
+            overview.write(render_overview(info))
+            overview.scroll_home(animate=False)
+            self._refresh_info_permissions()
+            self._refresh_info_components()
+        except Exception:
+            pass
+
+    def _refresh_info_permissions(self) -> None:
+        if not self._app_info:
+            return
+        source = self.query_one("#info_perm_source", Select).value
+        source = None if source == "all" else source
+        query = self.query_one("#info_perm_search", Input).value.strip()
+        table = self.query_one("#info_perm_table", DataTable)
+        table.clear()
+        for perm in filter_permissions(self._app_info.get("permissions"), query=query, source=source):
+            table.add_row(*permission_row(perm))
+
+    def _refresh_info_components(self) -> None:
+        if not self._app_info:
+            return
+        type_value = self.query_one("#info_comp_type", Select).value
+        type_filter = None if type_value == "all" else type_value
+        exposed = self.query_one("#info_comp_exposed", Switch).value
+        query = self.query_one("#info_comp_search", Input).value.strip()
+        table = self.query_one("#info_comp_table", DataTable)
+        table.clear()
+        for comp in filter_components(
+            self._app_info.get("components"), query=query, type_filter=type_filter, exposed_only=exposed
+        ):
+            table.add_row(*component_row(comp), key=comp.get("name"))
+        self.query_one("#info_comp_detail", RichLog).clear()
+
+    def _clear_info_tab(self) -> None:
+        self._app_info = None
+        try:
+            self.query_one("#info_switcher", ContentSwitcher).display = False
+            self.query_one("#info_empty", Label).display = True
+            for widget_id in ("#info_perm_table", "#info_comp_table"):
+                self.query_one(widget_id, DataTable).clear()
+            for widget_id in ("#info_comp_detail", "#info_overview_log"):
+                self.query_one(widget_id, RichLog).clear()
         except Exception:
             pass
 
@@ -1497,6 +1657,23 @@ class NoxenApp(App):
     # --- DataTable row selection ---
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
+        if event.data_table.id == "info_comp_table":
+            if event.row_key is None or event.row_key.value is None:
+                return
+            name = event.row_key.value
+            comp = next(
+                (c for c in (self._app_info or {}).get("components", []) if c.get("name") == name),
+                None,
+            )
+            if comp:
+                try:
+                    detail = self.query_one("#info_comp_detail", RichLog)
+                    detail.clear()
+                    detail.write(render_component_detail(comp))
+                    detail.scroll_home(animate=False)
+                except Exception:
+                    pass
+            return
         if event.data_table.id != "history_table":
             return
         if event.row_key is None or event.row_key.value is None:
@@ -1611,6 +1788,8 @@ class NoxenApp(App):
         self.write_log(log_success("History cleared", "history"), notify=True)
 
     def check_action(self, action: str, parameters) -> bool | None:
+        if action in ("info_refresh", "info_toggle_rail"):
+            return True if self._active_tab == "tab_info" else None
         if action == "clear_log":
             return self._active_tab in ("tab_log", "tab_history")
         if action == "toggle_command_bar":
@@ -1844,6 +2023,12 @@ class NoxenApp(App):
         if inp_id == "history_search":
             self._history_search_text = text
             self._refresh_rows_only()
+            return
+        if inp_id == "info_perm_search":
+            self._refresh_info_permissions()
+            return
+        if inp_id == "info_comp_search":
+            self._refresh_info_components()
             return
         if inp_id == "intercept_command_input":
             ol_id = "intercept_cmd_suggestions"
