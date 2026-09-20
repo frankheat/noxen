@@ -937,8 +937,9 @@ class NoxenApp(App):
                                          ("receiver", "receiver"), ("provider", "provider")],
                                         id="info_comp_type", value="all", allow_blank=False,
                                     )
-                                    yield Switch(value=False, id="info_comp_exposed")
-                                    yield Label("Exposed only", classes="info_switch_label")
+                                    with Horizontal(id="info_exposed_group"):
+                                        yield Switch(value=False, id="info_comp_exposed")
+                                        yield Label("Exposed only", classes="info_switch_label")
                                 yield DataTable(id="info_comp_table", cursor_type="row")
                                 yield RichLog(id="info_comp_detail", markup=True, highlight=False, auto_scroll=False)
             with TabPane(" Log ", id="tab_log"):

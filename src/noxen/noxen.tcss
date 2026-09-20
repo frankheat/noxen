@@ -590,11 +590,29 @@ Footer {
 }
 .info-nav {
     width: 100%;
+    height: 1;
     border: none;
     background: transparent;
+    text-style: none;
 }
-.info-nav.active {
+/* keep the rail flat: no hover/press/focus background, border or reverse */
+.info-nav:hover,
+.info-nav:focus,
+.info-nav.-active {
+    background: transparent;
+    border: none;
+    tint: transparent;
+    background-tint: $surface 0%;
+    text-style: none;
+}
+.info-nav.active,
+.info-nav.active:hover,
+.info-nav.active:focus,
+.info-nav.active.-active {
     background: $boost;
+    border: none;
+    tint: transparent;
+    background-tint: $surface 0%;
     text-style: bold;
 }
 #info_main { width: 1fr; height: 1fr; }
@@ -631,9 +649,25 @@ Footer {
 }
 .info_controls Select:focus > SelectCurrent {
     border: round $accent;
+    background-tint: $surface 0%;
 }
-.info_controls Switch { margin-top: 1; }
-.info_switch_label { height: 3; content-align: left middle; margin-left: 1; }
+#info_exposed_group {
+    width: auto;
+    height: 3;
+    padding: 0 1;
+    background: $panel;
+    border: round $panel-lighten-2;
+    align: left middle;
+}
+#info_exposed_group:focus-within { border: round $accent; }
+#info_exposed_group Switch {
+    border: none;
+    height: 1;
+    padding: 0 1;
+    margin: 0;
+    background: $panel;
+}
+.info_switch_label { height: 1; content-align: left middle; margin-left: 1; }
 #info_perm_table, #info_comp_table { height: 1fr; margin: 1 1 0 1; border: solid #2C3E3A; }
 #info_comp_detail { height: 12; margin: 0 1 1 1; border: solid #2C3E3A; background: $surface; }
 #info_overview_log { height: 1fr; padding: 1 2; }
