@@ -18,6 +18,8 @@ from textual.widgets import (
 )
 from textual.binding import Binding
 
+from rich.text import Text
+
 from noxen.commands import (
     CommandSuggester,
     HELP_MENU,
@@ -109,6 +111,17 @@ INTERCEPT_ACTION_BUTTON_CLASSES = (
     "drop-ready",
     "edit-ready",
 )
+
+
+def markup_renderable(markup: str) -> Text:
+    """Render a builder's markup string without Rich emoji-shortcode substitution.
+
+    Rich treats ``:cd:`` (and similar) as emoji shortcodes, so app/intent data such
+    as a signing SHA-256 byte ``0xCD`` would otherwise be shown as 💿 and corrupt the
+    captured value. Style tags and the builders' bracket escaping are preserved; only
+    the emoji pass is disabled. Use this for every RichLog write of rendered data.
+    """
+    return Text.from_markup(markup, emoji=False)
 
 
 def clamp_height(value: int, minimum: int, maximum: int | None = None) -> int:
@@ -662,11 +675,11 @@ class NoxenApp(App):
                     try:
                         intercept_output = self.query_one("#intercept_output", RichLog)
                         intercept_output.clear()
-                        intercept_output.write(render_intent_detail(
+                        intercept_output.write(markup_renderable(render_intent_detail(
                             self._current_intercepted_entry,
                             show_stack=show,
                             stack_depth=depth,
-                        ))
+                        )))
                     except Exception:
                         pass
             self.push_screen(StackModal(self.show_stack, self.stack_depth, _on_intercept_stack_confirm))
@@ -1362,7 +1375,7 @@ class NoxenApp(App):
             self.query_one("#info_switcher", ContentSwitcher).display = True
             overview = self.query_one("#info_overview_log", RichLog)
             overview.clear()
-            overview.write(render_overview(info))
+            overview.write(markup_renderable(render_overview(info)))
             overview.scroll_home(animate=False)
             self._refresh_info_permissions()
             self._refresh_info_components()
@@ -1640,7 +1653,9 @@ class NoxenApp(App):
         self._current_decision_id = decision_id
         self._current_intercepted_entry = entry
         self._staged_mods.clear()
-        rendered = render_intent_detail(entry, show_stack=self.show_stack, stack_depth=self.stack_depth)
+        rendered = markup_renderable(
+            render_intent_detail(entry, show_stack=self.show_stack, stack_depth=self.stack_depth)
+        )
 
         def _do():
             try:
@@ -1670,7 +1685,7 @@ class NoxenApp(App):
                 try:
                     detail = self.query_one("#info_comp_detail", RichLog)
                     detail.clear()
-                    detail.write(render_component_detail(comp))
+                    detail.write(markup_renderable(render_component_detail(comp)))
                     detail.scroll_home(animate=False)
                 except Exception:
                     pass
@@ -1686,11 +1701,11 @@ class NoxenApp(App):
             try:
                 detail = self.query_one("#history_detail", RichLog)
                 detail.clear()
-                detail.write(render_intent_detail(
+                detail.write(markup_renderable(render_intent_detail(
                     entry,
                     show_stack=self._history_show_stack,
                     stack_depth=self._history_stack_depth,
-                ))
+                )))
                 detail.scroll_home(animate=False)
             except Exception:
                 pass
@@ -2307,11 +2322,11 @@ class NoxenApp(App):
         try:
             detail = self.query_one("#history_detail", RichLog)
             detail.clear()
-            detail.write(render_intent_detail(
+            detail.write(markup_renderable(render_intent_detail(
                 self._history_selected_entry,
                 show_stack=self._history_show_stack,
                 stack_depth=self._history_stack_depth,
-            ))
+            )))
             detail.scroll_home(animate=False)
         except Exception:
             pass
@@ -2322,11 +2337,11 @@ class NoxenApp(App):
         try:
             intercept_output = self.query_one("#intercept_output", RichLog)
             intercept_output.clear()
-            intercept_output.write(render_intent_detail(
+            intercept_output.write(markup_renderable(render_intent_detail(
                 self._current_intercepted_entry,
                 show_stack=self.show_stack,
                 stack_depth=self.stack_depth,
-            ))
+            )))
         except Exception:
             pass
 

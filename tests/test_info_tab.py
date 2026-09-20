@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import ContentSwitcher, DataTable, Label, Switch
 
-from noxen.app import NoxenApp
+from noxen.app import NoxenApp, markup_renderable
 
 
 def project_args(path):
@@ -31,6 +31,20 @@ SNAPSHOT = {
          "enabled": True, "enabledRuntime": 0},
     ],
 }
+
+
+class MarkupRenderableTests(unittest.TestCase):
+    def test_emoji_shortcodes_are_not_substituted(self):
+        # A signing SHA-256 byte 0xCD makes the value contain ":CD:", which Rich would
+        # otherwise turn into the 💿 emoji shortcode. Data must render verbatim.
+        rendered = markup_renderable("  0A:71:CF:CD:A0:45")
+        self.assertNotIn("💿", rendered.plain)
+        self.assertIn("CF:CD:A0", rendered.plain)
+
+    def test_style_tags_still_apply(self):
+        rendered = markup_renderable("[bold]\\[SIGNING][/bold]")
+        # escaped brackets render literally, and the style tag is consumed (not shown)
+        self.assertEqual(rendered.plain, "[SIGNING]")
 
 
 class InfoTabTests(unittest.IsolatedAsyncioTestCase):
