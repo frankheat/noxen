@@ -54,21 +54,113 @@ def component_enabled(component: dict) -> bool:
     return bool(component.get("enabled"))
 
 
-def is_exposed(component: dict) -> bool:
-    """Reachable by other apps with little/no barrier: exported + no or `normal` permission."""
+# ------------------------------------------------------------------
+# Access classification
+# ------------------------------------------------------------------
+
+ACCESS_OPEN = "open"
+ACCESS_WEAK = "weak"
+ACCESS_PROTECTED = "protected"
+_ACCESS_RANK = {ACCESS_OPEN: 0, ACCESS_WEAK: 1, ACCESS_PROTECTED: 2}
+
+# Protection level → the barrier it puts in front of other apps. Anything else
+# ("normal", "unresolved", "unknown") is open: normal is granted to any requester,
+# and an unresolved permission may be undefined and claimable by any app.
+_LEVEL_ACCESS = {
+    "dangerous": ACCESS_WEAK,
+    "signature": ACCESS_PROTECTED,
+    "signatureOrSystem": ACCESS_PROTECTED,
+    "internal": ACCESS_PROTECTED,
+}
+
+
+def permission_access(permission: dict | None) -> str:
+    """open / weak / protected for a single {name, level} permission (None = open)."""
+    if not permission:
+        return ACCESS_OPEN
+    return _LEVEL_ACCESS.get(permission.get("level"), ACCESS_OPEN)
+
+
+def _weakest(accesses) -> str:
+    return min(accesses, key=_ACCESS_RANK.__getitem__)
+
+
+def provider_access(component: dict) -> dict:
+    """Per-direction access of a provider: {"read": ..., "write": ...}.
+
+    A direction is guarded by the provider's read/write permission; a matching
+    <path-permission> is an alternative grant for its paths, so the weakest wins.
+    """
+    result = {}
+    for direction, key in (("read", "readPermission"), ("write", "writePermission")):
+        accesses = [permission_access(component.get(key))]
+        for path in component.get("pathPermissions") or []:
+            if path.get(key):
+                accesses.append(permission_access(path.get(key)))
+        result[direction] = _weakest(accesses)
+    return result
+
+
+def component_access(component: dict) -> str | None:
+    """open / weak / protected for an exported component; None when not exported.
+
+    A provider takes its weakest direction: it is open if either reads or writes are.
+    """
     if not component.get("exported"):
-        return False
-    permission = component.get("permission")
-    level = (permission or {}).get("level")
-    return permission is None or level == "normal"
+        return None
+    if component.get("type") == "provider":
+        return _weakest(provider_access(component).values())
+    return permission_access(component.get("permission"))
 
 
-def format_permission(permission: dict | None) -> str:
+def is_exposed(component: dict) -> bool:
+    """Reachable by other apps with little/no barrier: exported with open access."""
+    return component_access(component) == ACCESS_OPEN
+
+
+def component_permissions(component: dict) -> list[dict]:
+    """Every permission guarding a component (provider read/write and path ones included)."""
+    perms = [component.get("permission"), component.get("readPermission"), component.get("writePermission")]
+    for path in component.get("pathPermissions") or []:
+        perms += [path.get("readPermission"), path.get("writePermission")]
+    return [perm for perm in perms if perm]
+
+
+def format_permission(permission: dict | None, own_package: str | None = None) -> str:
+    """`name (level)`; with own_package, also names a third-party defining package."""
     if not permission:
         return "—"
     name = permission.get("name") or ""
-    level = permission.get("level")
-    return f"{name} ({level})" if level else name
+    parts = [permission.get("level")] if permission.get("level") else []
+    defined_by = permission.get("definedBy")
+    if own_package and defined_by and defined_by not in (own_package, "android"):
+        parts.append(f"defined by {defined_by}")
+    return f"{name} ({' · '.join(parts)})" if parts else name
+
+
+def format_component_permission(component: dict) -> str:
+    """Permission cell of the Components table.
+
+    A provider guarded by one permission for both directions (android:permission) shows
+    it like any component; otherwise the cell summarises the level per direction and the
+    path permissions, leaving the names to the detail panel.
+    """
+    if component.get("type") != "provider":
+        return format_permission(component.get("permission"))
+    read, write = component.get("readPermission"), component.get("writePermission")
+    paths = component.get("pathPermissions") or []
+    if not (read or write or paths):
+        return "—"
+    if read and write and read.get("name") == write.get("name") and not paths:
+        return format_permission(read)
+
+    def level(permission):
+        return (permission.get("level") or "?") if permission else "—"
+
+    text = f"read: {level(read)} · write: {level(write)}"
+    if paths:
+        text += f" · +{len(paths)} path{'s' if len(paths) > 1 else ''}"
+    return text
 
 
 # ------------------------------------------------------------------
@@ -80,8 +172,10 @@ def component_row(component: dict) -> list[str]:
         component.get("name") or "",
         component.get("type") or "",
         _yesno(component.get("exported")),
-        format_permission(component.get("permission")),
+        component_access(component) or "—",
         _yesno(component_enabled(component)),
+        # last: it can be long, and the short columns before it stay visible
+        format_component_permission(component),
     ]
 
 
@@ -93,6 +187,7 @@ def permission_row(permission: dict) -> list[str]:
         permission.get("source") or "",
         granted_str,
         permission.get("level") or "",
+        permission.get("definedBy") or "—",
     ]
 
 
@@ -105,15 +200,15 @@ def component_matches(component: dict, query: str) -> bool:
     fields = [
         component.get("name") or "",
         component.get("type") or "",
-        (component.get("permission") or {}).get("name") or "",
         component.get("authority") or "",
     ]
+    fields += [perm.get("name") or "" for perm in component_permissions(component)]
     return any(q in str(field).lower() for field in fields)
 
 
 def permission_matches(permission: dict, query: str) -> bool:
     q = query.lower()
-    return any(q in str(permission.get(key) or "").lower() for key in ("name", "source", "level"))
+    return any(q in str(permission.get(key) or "").lower() for key in ("name", "source", "level", "definedBy"))
 
 
 def filter_components(components, query: str = "", type_filter: str | None = None, exposed_only: bool = False) -> list:
@@ -156,6 +251,7 @@ def overview_sections(info: dict) -> list[tuple[str, list[tuple[str, str]]]]:
     requested = [p for p in permissions if p.get("source") == "requested"]
     granted = sum(1 for p in requested if p.get("granted"))
     defined = sum(1 for p in permissions if p.get("source") == "defined")
+    unresolved = sum(1 for p in requested if p.get("level") == "unresolved")
 
     def num(value):
         return str(value) if value is not None else "—"
@@ -190,8 +286,10 @@ def overview_sections(info: dict) -> list[tuple[str, list[tuple[str, str]]]]:
         ("Components", f"{len(components)}  (activities {counts['activity']} · services {counts['service']}"
                        f" · receivers {counts['receiver']} · providers {counts['provider']})"),
         ("Exported", str(counts["exported"])),
-        ("Exposed", str(counts["exposed"])),
-        ("Permissions", f"requested {len(requested)} (granted {granted}) · defined {defined}"),
+        ("Access", f"open {counts[ACCESS_OPEN]} · weak {counts[ACCESS_WEAK]}"
+                   f" · protected {counts[ACCESS_PROTECTED]}"),
+        ("Permissions", f"requested {len(requested)} (granted {granted}) · defined {defined}"
+                        + (f" · unresolved {unresolved}" if unresolved else "")),
     ]
     return [
         ("IDENTITY", identity_rows),
@@ -213,13 +311,16 @@ def render_overview(info: dict) -> str:
 
 
 def component_counts(components) -> dict:
-    counts = {"activity": 0, "service": 0, "receiver": 0, "provider": 0, "exported": 0, "exposed": 0}
+    """Per-type counts, exported count, and the access class of exported components."""
+    counts = {"activity": 0, "service": 0, "receiver": 0, "provider": 0, "exported": 0,
+              ACCESS_OPEN: 0, ACCESS_WEAK: 0, ACCESS_PROTECTED: 0}
     for component in components or []:
         counts[component.get("type")] = counts.get(component.get("type"), 0) + 1
         if component.get("exported"):
             counts["exported"] += 1
-        if is_exposed(component):
-            counts["exposed"] += 1
+        access = component_access(component)
+        if access:
+            counts[access] += 1
     return counts
 
 
@@ -227,7 +328,13 @@ def component_counts(components) -> dict:
 # Component detail
 # ------------------------------------------------------------------
 
-def render_component_detail(component: dict) -> str:
+_UNRESOLVED_NOTE = [
+    "unresolved: no package defines it (any app could define and claim it), or its",
+    "defining app is hidden by package visibility. Check: adb shell pm list permissions -f",
+]
+
+
+def render_component_detail(component: dict, own_package: str | None = None) -> str:
     out = [
         f"[bold]{_markup(component.get('name'))}[/bold]  [dim]· {_markup(component.get('type'))}[/dim]",
         "",
@@ -236,8 +343,22 @@ def render_component_detail(component: dict) -> str:
     def row(label, value):
         out.append(f"  [dim]{label:<18}[/dim] {value}")
 
+    def perm(permission):
+        return _markup(format_permission(permission, own_package))
+
+    def path_of(entry):
+        return f"{_markup(entry.get('match'))} {_markup(entry.get('path'))}"
+
+    component_type = component.get("type")
+    access = component_access(component)
     row("Exported", _yesno(component.get("exported")))
-    row("Permission", _markup(format_permission(component.get("permission"))))
+    if component_type == "provider":
+        directions = provider_access(component)
+        detail = f"  [dim](read: {directions['read']} · write: {directions['write']})[/dim]" if access else ""
+        row("Access", f"{access or '—'}{detail}")
+    else:
+        row("Access", access or "—")
+        row("Permission", perm(component.get("permission")))
     runtime = component.get("enabledRuntime")
     enabled = _yesno(component_enabled(component))
     if runtime:
@@ -247,7 +368,6 @@ def render_component_detail(component: dict) -> str:
     if component.get("directBootAware"):
         row("Direct boot aware", "yes")
 
-    component_type = component.get("type")
     if component_type == "activity":
         if component.get("targetActivity"):
             row("Target activity", f"{_markup(component.get('targetActivity'))}  [dim](alias)[/dim]")
@@ -257,10 +377,20 @@ def render_component_detail(component: dict) -> str:
         row("FGS type", _markup(component.get("foregroundServiceType")))
     elif component_type == "provider":
         row("Authority", _markup(component.get("authority") or "—"))
-        row("Read permission", _markup(component.get("readPermission") or "—"))
-        row("Write permission", _markup(component.get("writePermission") or "—"))
+        row("Read permission", perm(component.get("readPermission")))
+        row("Write permission", perm(component.get("writePermission")))
+        for index, entry in enumerate(component.get("pathPermissions") or []):
+            row("Path permissions" if index == 0 else "",
+                f"{path_of(entry)}  [dim]read:[/dim] {perm(entry.get('readPermission'))}"
+                f"  [dim]write:[/dim] {perm(entry.get('writePermission'))}")
         row("Grant URI perms", _yesno(component.get("grantUriPermissions")))
+        for index, entry in enumerate(component.get("grantUriPatterns") or []):
+            row("Grant URI paths" if index == 0 else "", path_of(entry))
         if component.get("multiprocess"):
             row("Multiprocess", "yes")
+
+    if any(p.get("level") == "unresolved" for p in component_permissions(component)):
+        out.append("")
+        out.extend(f"  [dim]{line}[/dim]" for line in _UNRESOLVED_NOTE)
 
     return "\n".join(out)

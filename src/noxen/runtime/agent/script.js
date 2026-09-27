@@ -195,15 +195,23 @@ var PROTECTION_LEVELS = {
   0: "normal", 1: "dangerous", 2: "signature", 3: "signatureOrSystem", 4: "internal"
 };
 
-// {name, level} for a permission, or null. level is "unknown" when the permission
-// is not declared by any installed/visible package.
+// {name, level, definedBy} for a permission, or null. level is "unresolved" when
+// Android cannot resolve it for this app: either no package defines it (another app
+// could define and claim it) or its defining app is hidden by package visibility —
+// the two are indistinguishable from inside the target. "unknown" means the base
+// protection level is not one we map. definedBy is the defining package, if known.
 function describePermission(pm, permName) {
   if (!permName) return null;
-  var level = "unknown";
+  var level = "unresolved";
+  var definedBy = null;
   try {
-    level = PROTECTION_LEVELS[pm.getPermissionInfo(permName, 0).protectionLevel.value & 0xf] || "unknown";
+    var info = pm.getPermissionInfo(permName, 0);
+    if (info !== null) {
+      level = PROTECTION_LEVELS[info.protectionLevel.value & 0xf] || "unknown";
+      definedBy = info.packageName.value ? String(info.packageName.value) : null;
+    }
   } catch (e) {}
-  return { name: String(permName), level: level };
+  return { name: String(permName), level: level, definedBy: definedBy };
 }
 
 // Effective permission guarding a component: its own android:permission, falling
@@ -585,9 +593,9 @@ rpc.exports = {
 
         var GET_ACTIVITIES = 1, GET_RECEIVERS = 2, GET_SERVICES = 4, GET_PROVIDERS = 8,
             GET_META_DATA = 128, GET_SIGNATURES = 64, GET_PERMISSIONS = 4096,
-            GET_SIGNING_CERTIFICATES = 134217728;
+            GET_URI_PERMISSION_PATTERNS = 2048, GET_SIGNING_CERTIFICATES = 134217728;
         var flags = GET_ACTIVITIES | GET_RECEIVERS | GET_SERVICES | GET_PROVIDERS |
-                    GET_META_DATA | GET_PERMISSIONS |
+                    GET_META_DATA | GET_PERMISSIONS | GET_URI_PERMISSION_PATTERNS |
                     (sdkInt >= 28 ? GET_SIGNING_CERTIFICATES : GET_SIGNATURES);
         var pi = pm.getPackageInfo(pkg, flags);
         var ai = pi.applicationInfo.value;
@@ -653,7 +661,8 @@ rpc.exports = {
               var nm = String(req[i]);
               var granted = fl !== null ? ((fl[i] & 2) !== 0) : null;
               var dp = describePermission(pm, nm);
-              perms.push({ name: nm, source: "requested", granted: granted, level: dp ? dp.level : "unknown" });
+              perms.push({ name: nm, source: "requested", granted: granted,
+                           level: dp.level, definedBy: dp.definedBy });
             }
           }
         });
@@ -663,13 +672,36 @@ rpc.exports = {
             for (var i = 0; i < defs.length; i++) {
               var p = defs[i];
               perms.push({ name: String(p.name.value), source: "defined", granted: null,
-                           level: (PROTECTION_LEVELS[p.protectionLevel.value & 0xf] || "unknown") });
+                           level: (PROTECTION_LEVELS[p.protectionLevel.value & 0xf] || "unknown"),
+                           definedBy: pkg });
             }
           }
         });
         out.permissions = perms;
 
         var ComponentName = Java.use("android.content.ComponentName");
+        // PatternMatcher type → the manifest attribute that declares that kind of path.
+        var PATH_MATCH = { 0: "path", 1: "pathPrefix", 2: "pathPattern", 3: "pathAdvancedPattern", 4: "pathSuffix" };
+        function pathOf(pattern) {
+          return { match: PATH_MATCH[pattern.getType()] || "path", path: s(pattern.getPath()) };
+        }
+        function pathPermissions(arr) {
+          var res = [];
+          if (arr === null) return res;
+          for (var i = 0; i < arr.length; i++) {
+            var pp = pathOf(arr[i]);
+            pp.readPermission = describePermission(pm, s(arr[i].getReadPermission()));
+            pp.writePermission = describePermission(pm, s(arr[i].getWritePermission()));
+            res.push(pp);
+          }
+          return res;
+        }
+        function uriPatterns(arr) {
+          var res = [];
+          if (arr === null) return res;
+          for (var i = 0; i < arr.length; i++) res.push(pathOf(arr[i]));
+          return res;
+        }
         function enumComponents(arr, type) {
           var res = [];
           if (arr === null) return res;
@@ -680,7 +712,9 @@ rpc.exports = {
               name: name,
               type: type,
               exported: tryGet(function () { return ci.exported.value; }),
-              permission: describePermission(pm, effectiveComponentPermission(ci)),
+              // ProviderInfo has no `permission` field: a provider's android:permission is
+              // split into readPermission/writePermission (collected below).
+              permission: type === "provider" ? null : describePermission(pm, effectiveComponentPermission(ci)),
               enabled: tryGet(function () { return ci.enabled.value; }),
               enabledRuntime: tryGet(function () { return pm.getComponentEnabledSetting(ComponentName.$new(pkg, name)); }),
               processName: tryGet(function () { return s(ci.processName.value); }),
@@ -694,9 +728,11 @@ rpc.exports = {
               c.foregroundServiceType = tryGet(function () { return ci.foregroundServiceType.value; });
             } else if (type === "provider") {
               c.authority = tryGet(function () { return s(ci.authority.value); });
-              c.readPermission = tryGet(function () { return s(ci.readPermission.value); });
-              c.writePermission = tryGet(function () { return s(ci.writePermission.value); });
+              c.readPermission = describePermission(pm, tryGet(function () { return s(ci.readPermission.value); }));
+              c.writePermission = describePermission(pm, tryGet(function () { return s(ci.writePermission.value); }));
+              c.pathPermissions = tryGet(function () { return pathPermissions(ci.pathPermissions.value); }) || [];
               c.grantUriPermissions = tryGet(function () { return ci.grantUriPermissions.value; });
+              c.grantUriPatterns = tryGet(function () { return uriPatterns(ci.uriPermissionPatterns.value); }) || [];
               c.multiprocess = tryGet(function () { return ci.multiprocess.value; });
             }
             res.push(c);

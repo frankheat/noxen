@@ -13666,12 +13666,17 @@ std_string_c_str (StdString * self)
   };
   function describePermission(pm, permName) {
     if (!permName) return null;
-    var level = "unknown";
+    var level = "unresolved";
+    var definedBy = null;
     try {
-      level = PROTECTION_LEVELS[pm.getPermissionInfo(permName, 0).protectionLevel.value & 15] || "unknown";
+      var info = pm.getPermissionInfo(permName, 0);
+      if (info !== null) {
+        level = PROTECTION_LEVELS[info.protectionLevel.value & 15] || "unknown";
+        definedBy = info.packageName.value ? String(info.packageName.value) : null;
+      }
     } catch (e) {
     }
-    return { name: String(permName), level };
+    return { name: String(permName), level, definedBy };
   }
   function effectiveComponentPermission(componentInfo) {
     try {
@@ -14005,7 +14010,24 @@ std_string_c_str (StdString * self)
           }
         }
         try {
-          let enumComponents = function(arr, type) {
+          let pathOf = function(pattern) {
+            return { match: PATH_MATCH[pattern.getType()] || "path", path: s(pattern.getPath()) };
+          }, pathPermissions = function(arr) {
+            var res = [];
+            if (arr === null) return res;
+            for (var i = 0; i < arr.length; i++) {
+              var pp = pathOf(arr[i]);
+              pp.readPermission = describePermission(pm, s(arr[i].getReadPermission()));
+              pp.writePermission = describePermission(pm, s(arr[i].getWritePermission()));
+              res.push(pp);
+            }
+            return res;
+          }, uriPatterns = function(arr) {
+            var res = [];
+            if (arr === null) return res;
+            for (var i = 0; i < arr.length; i++) res.push(pathOf(arr[i]));
+            return res;
+          }, enumComponents = function(arr, type) {
             var res = [];
             if (arr === null) return res;
             for (var i = 0; i < arr.length; i++) {
@@ -14019,7 +14041,9 @@ std_string_c_str (StdString * self)
                 exported: tryGet(function() {
                   return ci.exported.value;
                 }),
-                permission: describePermission(pm, effectiveComponentPermission(ci)),
+                // ProviderInfo has no `permission` field: a provider's android:permission is
+                // split into readPermission/writePermission (collected below).
+                permission: type === "provider" ? null : describePermission(pm, effectiveComponentPermission(ci)),
                 enabled: tryGet(function() {
                   return ci.enabled.value;
                 }),
@@ -14051,15 +14075,21 @@ std_string_c_str (StdString * self)
                 c.authority = tryGet(function() {
                   return s(ci.authority.value);
                 });
-                c.readPermission = tryGet(function() {
+                c.readPermission = describePermission(pm, tryGet(function() {
                   return s(ci.readPermission.value);
-                });
-                c.writePermission = tryGet(function() {
+                }));
+                c.writePermission = describePermission(pm, tryGet(function() {
                   return s(ci.writePermission.value);
-                });
+                }));
+                c.pathPermissions = tryGet(function() {
+                  return pathPermissions(ci.pathPermissions.value);
+                }) || [];
                 c.grantUriPermissions = tryGet(function() {
                   return ci.grantUriPermissions.value;
                 });
+                c.grantUriPatterns = tryGet(function() {
+                  return uriPatterns(ci.uriPermissionPatterns.value);
+                }) || [];
                 c.multiprocess = tryGet(function() {
                   return ci.multiprocess.value;
                 });
@@ -14073,8 +14103,8 @@ std_string_c_str (StdString * self)
           var pm = ctx.getPackageManager();
           var pkg = String(ctx.getPackageName());
           var sdkInt = Java.use("android.os.Build$VERSION").SDK_INT.value;
-          var GET_ACTIVITIES = 1, GET_RECEIVERS = 2, GET_SERVICES = 4, GET_PROVIDERS = 8, GET_META_DATA = 128, GET_SIGNATURES = 64, GET_PERMISSIONS = 4096, GET_SIGNING_CERTIFICATES = 134217728;
-          var flags = GET_ACTIVITIES | GET_RECEIVERS | GET_SERVICES | GET_PROVIDERS | GET_META_DATA | GET_PERMISSIONS | (sdkInt >= 28 ? GET_SIGNING_CERTIFICATES : GET_SIGNATURES);
+          var GET_ACTIVITIES = 1, GET_RECEIVERS = 2, GET_SERVICES = 4, GET_PROVIDERS = 8, GET_META_DATA = 128, GET_SIGNATURES = 64, GET_PERMISSIONS = 4096, GET_URI_PERMISSION_PATTERNS = 2048, GET_SIGNING_CERTIFICATES = 134217728;
+          var flags = GET_ACTIVITIES | GET_RECEIVERS | GET_SERVICES | GET_PROVIDERS | GET_META_DATA | GET_PERMISSIONS | GET_URI_PERMISSION_PATTERNS | (sdkInt >= 28 ? GET_SIGNING_CERTIFICATES : GET_SIGNATURES);
           var pi = pm.getPackageInfo(pkg, flags);
           var ai = pi.applicationInfo.value;
           out.identity = {
@@ -14165,7 +14195,13 @@ std_string_c_str (StdString * self)
                 var nm = String(req[i]);
                 var granted = fl !== null ? (fl[i] & 2) !== 0 : null;
                 var dp = describePermission(pm, nm);
-                perms.push({ name: nm, source: "requested", granted, level: dp ? dp.level : "unknown" });
+                perms.push({
+                  name: nm,
+                  source: "requested",
+                  granted,
+                  level: dp.level,
+                  definedBy: dp.definedBy
+                });
               }
             }
           });
@@ -14178,13 +14214,15 @@ std_string_c_str (StdString * self)
                   name: String(p.name.value),
                   source: "defined",
                   granted: null,
-                  level: PROTECTION_LEVELS[p.protectionLevel.value & 15] || "unknown"
+                  level: PROTECTION_LEVELS[p.protectionLevel.value & 15] || "unknown",
+                  definedBy: pkg
                 });
               }
             }
           });
           out.permissions = perms;
           var ComponentName = Java.use("android.content.ComponentName");
+          var PATH_MATCH = { 0: "path", 1: "pathPrefix", 2: "pathPattern", 3: "pathAdvancedPattern", 4: "pathSuffix" };
           var comps = [];
           comps = comps.concat(enumComponents(pi.activities.value, "activity"));
           comps = comps.concat(enumComponents(pi.services.value, "service"));

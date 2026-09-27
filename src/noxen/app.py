@@ -1321,8 +1321,12 @@ class NoxenApp(App):
     # --- Info app tab ---
 
     def _init_info_tab(self) -> None:
-        self.query_one("#info_perm_table", DataTable).add_columns("Permission", "Source", "Granted", "Level")
-        self.query_one("#info_comp_table", DataTable).add_columns("Name", "Type", "Exported", "Permission", "Enabled")
+        self.query_one("#info_perm_table", DataTable).add_columns(
+            "Permission", "Source", "Granted", "Level", "Defined by"
+        )
+        self.query_one("#info_comp_table", DataTable).add_columns(
+            "Name", "Type", "Exported", "Access", "Enabled", "Permission"
+        )
         self.query_one("#info_switcher", ContentSwitcher).display = False
 
     def _switch_info_view(self, nav_id: str) -> None:
@@ -1685,7 +1689,8 @@ class NoxenApp(App):
                 try:
                     detail = self.query_one("#info_comp_detail", RichLog)
                     detail.clear()
-                    detail.write(markup_renderable(render_component_detail(comp)))
+                    own_package = ((self._app_info or {}).get("identity") or {}).get("package")
+                    detail.write(markup_renderable(render_component_detail(comp, own_package)))
                     detail.scroll_home(animate=False)
                 except Exception:
                     pass
