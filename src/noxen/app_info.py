@@ -236,6 +236,83 @@ def filter_permissions(permissions, query: str = "", source: str | None = None) 
 
 
 # ------------------------------------------------------------------
+# Sorting
+# ------------------------------------------------------------------
+
+# (key, header label) in display order; keys are the sort columns below and must
+# match the cell order of component_row / permission_row.
+COMPONENT_COLUMNS = [
+    ("name", "Name"), ("type", "Type"), ("exported", "Exported"),
+    ("access", "Access"), ("enabled", "Enabled"), ("permission", "Permission"),
+]
+PERMISSION_COLUMNS = [
+    ("name", "Permission"), ("source", "Source"), ("granted", "Granted"),
+    ("level", "Level"), ("definedBy", "Defined by"),
+]
+
+# Semantic orders: ascending goes from the most exposed to the most protected.
+_TYPE_ORDER = {"activity": 0, "service": 1, "receiver": 2, "provider": 3}
+# None = not exported: a real value (unreachable, so after protected), not an empty cell.
+_ACCESS_ORDER = {ACCESS_OPEN: 0, ACCESS_WEAK: 1, ACCESS_PROTECTED: 2, None: 3}
+_LEVEL_ORDER = {"unresolved": 0, "unknown": 1, "normal": 2, "dangerous": 3,
+                "signature": 4, "signatureOrSystem": 5, "internal": 6}
+
+
+def component_sort_value(component: dict, column: str):
+    """Sort value of a Components column; None marks an empty cell."""
+    if column == "type":
+        return _TYPE_ORDER.get(component.get("type"), len(_TYPE_ORDER))
+    if column == "exported":
+        return 0 if component.get("exported") else 1
+    if column == "access":
+        return _ACCESS_ORDER[component_access(component)]
+    if column == "enabled":
+        return 0 if component_enabled(component) else 1
+    if column == "permission":
+        cell = format_component_permission(component)
+        return None if cell == "—" else cell.lower()
+    return (component.get("name") or "").lower()
+
+
+def permission_sort_value(permission: dict, column: str):
+    """Sort value of a Permissions column; None marks an empty cell."""
+    if column == "source":
+        return permission.get("source") or None
+    if column == "granted":
+        granted = permission.get("granted")
+        return None if granted is None else (0 if granted else 1)
+    if column == "level":
+        level = permission.get("level")
+        return None if not level else _LEVEL_ORDER.get(level, len(_LEVEL_ORDER))
+    if column == "definedBy":
+        return (permission.get("definedBy") or "").lower() or None
+    return (permission.get("name") or "").lower()
+
+
+def _sort_rows(items, value, reverse: bool, tie_key) -> list:
+    """Sort by `value`, ties by name (always ascending), empty cells always last."""
+    ordered = sorted(items or [], key=tie_key)
+    present = [item for item in ordered if value(item) is not None]
+    empty = [item for item in ordered if value(item) is None]
+    present.sort(key=value, reverse=reverse)  # stable: ties keep the name order
+    return present + empty
+
+
+def sort_components(components, column: str | None, reverse: bool = False) -> list:
+    if not column:
+        return list(components or [])
+    return _sort_rows(components, lambda c: component_sort_value(c, column), reverse,
+                      lambda c: (c.get("name") or "").lower())
+
+
+def sort_permissions(permissions, column: str | None, reverse: bool = False) -> list:
+    if not column:
+        return list(permissions or [])
+    return _sort_rows(permissions, lambda p: permission_sort_value(p, column), reverse,
+                      lambda p: ((p.get("name") or "").lower(), p.get("source") or ""))
+
+
+# ------------------------------------------------------------------
 # Overview
 # ------------------------------------------------------------------
 

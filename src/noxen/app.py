@@ -41,12 +41,16 @@ from noxen.commands import (
     resolve_submitted_command,
 )
 from noxen.app_info import (
+    COMPONENT_COLUMNS,
+    PERMISSION_COLUMNS,
     component_row,
     filter_components,
     filter_permissions,
     permission_row,
     render_component_detail,
     render_overview,
+    sort_components,
+    sort_permissions,
 )
 from noxen.db import ProjectDB
 from noxen.exporting import (
@@ -238,6 +242,12 @@ class NoxenApp(App):
         self.stack_depth = self._settings["stack_depth"]
         self._all_intents = []
         self._app_info: dict | None = None
+        # Info app table sort (column key, reverse); session-only. Components start by type.
+        self._info_sort: dict[str, tuple[str | None, bool]] = {
+            "info_comp_table": ("type", False),
+            "info_perm_table": (None, False),
+        }
+        self._info_selected_component: str | None = None
         self._history_refresh_pending = False
         self._pending_append: list = []
         self._sort_column: str | None = "id"
@@ -1321,12 +1331,8 @@ class NoxenApp(App):
     # --- Info app tab ---
 
     def _init_info_tab(self) -> None:
-        self.query_one("#info_perm_table", DataTable).add_columns(
-            "Permission", "Source", "Granted", "Level", "Defined by"
-        )
-        self.query_one("#info_comp_table", DataTable).add_columns(
-            "Name", "Type", "Exported", "Access", "Enabled", "Permission"
-        )
+        self._set_info_columns("info_perm_table")
+        self._set_info_columns("info_comp_table")
         self.query_one("#info_switcher", ContentSwitcher).display = False
 
     def _switch_info_view(self, nav_id: str) -> None:
@@ -1392,9 +1398,10 @@ class NoxenApp(App):
         source = self.query_one("#info_perm_source", Select).value
         source = None if source == "all" else source
         query = self.query_one("#info_perm_search", Input).value.strip()
-        table = self.query_one("#info_perm_table", DataTable)
-        table.clear()
-        for perm in filter_permissions(self._app_info.get("permissions"), query=query, source=source):
+        column, reverse = self._info_sort["info_perm_table"]
+        perms = filter_permissions(self._app_info.get("permissions"), query=query, source=source)
+        table = self._set_info_columns("info_perm_table")
+        for perm in sort_permissions(perms, column, reverse):
             table.add_row(*permission_row(perm))
 
     def _refresh_info_components(self) -> None:
@@ -1404,16 +1411,37 @@ class NoxenApp(App):
         type_filter = None if type_value == "all" else type_value
         exposed = self.query_one("#info_comp_exposed", Switch).value
         query = self.query_one("#info_comp_search", Input).value.strip()
-        table = self.query_one("#info_comp_table", DataTable)
-        table.clear()
-        for comp in filter_components(
-            self._app_info.get("components"), query=query, type_filter=type_filter, exposed_only=exposed
-        ):
+        column, reverse = self._info_sort["info_comp_table"]
+        comps = sort_components(
+            filter_components(self._app_info.get("components"), query=query,
+                              type_filter=type_filter, exposed_only=exposed),
+            column, reverse,
+        )
+        table = self._set_info_columns("info_comp_table")
+        for comp in comps:
             table.add_row(*component_row(comp), key=comp.get("name"))
-        self.query_one("#info_comp_detail", RichLog).clear()
+        # Keep the selected component (and its detail) across re-sorts and filter changes.
+        index = next((i for i, c in enumerate(comps) if c.get("name") == self._info_selected_component), None)
+        if index is None:
+            self._info_selected_component = None
+            self.query_one("#info_comp_detail", RichLog).clear()
+        else:
+            table.move_cursor(row=index, animate=False)
+
+    def _set_info_columns(self, table_id: str) -> DataTable:
+        """Rebuild an Info app table's columns (and clear its rows), marking the sort column."""
+        table = self.query_one(f"#{table_id}", DataTable)
+        column, reverse = self._info_sort[table_id]
+        specs = COMPONENT_COLUMNS if table_id == "info_comp_table" else PERMISSION_COLUMNS
+        table.clear(columns=True)
+        for key, label in specs:
+            indicator = (" ↓" if reverse else " ↑") if key == column else ""
+            table.add_column(label + indicator, key=key)
+        return table
 
     def _clear_info_tab(self) -> None:
         self._app_info = None
+        self._info_selected_component = None
         try:
             self.query_one("#info_switcher", ContentSwitcher).display = False
             self.query_one("#info_empty", Label).display = True
@@ -1681,6 +1709,7 @@ class NoxenApp(App):
             if event.row_key is None or event.row_key.value is None:
                 return
             name = event.row_key.value
+            self._info_selected_component = name
             comp = next(
                 (c for c in (self._app_info or {}).get("components", []) if c.get("name") == name),
                 None,
@@ -1716,6 +1745,16 @@ class NoxenApp(App):
                 pass
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
+        table_id = event.data_table.id
+        if table_id in self._info_sort:
+            column, reverse = self._info_sort[table_id]
+            key = event.column_key.value
+            self._info_sort[table_id] = (key, not reverse) if key == column else (key, False)
+            if table_id == "info_comp_table":
+                self._refresh_info_components()
+            else:
+                self._refresh_info_permissions()
+            return
         if event.data_table.id != "history_table":
             return
         col_key = event.column_key.value

@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from textual.widgets import ContentSwitcher, DataTable, Label, Switch
+from textual.widgets import ContentSwitcher, DataTable, Label, RichLog, Switch
+from textual.widgets.data_table import ColumnKey
 
 from noxen.app import NoxenApp, markup_renderable
 
@@ -81,6 +82,55 @@ class InfoTabTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     self.assertFalse(app.query_one("#info_switcher", ContentSwitcher).display)
                     self.assertIsNone(app._app_info)
+            finally:
+                os.chdir(cwd)
+
+
+    async def test_sorting_by_header_keeps_selection(self):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                app = NoxenApp(project_args(os.path.join(tmp, "p.noxen")))
+                async with app.run_test(size=(120, 40)) as pilot:
+                    app._apply_app_info(SNAPSHOT)
+                    app.query_one("TabbedContent").active = "tab_info"
+                    app._switch_info_view("info_nav_components")
+                    await pilot.pause()
+                    table = app.query_one("#info_comp_table", DataTable)
+
+                    def row_names():
+                        return [key.value for key in table.rows]
+
+                    def header(key):
+                        return str(table.columns[ColumnKey(key)].label)
+
+                    async def click_header(key):
+                        column = table.columns[ColumnKey(key)]
+                        index = list(table.columns).index(ColumnKey(key))
+                        table.post_message(DataTable.HeaderSelected(table, ColumnKey(key), index, column.label))
+                        await pilot.pause()
+                        await pilot.pause()
+
+                    # initial state: by component type (activity first), ties by name
+                    self.assertEqual(row_names(), ["com.x.A1", "com.x.R1", "com.x.R2"])
+                    self.assertEqual(header("type"), "Type ↑")
+
+                    # select R2, then sort by Access: open ones first, not exported last
+                    table.move_cursor(row=2)
+                    await pilot.pause()
+                    await click_header("access")
+                    self.assertEqual(row_names(), ["com.x.R1", "com.x.R2", "com.x.A1"])
+                    self.assertEqual(header("access"), "Access ↑")
+                    self.assertEqual(header("type"), "Type")
+                    self.assertEqual(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value, "com.x.R2")
+                    self.assertTrue(app.query_one("#info_comp_detail", RichLog).lines)
+
+                    # second click reverses: not exported first, ties still by name
+                    await click_header("access")
+                    self.assertEqual(row_names(), ["com.x.A1", "com.x.R1", "com.x.R2"])
+                    self.assertEqual(header("access"), "Access ↓")
+                    self.assertEqual(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value, "com.x.R2")
             finally:
                 os.chdir(cwd)
 

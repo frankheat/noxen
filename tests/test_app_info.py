@@ -1,6 +1,8 @@
 import unittest
 
 from noxen.app_info import (
+    COMPONENT_COLUMNS,
+    PERMISSION_COLUMNS,
     component_access,
     component_counts,
     component_enabled,
@@ -15,6 +17,8 @@ from noxen.app_info import (
     permission_row,
     provider_access,
     render_component_detail,
+    sort_components,
+    sort_permissions,
 )
 
 
@@ -227,6 +231,62 @@ class AccessTests(unittest.TestCase):
                                  "level": "unresolved", "definedBy": None}], "components": []}
         summary = dict(dict(overview_sections(info))["SUMMARY"])
         self.assertEqual(summary["Permissions"], "requested 1 (granted 0) · defined 0 · unresolved 1")
+
+
+def comp(name, type_="receiver", exported=True, permission=None, enabled=True):
+    return {"name": name, "type": type_, "exported": exported, "permission": permission,
+            "enabled": enabled, "enabledRuntime": 0}
+
+
+def names(items):
+    return [item["name"] for item in items]
+
+
+class SortTests(unittest.TestCase):
+    def test_unsorted_keeps_original_order(self):
+        items = [comp("b"), comp("a")]
+        self.assertEqual(names(sort_components(items, None)), ["b", "a"])
+
+    def test_type_follows_manifest_order_then_name(self):
+        items = [comp("z.Provider", "provider"), comp("b.Act", "activity"), comp("r.Rec", "receiver"),
+                 comp("s.Svc", "service"), comp("a.Act", "activity")]
+        self.assertEqual(names(sort_components(items, "type")),
+                         ["a.Act", "b.Act", "s.Svc", "r.Rec", "z.Provider"])
+
+    def test_access_goes_from_most_exposed_and_not_exported_is_a_value(self):
+        items = [comp("prot", permission=perm("p", "signature")), comp("hidden", exported=False),
+                 comp("weak", permission=perm("p", "dangerous")), comp("open")]
+        self.assertEqual(names(sort_components(items, "access")), ["open", "weak", "prot", "hidden"])
+        # "not exported" is a real value, so it moves to the top when reversed
+        self.assertEqual(names(sort_components(items, "access", reverse=True)), ["hidden", "prot", "weak", "open"])
+
+    def test_ties_stay_in_name_order_in_both_directions(self):
+        items = [comp("c"), comp("a"), comp("b", permission=perm("p", "signature"))]
+        self.assertEqual(names(sort_components(items, "access")), ["a", "c", "b"])
+        self.assertEqual(names(sort_components(items, "access", reverse=True)), ["b", "a", "c"])
+
+    def test_empty_permission_cells_stay_last_in_both_directions(self):
+        items = [comp("none1"), comp("x", permission=perm("com.b.P", "normal")), comp("none2"),
+                 comp("y", permission=perm("com.a.P", "normal"))]
+        self.assertEqual(names(sort_components(items, "permission")), ["y", "x", "none1", "none2"])
+        self.assertEqual(names(sort_components(items, "permission", reverse=True)), ["x", "y", "none1", "none2"])
+
+    def test_permission_level_is_semantic_and_empty_cells_last(self):
+        perms = [
+            {"name": "sig", "source": "requested", "granted": True, "level": "signature", "definedBy": "android"},
+            {"name": "ghost", "source": "requested", "granted": False, "level": "unresolved", "definedBy": None},
+            {"name": "dng", "source": "requested", "granted": False, "level": "dangerous", "definedBy": "com.x"},
+            {"name": "own", "source": "defined", "granted": None, "level": "normal", "definedBy": "com.x"},
+        ]
+        self.assertEqual(names(sort_permissions(perms, "level")), ["ghost", "own", "dng", "sig"])
+        # granted n/a (defined permission) and unknown definer are empty cells → always last
+        self.assertEqual(names(sort_permissions(perms, "granted", reverse=True)), ["dng", "ghost", "sig", "own"])
+        self.assertEqual(names(sort_permissions(perms, "definedBy")), ["sig", "dng", "own", "ghost"])
+        self.assertEqual(names(sort_permissions(perms, "definedBy", reverse=True)), ["dng", "own", "sig", "ghost"])
+
+    def test_columns_match_row_cells(self):
+        self.assertEqual(len(COMPONENT_COLUMNS), len(component_row(comp("a"))))
+        self.assertEqual(len(PERMISSION_COLUMNS), len(permission_row(SNAPSHOT["permissions"][0])))
 
 
 if __name__ == "__main__":
