@@ -84,6 +84,8 @@ function dumpIntent(intent) {
     infoIntent.component = component ? (component.getPackageName() + "/" + component.getClassName()) : null;
     infoIntent.action = intent.getAction() || null    
     infoIntent.data = intent.getDataString() || null
+    // Package set with setPackage(): limits an implicit intent to that app (null = any app).
+    infoIntent.package = intent.getPackage() || null;
     infoIntent.flags = intent.getFlags(); 
 
     var cats = intent.getCategories(); 
@@ -314,6 +316,7 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
     } else if (intent !== null) {
       result.intentExplicit = intent.getComponent() !== null;
       var targetType = SENDING_TARGET_TYPE[methodName];
+      if (targetType) result.targetType = targetType;
       // 'this' is the Context for ContextWrapper sends; the Context is the first
       // argument for the static PendingIntent factories.
       var sendContext = (self && self.getPackageManager) ? self : firstArg;

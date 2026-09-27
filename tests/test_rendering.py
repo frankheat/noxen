@@ -436,6 +436,47 @@ class RenderingTests(unittest.TestCase):
         })
         self.assertIn("  Target        : com.example/.Activity8 (resolved)", plain(render_intent_detail(resolved_single)))
 
+    def test_implicit_intent_scope_and_package_row(self):
+        base = {
+            "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",
+            "class": "com.example.MainActivity", "method": "sendBroadcast", "stackTrace": [],
+            "attackSurface": {"intentExplicit": False, "targetType": "receiver"},
+        }
+        open_to_all = dict(base, intent={"action": "com.example.PING", "package": None})
+        scoped = dict(base, intent={"action": "com.example.PING", "package": "com.example"})
+        legacy = dict(base, intent={"action": "com.example.PING"})  # captured before the package was recorded
+
+        self.assertIn("  Type          : IMPLICIT (any app)", plain(render_intent_detail(open_to_all)))
+        self.assertNotIn("Package", plain(render_intent_detail(open_to_all)))
+        self.assertIn("  Type          : IMPLICIT (package-scoped)", plain(render_intent_detail(scoped)))
+        self.assertIn("  Package       : com.example", plain(render_intent_detail(scoped)))
+        legacy_text = plain(render_intent_detail(legacy))
+        self.assertIn("  Type          : IMPLICIT\n", legacy_text)  # no guess for old captures
+
+    def test_explicit_intent_type_is_unqualified(self):
+        entry = {
+            "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",
+            "class": "com.example.MainActivity", "method": "startActivity", "stackTrace": [],
+            "intent": {"component": "com.example/.A", "package": None},
+            "attackSurface": {"intentExplicit": True, "targetComponent": "com.example/.A", "targetType": "activity"},
+        }
+        self.assertIn("  Type          : EXPLICIT\n", plain(render_intent_detail(entry)))
+
+    def test_broadcast_without_manifest_receiver_is_not_called_unresolved(self):
+        base = {
+            "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",
+            "class": "com.example.MainActivity", "stackTrace": [], "intent": {"package": None},
+        }
+        broadcast = dict(base, method="sendBroadcast",
+                         attackSurface={"intentExplicit": False, "targetType": "receiver"})
+        text = plain(render_intent_detail(broadcast))
+        self.assertIn("  Target        : (no manifest receiver) — dynamic receivers are not visible", text)
+        self.assertNotIn("(unresolved)", text)
+        # activities have no runtime-registered handlers: "unresolved" stays accurate
+        activity = dict(base, method="startActivity",
+                        attackSurface={"intentExplicit": False, "targetType": "activity"})
+        self.assertIn("  Target        : (unresolved)", plain(render_intent_detail(activity)))
+
     def test_detail_grey_scale_dims_labels_not_values(self):
         entry = {
             "id": 3, "timestamp": "2026-04-27T12:34:56+00:00",

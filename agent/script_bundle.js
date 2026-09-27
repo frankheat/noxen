@@ -13564,6 +13564,7 @@ std_string_c_str (StdString * self)
       infoIntent.component = component ? component.getPackageName() + "/" + component.getClassName() : null;
       infoIntent.action = intent.getAction() || null;
       infoIntent.data = intent.getDataString() || null;
+      infoIntent.package = intent.getPackage() || null;
       infoIntent.flags = intent.getFlags();
       var cats = intent.getCategories();
       var catList = [];
@@ -13770,6 +13771,7 @@ std_string_c_str (StdString * self)
       } else if (intent !== null) {
         result.intentExplicit = intent.getComponent() !== null;
         var targetType = SENDING_TARGET_TYPE[methodName];
+        if (targetType) result.targetType = targetType;
         var sendContext = self && self.getPackageManager ? self : firstArg;
         var sendPm = getPackageManagerSafe(sendContext);
         if (sendPm && targetType) {

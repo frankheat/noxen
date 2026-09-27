@@ -283,6 +283,10 @@ def _target_lines(attack_surface: dict) -> list[str]:
         return lines
     if attack_surface.get("targetReceiverCount"):
         return [_row("Target", f"(resolved) {attack_surface['targetReceiverCount']} receivers")]
+    if attack_surface.get("targetType") == "receiver":
+        # PackageManager only knows manifest receivers: runtime-registered ones may still
+        # receive the broadcast, so "unresolved" would wrongly suggest that nobody does.
+        return [_row("Target", "(no manifest receiver) [dim]— dynamic receivers are not visible[/dim]")]
     return [_row("Target", "(unresolved)")]
 
 
@@ -295,17 +299,35 @@ def _hook_caller_lines(class_name, method, attack_surface: dict) -> list[str]:
     return lines
 
 
+def _intent_type(info: dict, attack_surface: dict) -> str:
+    """EXPLICIT, or IMPLICIT qualified by who can receive it.
+
+    An implicit intent limited with setPackage() reaches only that app; without it, any
+    app with a matching filter. Captures made before noxen recorded the package have no
+    `package` key, so they stay unqualified rather than guessed.
+    """
+    if attack_surface.get("intentExplicit"):
+        return "EXPLICIT"
+    if "package" not in info:
+        return "IMPLICIT"
+    if info.get("package"):
+        return "IMPLICIT [dim](package-scoped)[/dim]"
+    return "IMPLICIT [dim](any app)[/dim]"
+
+
 def _payload_lines(info: dict, attack_surface: dict) -> list[str]:
     lines = []
     # Type + Target only apply to sending methods.
     if "intentExplicit" in attack_surface:
-        lines.append(_row("Type", "EXPLICIT" if attack_surface.get("intentExplicit") else "IMPLICIT"))
+        lines.append(_row("Type", _intent_type(info, attack_surface)))
         lines += _target_lines(attack_surface)
         enforced = _format_permission(attack_surface.get("broadcastPermission"))
         if enforced:
             lines.append(_row("Enforced Perm", enforced))
     lines.append(_row("Action", _markup(info.get("action")) if info.get("action") else "None"))
     lines.append(_row("Data (URI)", _markup(info.get("data")) if info.get("data") else "None"))
+    if info.get("package"):
+        lines.append(_row("Package", _markup(info.get("package"))))
     lines.append(_row("Flags", _format_intent_flags(info.get("flags") or 0)))
     for category in info.get("categories") or []:
         lines.append(_row("Category", _markup(category)))
