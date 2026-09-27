@@ -24,13 +24,13 @@ from noxen.app_info import (
 
 SNAPSHOT = {
     "identity": {
-        "package": "com.frankheat.noxen.playground",
+        "package": "dev.noxen.playground",
         "label": "noxen playground",
         "versionName": "1.0",
         "versionCode": "1",
         "uid": 10148,
         "pid": 31625,
-        "processName": "com.frankheat.noxen.playground",
+        "processName": "dev.noxen.playground",
         "sharedUserId": None,
         "installer": None,
         "firstInstallTime": 1789804892915,
@@ -121,7 +121,7 @@ class AppInfoTests(unittest.TestCase):
         sections = dict((title, rows) for title, rows in overview_sections(SNAPSHOT))
         self.assertIn("IDENTITY", sections)
         identity = dict(sections["IDENTITY"])
-        self.assertEqual(identity["Package"], "com.frankheat.noxen.playground")
+        self.assertEqual(identity["Package"], "dev.noxen.playground")
         self.assertEqual(identity["Version"], "1.0 (1)")
         build = dict(sections["BUILD & FLAGS"])
         self.assertEqual(build["Debuggable"], "yes")

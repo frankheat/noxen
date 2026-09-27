@@ -100,7 +100,7 @@ options, commands, filters, and project management.
 
 The companion Android target app lives in the [noxen-playground](https://github.com/frankheat/noxen-playground) repository.
 It is named `noxen playground` on device and uses the package
-`com.frankheat.noxen.playground`.
+`dev.noxen.playground`.
 
 Use it to validate common runtime flows while developing noxen:
 
