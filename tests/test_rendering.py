@@ -19,6 +19,11 @@ from noxen.rendering import (
 from noxen.filters import FilterManager
 
 
+def plain(rendered: str) -> str:
+    """Visible text of rendered markup: layout assertions don't depend on styling."""
+    return Text.from_markup(rendered).plain
+
+
 class RenderingTests(unittest.TestCase):
     def test_entry_to_filter_context_normalizes_missing_values(self):
         entry = {
@@ -283,9 +288,9 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("[bold]\\[HOOK][/bold]", rendered)
         self.assertIn("[bold]\\[CAPTURED INTENT PAYLOAD][/bold]", rendered)
         # Receiving: the exposed component's tree hangs under Class.
-        self.assertIn("  Class         : com.example.Receiver2", rendered)
-        self.assertIn("                  ├─ Exported            : true", rendered)
-        self.assertIn("                  └─ Required Permission : com.x.PERM (signature)", rendered)
+        self.assertIn("  Class         : com.example.Receiver2", plain(rendered))
+        self.assertIn("                  ├─ Exported            : true", plain(rendered))
+        self.assertIn("                  └─ Required Permission : com.x.PERM (signature)", plain(rendered))
         # No Type row on a receiving capture.
         self.assertNotIn("Type ", rendered)
 
@@ -323,7 +328,7 @@ class RenderingTests(unittest.TestCase):
         rendered = render_intent_detail(entry, show_stack=True, stack_depth=1)
 
         Text.from_markup(rendered)
-        self.assertIn("| MODIFIED", rendered)
+        self.assertIn("| MODIFIED", plain(rendered))
         self.assertIn("old.action", rendered)
         self.assertIn("new.action", rendered)
         self.assertIn("old.category", rendered)
@@ -377,9 +382,9 @@ class RenderingTests(unittest.TestCase):
         rendered = render_intent_detail(entry, show_stack=False, stack_depth=1)
 
         Text.from_markup(rendered)
-        self.assertIn("[bold]#10[/bold] | 2026-04-27 12:34:56 | PENDING", rendered)
-        self.assertIn("  Class         : com.example.Activity1", rendered)
-        self.assertIn("                  └─ Exported            : false", rendered)
+        self.assertIn("#10 | 2026-04-27 12:34:56 | PENDING", plain(rendered))
+        self.assertIn("  Class         : com.example.Activity1", plain(rendered))
+        self.assertIn("                  └─ Exported            : false", plain(rendered))
         self.assertNotIn("Required Permission", rendered)  # omitted when none
 
     def test_render_intent_detail_sending_target_tree(self):
@@ -402,11 +407,11 @@ class RenderingTests(unittest.TestCase):
         rendered = render_intent_detail(entry, show_stack=False, stack_depth=1)
 
         Text.from_markup(rendered)
-        self.assertIn("  Type          : EXPLICIT", rendered)
-        self.assertIn("  Target        : com.example/.Receiver2", rendered)
-        self.assertIn("                  ├─ Exported            : true", rendered)
-        self.assertIn("                  └─ Required Permission : com.x.PERM (normal)", rendered)
-        self.assertIn("  Enforced Perm : com.x.PERM (normal)", rendered)
+        self.assertIn("  Type          : EXPLICIT", plain(rendered))
+        self.assertIn("  Target        : com.example/.Receiver2", plain(rendered))
+        self.assertIn("                  ├─ Exported            : true", plain(rendered))
+        self.assertIn("                  └─ Required Permission : com.x.PERM (normal)", plain(rendered))
+        self.assertIn("  Enforced Perm : com.x.PERM (normal)", plain(rendered))
 
     def test_render_intent_detail_target_states(self):
         base = {
@@ -415,21 +420,41 @@ class RenderingTests(unittest.TestCase):
             "intent": {},
         }
         implicit_multi = dict(base, attackSurface={"intentExplicit": False, "targetReceiverCount": 3})
-        self.assertIn("  Target        : (resolved) 3 receivers", render_intent_detail(implicit_multi))
+        self.assertIn("  Target        : (resolved) 3 receivers", plain(render_intent_detail(implicit_multi)))
 
         unresolved = dict(base, attackSurface={"intentExplicit": False})
-        self.assertIn("  Target        : (unresolved)", render_intent_detail(unresolved))
+        self.assertIn("  Target        : (unresolved)", plain(render_intent_detail(unresolved)))
 
         unreadable = dict(base, attackSurface={
             "intentExplicit": True, "targetComponent": "com.other/.X", "targetUnreadable": True,
         })
-        self.assertIn("  Target        : com.other/.X (couldn't read — not visible)", render_intent_detail(unreadable))
+        self.assertIn("  Target        : com.other/.X (couldn't read — not visible)", plain(render_intent_detail(unreadable)))
 
         resolved_single = dict(base, attackSurface={
             "intentExplicit": False, "targetComponent": "com.example/.Activity8",
             "targetResolved": True, "targetExported": True,
         })
-        self.assertIn("  Target        : com.example/.Activity8 (resolved)", render_intent_detail(resolved_single))
+        self.assertIn("  Target        : com.example/.Activity8 (resolved)", plain(render_intent_detail(resolved_single)))
+
+    def test_detail_grey_scale_dims_labels_not_values(self):
+        entry = {
+            "id": 3, "timestamp": "2026-04-27T12:34:56+00:00",
+            "class": "com.example.MainActivity", "method": "sendBroadcast", "stackTrace": [],
+            "intent": {"action": "a.B", "extras": {"k": {"type": "java.lang.String", "value": "v"}}},
+            "attackSurface": {"intentExplicit": True, "targetComponent": "com.example/.R",
+                              "targetExported": True, "targetResolved": True},
+        }
+        rendered = render_intent_detail(entry)
+        self.assertIn("  [dim]Action        :[/dim] a.B", rendered)
+        self.assertIn("[dim]└─ Exported            :[/dim] true", rendered)
+        self.assertIn("com.example/.R [dim](resolved)[/dim]", rendered)
+        self.assertIn("[dim]String[/dim]", rendered)
+        self.assertIn('"v"', rendered)
+        dim_text = "".join(
+            plain(rendered)[span.start:span.end]
+            for span in Text.from_markup(rendered).spans if "dim" in str(span.style)
+        )
+        self.assertNotIn("a.B", dim_text)  # values keep full brightness
 
 
 if __name__ == "__main__":

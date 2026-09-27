@@ -220,8 +220,8 @@ def _section(title: str) -> str:
 
 
 def _row(label: str, value: str) -> str:
-    """An aligned `  label : value` row on the fixed label column."""
-    return f"  {label:<{_LABEL_WIDTH}} : {value}"
+    """An aligned `  label : value` row: dim label and colon, value at full brightness."""
+    return f"  [dim]{label:<{_LABEL_WIDTH}} :[/dim] {value}"
 
 
 def _format_permission(perm: dict | None) -> str | None:
@@ -249,7 +249,7 @@ def _subject_tree(exported, permission: dict | None) -> list[str]:
     lines = []
     for index, (label, value) in enumerate(children):
         branch = "└─" if index == len(children) - 1 else "├─"
-        lines.append(f"{_TREE_INDENT}{branch} {label:<{_CHILD_WIDTH}} : {value}")
+        lines.append(f"{_TREE_INDENT}[dim]{branch} {label:<{_CHILD_WIDTH}} :[/dim] {value}")
     return lines
 
 
@@ -275,9 +275,9 @@ def _target_lines(attack_surface: dict) -> list[str]:
     """The `Target` row (+ its exported/permission tree) for a sending event."""
     component = attack_surface.get("targetComponent")
     if component and attack_surface.get("targetUnreadable"):
-        return [_row("Target", f"{_markup(component)} (couldn't read — not visible)")]
+        return [_row("Target", f"{_markup(component)} [dim](couldn't read — not visible)[/dim]")]
     if component:
-        suffix = " (resolved)" if attack_surface.get("targetResolved") else ""
+        suffix = " [dim](resolved)[/dim]" if attack_surface.get("targetResolved") else ""
         lines = [_row("Target", f"{_markup(component)}{suffix}")]
         lines += _subject_tree(attack_surface.get("targetExported"), attack_surface.get("targetPermission"))
         return lines
@@ -326,10 +326,10 @@ def _extras_lines(extras: dict) -> list[str]:
     type_w = max([len("TYPE")] + [len(t) for _, t, _ in rows])
     value_w = min(max([len("VALUE")] + [len(v) for _, _, v in rows]), 50)
     lines = [f"{_section('EXTRAS')} ({len(extras)})"]
-    lines.append(f"  {'KEY':<{key_w}}   {'TYPE':<{type_w}}   VALUE")
-    lines.append("  " + "-" * (key_w + type_w + value_w + 6))
+    lines.append(f"  [dim]{'KEY':<{key_w}}   {'TYPE':<{type_w}}   VALUE[/dim]")
+    lines.append("  [dim]" + "-" * (key_w + type_w + value_w + 6) + "[/dim]")
     for key, simple, shown in rows:
-        lines.append(f"  {key:<{key_w}}   {simple:<{type_w}}   {shown}")
+        lines.append(f"  {key:<{key_w}}   [dim]{simple:<{type_w}}[/dim]   {shown}")
     return lines
 
 
@@ -477,7 +477,7 @@ def render_intent_detail(entry: dict, show_stack: bool = False, stack_depth: int
 
     out = [
         "",
-        f"[bold]#{entry['id']}[/bold] | {_markup(time_str)} | {outcome_label}",
+        f"[bold]#{entry['id']}[/bold] [dim]|[/dim] {_markup(time_str)} [dim]|[/dim] {outcome_label}",
         "",
     ]
     out += _event_body(
