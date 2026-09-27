@@ -8,9 +8,9 @@
     "sync:runtime": "node scripts/sync-runtime-assets.js"
   },
   "devDependencies": {
-    "frida-compile": "^19"
+    "frida-compile": "19.0.4"
   },
   "dependencies": {
-    "frida-java-bridge": "^7"
+    "frida-java-bridge": "7.0.12"
   }
 }
