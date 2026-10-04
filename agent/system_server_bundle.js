@@ -3338,7 +3338,8 @@
     if (api2.flavor !== "art") {
       return;
     }
-    env.getClassName(classRef);
+    env.getFieldId(classRef, "x", "Z");
+    env.exceptionClear();
   }
   function getArtVMSpec(api2) {
     return {
@@ -4718,27 +4719,6 @@ on_leave_gc_concurrent_copying_copying_phase (GumInvocationContext * ic)
             "1f fc ff ff",
             "1f 00 00 ff",
             "00 00 00 9f"
-          ],
-          offset: 1,
-          validateMatch: validateGetOatQuickMethodHeaderInlinedMatchArm64
-        },
-        {
-          pattern: [
-            /* e8 */
-            "0a 40 b9",
-            // ldr w8, [x?, #0x8]
-            "1f 05 00 31",
-            // cmn w8, #0x1
-            "40 01 00 54",
-            // b.eq <target>
-            "00 0e 40 f9",
-            // ldr x?, [x?, #0x18]
-            ":",
-            /* 00 */
-            "fc ff ff",
-            "1f fc ff ff",
-            "1f 00 00 ff",
-            "00 fc ff ff"
           ],
           offset: 1,
           validateMatch: validateGetOatQuickMethodHeaderInlinedMatchArm64
@@ -8184,7 +8164,6 @@ struct _JavaFieldApi
 
 struct _JavaApi
 {
-  jvmtiEnv * jvmti;
   JavaClassApi clazz;
   JavaMethodApi method;
   JavaFieldApi field;
@@ -8335,7 +8314,6 @@ model_new (jclass class_handle,
 {
   Model * model;
   GHashTable * members;
-  jvmtiEnv * jvmti = java_api.jvmti;
   gpointer * funcs = env->functions;
   jmethodID (* from_reflected_method) (JNIEnv *, jobject) = funcs[7];
   jfieldID (* from_reflected_field) (JNIEnv *, jobject) = funcs[8];
@@ -8355,52 +8333,7 @@ model_new (jclass class_handle,
   members = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   model->members = members;
 
-  if (jvmti != NULL)
-  {
-    gpointer * jf = jvmti->functions - 1;
-    jvmtiError (* deallocate) (jvmtiEnv *, void * mem) = jf[47];
-    jvmtiError (* get_class_methods) (jvmtiEnv *, jclass, jint *, jmethodID **) = jf[52];
-    jvmtiError (* get_class_fields) (jvmtiEnv *, jclass, jint *, jfieldID **) = jf[53];
-    jvmtiError (* get_field_name) (jvmtiEnv *, jclass, jfieldID, char **, char **, char **) = jf[60];
-    jvmtiError (* get_field_modifiers) (jvmtiEnv *, jclass, jfieldID, jint *) = jf[62];
-    jvmtiError (* get_method_name) (jvmtiEnv *, jmethodID, char **, char **, char **) = jf[64];
-    jvmtiError (* get_method_modifiers) (jvmtiEnv *, jmethodID, jint *) = jf[66];
-    jint method_count;
-    jmethodID * methods;
-    jint field_count;
-    jfieldID * fields;
-    char * name;
-    jint modifiers;
-
-    get_class_methods (jvmti, class_handle, &method_count, &methods);
-    for (i = 0; i != method_count; i++)
-    {
-      jmethodID method = methods[i];
-
-      get_method_name (jvmti, method, &name, NULL, NULL);
-      get_method_modifiers (jvmti, method, &modifiers);
-
-      model_add_method (model, name, method, modifiers);
-
-      deallocate (jvmti, name);
-    }
-    deallocate (jvmti, methods);
-
-    get_class_fields (jvmti, class_handle, &field_count, &fields);
-    for (i = 0; i != field_count; i++)
-    {
-      jfieldID field = fields[i];
-
-      get_field_name (jvmti, class_handle, field, &name, NULL, NULL);
-      get_field_modifiers (jvmti, class_handle, field, &modifiers);
-
-      model_add_field (model, name, field, modifiers);
-
-      deallocate (jvmti, name);
-    }
-    deallocate (jvmti, fields);
-  }
-  else if (art_api.available)
+  if (art_api.available)
   {
     gpointer elements;
     guint n, i;
@@ -8848,7 +8781,8 @@ enumerate_methods_jvm (const gchar * class_query,
                        jboolean include_signature,
                        jboolean ignore_case,
                        jboolean skip_system_classes,
-                       JNIEnv * env)
+                       JNIEnv * env,
+                       jvmtiEnv * jvmti)
 {
   gchar * result;
   GPatternSpec * class_pattern, * method_pattern;
@@ -8857,7 +8791,6 @@ enumerate_methods_jvm (const gchar * class_query,
   jobject (* new_global_ref) (JNIEnv *, jobject) = ef[21];
   void (* delete_local_ref) (JNIEnv *, jobject) = ef[23];
   jboolean (* is_same_object) (JNIEnv *, jobject, jobject) = ef[24];
-  jvmtiEnv * jvmti = java_api.jvmti;
   gpointer * jf = jvmti->functions - 1;
   jvmtiError (* deallocate) (jvmtiEnv *, void * mem) = jf[47];
   jvmtiError (* get_class_signature) (jvmtiEnv *, jclass, char **, char **) = jf[48];
@@ -9343,14 +9276,15 @@ std_string_c_str (StdString * self)
         skipSystemClasses = modifiers.indexOf("u") !== -1;
       }
       let result;
-      if (api2.jvmti !== null) {
+      if (api2.flavor === "jvm") {
         const json = cm.enumerateMethodsJvm(
           classQuery,
           methodQuery,
           boolToNative(includeSignature),
           boolToNative(ignoreCase),
           boolToNative(skipSystemClasses),
-          env
+          env,
+          api2.jvmti
         );
         try {
           result = JSON.parse(json.readUtf8String()).map((group) => {
@@ -9410,12 +9344,10 @@ std_string_c_str (StdString * self)
     }
   }
   function compileModule(env) {
-    const api2 = getApi();
-    const { jvmti = null } = api2;
     const { pointerSize: pointerSize9 } = Process;
     const lockSize = 8;
     const modelsSize = pointerSize9;
-    const javaApiSize = 7 * pointerSize9;
+    const javaApiSize = 6 * pointerSize9;
     const artApiSize = 10 * 4 + 5 * pointerSize9;
     const dataSize = lockSize + modelsSize + javaApiSize + artApiSize;
     const data = Memory.alloc(dataSize);
@@ -9427,7 +9359,6 @@ std_string_c_str (StdString * self)
     const field = env.javaLangReflectField();
     let j = javaApi;
     [
-      jvmti !== null ? jvmti : NULL,
       getDeclaredMethods,
       getDeclaredFields,
       method.getName,
@@ -9439,20 +9370,18 @@ std_string_c_str (StdString * self)
     });
     const artApi = javaApi.add(javaApiSize);
     const { vm: vm3 } = env;
-    if (api2.flavor === "art") {
-      let artClassOffsets;
-      if (jvmti !== null) {
-        artClassOffsets = [0, 0, 0, 0];
-      } else {
-        const c = getArtClassSpec(vm3).offset;
-        artClassOffsets = [c.ifields, c.methods, c.sfields, c.copiedMethodsOffset];
-      }
+    const artClass = getArtClassSpec(vm3);
+    if (artClass !== null) {
+      const c = artClass.offset;
       const m = getArtMethodSpec(vm3);
       const f = getArtFieldSpec(vm3);
       let s = artApi;
       [
         1,
-        ...artClassOffsets,
+        c.ifields,
+        c.methods,
+        c.sfields,
+        c.copiedMethodsOffset,
         m.size,
         m.offset.accessFlags,
         f.size,
@@ -9461,6 +9390,7 @@ std_string_c_str (StdString * self)
       ].forEach((value) => {
         s = s.writeUInt(value).add(4);
       });
+      const api2 = getApi();
       [
         api2.artClassLinker.address,
         api2["art::ClassLinker::VisitClasses"],
@@ -9484,6 +9414,7 @@ std_string_c_str (StdString * self)
     const fastOptions = { exceptions: "propagate", scheduling: "exclusive" };
     return {
       handle: cm2,
+      mode: artClass !== null ? "full" : "basic",
       new: new NativeFunction(cm2.model_new, "pointer", ["pointer", "pointer", "pointer"], reentrantOptions),
       has: new NativeFunction(cm2.model_has, "bool", ["pointer", "pointer"], fastOptions),
       find: new NativeFunction(cm2.model_find, "pointer", ["pointer", "pointer"], fastOptions),
@@ -9500,17 +9431,17 @@ std_string_c_str (StdString * self)
         "bool",
         "bool",
         "bool",
+        "pointer",
         "pointer"
       ], reentrantOptions),
       dealloc: new NativeFunction(cm2.dealloc, "void", ["pointer"], fastOptions)
     };
   }
   function makeHandleUnwrapper(cm2, vm3) {
-    const api2 = getApi();
-    if (api2.flavor !== "art") {
+    if (cm2.mode === "basic") {
       return nullUnwrap;
     }
-    const decodeGlobal = api2["art::JavaVMExt::DecodeGlobal"];
+    const decodeGlobal = getApi()["art::JavaVMExt::DecodeGlobal"];
     return function(handle, env, fn) {
       let result;
       withRunnableArtThread(vm3, env, (thread) => {
