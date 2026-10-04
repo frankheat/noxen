@@ -279,7 +279,9 @@ class NoxenApp(App):
         self._history_command_bar_visible = self._settings["history_command_bar"]
         self._home_devices = []
         self._connect_scan_generation = 0
+        self._connection_state = "disconnected"
         self._session_device_id = ""
+        self._session_api_level: int | None = None
         self._system_anr_bypass_enabled = False
         self._log_verbose = False
         self._log_entries: list[str] = []
@@ -867,11 +869,11 @@ class NoxenApp(App):
                             yield Label("Input ANR bypass (experimental)", id="home_anr_bypass_label")
                             yield Switch(value=False, id="home_system_anr_bypass")
 
+                        yield Label("", id="home_error")
                         yield Rule()
                         with Horizontal(id="home_btn_row"):
                             yield Button("Connect", id="home_btn")
                             yield Button("Disconnect", id="home_disconnect", disabled=True)
-                        yield Label("", id="home_error")
             with TabPane(" Intercept ", id="tab_intercept"):
                 yield Horizontal(
                     Button(
@@ -1093,7 +1095,6 @@ class NoxenApp(App):
             self.write_log(msg)
         self._refresh_history_table()
 
-        self.query_one("#main_tabs", TabbedContent).active = "tab_intercept"
         self.on_device_selected(device_id)
 
     def on_select_changed(self, event: Select.Changed):
@@ -1112,20 +1113,24 @@ class NoxenApp(App):
 
         cfg = self._session_config
         target = cfg.target_label()
+        self._connection_state = "connecting"
         self._session_device_id = device_id
-        self.query_one("#session_info", Label).update(f"{target}  ·  {device_id}")
+        self._session_api_level = None
+        self.query_one("#session_info", Label).update(f"Connecting to {target}  ·  {device_id}…")
+        self.query_one("#home_btn", Button).label = "Connecting…"
+        self.query_one("#home_btn", Button).disabled = True
+        self.query_one("#home_disconnect", Button).disabled = True
 
         self.db.set_info("target", target)
         self.db.set_info("device_id", device_id)
 
-        self.query_one("#intercept_command_input", Input).disabled = False
-        self._focus_intercept_default()
         session = self.frida_session
         session.api_level_cb = lambda sdk_int, session=session: self._on_api_level(sdk_int, session)
         session.connected_cb = lambda session=session: self._on_connected(session)
+        session.connection_failed_cb = (
+            lambda stage, error, session=session: self._on_connection_failed(stage, error, session)
+        )
         session.disconnected_cb = lambda session=session: self._on_disconnected(session)
-        if self._system_anr_bypass_enabled:
-            self._ensure_system_anr_bypass(device_id)
         session.connect(device_id)
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
@@ -1140,7 +1145,7 @@ class NoxenApp(App):
         if event.switch.id != "home_system_anr_bypass":
             return
         self._system_anr_bypass_enabled = event.value
-        if event.value and self._session_device_id:
+        if event.value and self._connection_state == "connected" and self._session_device_id:
             self._ensure_system_anr_bypass(self._session_device_id)
         elif not event.value and self.system_server_session:
             self._cleanup_system_server_session()
@@ -1269,12 +1274,13 @@ class NoxenApp(App):
     def _on_api_level(self, sdk_int, session=None):
         if session is not None and session is not self.frida_session:
             return
-        cfg = self._session_config
-        target = cfg.target_label()
+        self._session_api_level = sdk_int
         def _do():
-            self.query_one("#session_info", Label).update(
-                f"{target}  ·  {self._session_device_id}  ·  API {sdk_int}"
-            )
+            if self._connection_state == "connected":
+                target = self._session_config.target_label()
+                self.query_one("#session_info", Label).update(
+                    f"{target}  ·  {self._session_device_id}  ·  API {sdk_int}"
+                )
         try:
             self.call_from_thread(_do)
         except Exception:
@@ -1283,13 +1289,74 @@ class NoxenApp(App):
     def _on_connected(self, session=None):
         if session is not None and session is not self.frida_session:
             return
+        self._connection_state = "connected"
         def _do():
             try:
+                target = self._session_config.target_label()
+                api = f"  ·  API {self._session_api_level}" if self._session_api_level is not None else ""
+                self.query_one("#session_info", Label).update(
+                    f"{target}  ·  {self._session_device_id}{api}"
+                )
                 self.query_one("#session_bar").add_class("connected")
+                self.query_one("#home_btn", Button).label = "Connect"
+                self.query_one("#home_btn", Button).disabled = True
                 self.query_one("#home_disconnect", Button).disabled = False
+                self.query_one("#home_error", Label).update("")
+                self.query_one("#intercept_command_input", Input).disabled = False
+                self.query_one("#main_tabs", TabbedContent).active = "tab_intercept"
             except Exception:
                 pass
+            if self._system_anr_bypass_enabled:
+                self._ensure_system_anr_bypass(self._session_device_id)
             self._fetch_app_info_worker()
+        try:
+            self.call_from_thread(_do)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _connection_failure_message(stage: str, error: Exception) -> str:
+        error_name = type(error).__name__
+        if error_name == "ServerNotRunningError":
+            return "Connection failed. Frida server is not running or cannot be reached."
+        if error_name == "ProcessNotFoundError":
+            return "Connection failed. The target process was not found."
+        if error_name in ("ExecutableNotFoundError", "ExecutableNotSupportedError") or stage == "spawn":
+            return "Connection failed. The target application could not be spawned."
+        if error_name == "PermissionDeniedError":
+            return "Connection failed. Frida does not have permission to attach to the target."
+        if error_name == "TimedOutError":
+            return "Connection failed. The selected device did not respond in time."
+        if error_name in ("TransportError", "ProtocolError"):
+            return "Connection failed. Communication with the selected device was lost."
+        if stage in ("agent", "hooks", "resume"):
+            return "Connection failed. The target was reached, but the noxen agent could not start."
+        return "Connection failed. See Log for technical details."
+
+    def _on_connection_failed(self, stage, error, session=None):
+        if session is not None and session is not self.frida_session:
+            return
+        message = self._connection_failure_message(stage, error)
+        self.frida_session = None
+        self._connection_state = "disconnected"
+        self._session_device_id = ""
+        self._session_api_level = None
+        self._cleanup_system_server_session(async_cleanup=True)
+        self.set_intercept_state(False)
+
+        def _do():
+            try:
+                self.query_one("#session_bar").remove_class("connected")
+                self.query_one("#session_info", Label).update("Not connected")
+                self.query_one("#home_btn", Button).label = "Connect"
+                self.query_one("#home_btn", Button).disabled = False
+                self.query_one("#home_disconnect", Button).disabled = True
+                self.query_one("#home_error", Label).update(f"[red]{message}[/red]")
+            except Exception:
+                pass
+            self._clear_info_tab()
+            self.notify(message, severity="error", timeout=6)
+
         try:
             self.call_from_thread(_do)
         except Exception:
@@ -1299,6 +1366,9 @@ class NoxenApp(App):
         if session is not None and session is not self.frida_session:
             return
         self.frida_session = None
+        self._connection_state = "disconnected"
+        self._session_device_id = ""
+        self._session_api_level = None
         self._cleanup_system_server_session(async_cleanup=True)
         self.set_intercept_state(False)
 
@@ -1306,6 +1376,8 @@ class NoxenApp(App):
             try:
                 self.query_one("#session_bar").remove_class("connected")
                 self.query_one("#session_info", Label).update("Not connected")
+                self.query_one("#home_btn", Button).label = "Connect"
+                self.query_one("#home_btn", Button).disabled = False
                 self.query_one("#home_disconnect", Button).disabled = True
             except Exception:
                 pass
@@ -1319,11 +1391,16 @@ class NoxenApp(App):
         if self.frida_session:
             self.frida_session.cleanup()
             self.frida_session = None
+        self._connection_state = "disconnected"
+        self._session_device_id = ""
+        self._session_api_level = None
         self._cleanup_system_server_session()
         self.set_intercept_state(False)
         try:
             self.query_one("#session_bar").remove_class("connected")
             self.query_one("#session_info", Label).update("Not connected")
+            self.query_one("#home_btn", Button).label = "Connect"
+            self.query_one("#home_btn", Button).disabled = False
             self.query_one("#home_disconnect", Button).disabled = True
         except Exception:
             pass
@@ -2484,6 +2561,7 @@ class NoxenApp(App):
 
     def on_unmount(self):
         if self.frida_session:
+            self.frida_session.connection_failed_cb = None
             self.frida_session.disconnected_cb = None
             self.frida_session.cleanup()
         self._cleanup_system_server_session()

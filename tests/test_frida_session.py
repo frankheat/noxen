@@ -229,6 +229,67 @@ class FridaSessionMessageTests(unittest.TestCase):
 
 
 class FridaSessionLifecycleTests(unittest.TestCase):
+    def test_connection_failure_reports_stage_and_exception(self):
+        class ServerNotRunningError(Exception):
+            pass
+
+        error = ServerNotRunningError("server is not running")
+        fake_frida = SimpleNamespace(get_device=lambda _device_id, timeout=5: (_ for _ in ()).throw(error))
+        failures = []
+        logs = []
+        session = FridaSession(
+            SessionConfig(attach_name="Example"),
+            FilterManager(),
+            log_cb=logs.append,
+            intercept_cb=lambda _state: None,
+            get_stack=lambda: (False, 0),
+        )
+        session.connection_failed_cb = lambda stage, exc: failures.append((stage, exc))
+
+        with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+            "noxen.frida_session.load_hook_config",
+            return_value=HooksLoadResult([], []),
+        ):
+            session.connect("device-1")
+            session._connect_thread.join(timeout=2)
+
+        self.assertEqual(failures, [("device", error)])
+        self.assertIn("Connection failed: server is not running", logs[-1])
+
+    def test_spawn_attach_failure_kills_suspended_process(self):
+        killed = []
+
+        class FakeDevice:
+            def spawn(self, _packages):
+                return 42
+
+            def attach(self, _pid):
+                raise RuntimeError("attach failed")
+
+            def kill(self, pid):
+                killed.append(pid)
+
+        fake_frida = SimpleNamespace(get_device=lambda _device_id, timeout=5: FakeDevice())
+        failures = []
+        session = FridaSession(
+            SessionConfig(spawn_package="dev.example"),
+            FilterManager(),
+            log_cb=lambda _text: None,
+            intercept_cb=lambda _state: None,
+            get_stack=lambda: (False, 0),
+        )
+        session.connection_failed_cb = lambda stage, exc: failures.append((stage, str(exc)))
+
+        with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+            "noxen.frida_session.load_hook_config",
+            return_value=HooksLoadResult([], []),
+        ):
+            session.connect("device-1")
+            session._connect_thread.join(timeout=2)
+
+        self.assertEqual(killed, [42])
+        self.assertEqual(failures, [("spawn", "attach failed")])
+
     def test_cleanup_invalidates_connection_still_in_progress(self):
         attached = threading.Event()
         release_attach = threading.Event()
@@ -251,6 +312,8 @@ class FridaSessionLifecycleTests(unittest.TestCase):
             get_stack=lambda: (False, 0),
         )
         session.connected_cb = lambda: connected.append(True)
+        failures = []
+        session.connection_failed_cb = lambda stage, error: failures.append((stage, error))
 
         with patch.dict(sys.modules, {"frida": fake_frida}), patch(
             "noxen.frida_session.load_hook_config",
@@ -266,6 +329,7 @@ class FridaSessionLifecycleTests(unittest.TestCase):
         self.assertIsNone(session._session)
         self.assertIsNone(session._script)
         self.assertEqual(connected, [])
+        self.assertEqual(failures, [])
 
 
 class _FakeFridaSession:

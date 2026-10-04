@@ -53,6 +53,7 @@ class FridaSession:
         self.hold_end_cb = hold_end_cb
         self.api_level_cb = None
         self.connected_cb = None
+        self.connection_failed_cb = None
         self.disconnected_cb = None
 
         self._script = None
@@ -83,6 +84,7 @@ class FridaSession:
         for message in hooks_result.messages:
             self.log_cb(message)
 
+        stage = "device"
         try:
             import frida
             if self._is_stale(generation):
@@ -102,23 +104,31 @@ class FridaSession:
                 )
 
             if self._config.spawn_package:
+                stage = "spawn"
                 pid = device.spawn([self._config.spawn_package])
+                should_resume = True
                 session = device.attach(pid)
                 session.on("detached", self._on_detached)
-                should_resume = True
                 self.log_cb(log_success(f"Spawned {self._config.spawn_package} (PID {pid})", "frida"))
             elif self._config.attach_name:
+                stage = "attach"
                 session = device.attach(self._config.attach_name)
                 session.on("detached", self._on_detached)
                 pid = getattr(session, 'pid', None)
                 pid_str = f" (PID {pid})" if pid else ""
                 self.log_cb(log_success(f"Attached to \"{self._config.attach_name}\"{pid_str}", "frida"))
             elif self._config.attach_pid:
+                stage = "attach"
                 session = device.attach(self._config.attach_pid)
                 session.on("detached", self._on_detached)
                 self.log_cb(log_success(f"Attached to PID {self._config.attach_pid}", "frida"))
             else:
-                self.log_cb(log_error("No target specified", "frida"))
+                self._report_connection_failure(
+                    generation,
+                    "configuration",
+                    ValueError("No target specified"),
+                    "No target specified",
+                )
                 return
 
             if not self._keep_if_current(generation, session=session):
@@ -128,7 +138,11 @@ class FridaSession:
         except Exception as e:
             if self._is_stale(generation):
                 return
-            self.log_cb(log_error(f"Connection failed: {e}", "frida"))
+            if "close_local" in locals():
+                close_local()
+            self._report_connection_failure(
+                generation, stage, e, f"Connection failed: {e}"
+            )
             return
 
         try:
@@ -142,9 +156,12 @@ class FridaSession:
         except Exception as e:
             self._clear_if_current(generation, session=session)
             close_local()
-            self.log_cb(log_error(f"Failed to load agent script: {e}", "frida"))
+            self._report_connection_failure(
+                generation, "agent", e, f"Failed to load agent script: {e}"
+            )
             return
 
+        stage = "agent"
         try:
             script = session.create_script(code)
             script.on("message", self.on_message)
@@ -157,6 +174,7 @@ class FridaSession:
                 close_local(script)
                 return
 
+            stage = "hooks"
             script.exports_sync.proxy(hooks_data)
             if self._is_stale(generation):
                 close_local(script)
@@ -176,6 +194,7 @@ class FridaSession:
                 close_local(script)
                 return
 
+            stage = "resume"
             if should_resume:
                 device.resume(pid)
 
@@ -189,7 +208,22 @@ class FridaSession:
                 return
             self._clear_if_current(generation, session=session, script=locals().get("script"))
             close_local(locals().get("script"))
-            self.log_cb(log_error(f"Failed to start session: {e}", "frida"))
+            self._report_connection_failure(
+                generation, stage, e, f"Failed to start session: {e}"
+            )
+
+    def _report_connection_failure(self, generation, stage, error, log_message) -> None:
+        """Log and report a failure to establish the current session."""
+        if self._is_stale(generation):
+            return
+        self.log_cb(log_error(log_message, "frida"))
+        if self.connection_failed_cb:
+            try:
+                self.connection_failed_cb(stage, error)
+            except Exception as callback_error:
+                self.log_cb(log_warning(
+                    f"Connection failure callback failed: {callback_error}", "frida"
+                ))
 
     def _on_detached(self, reason, crash):
         msg = reason.replace("-", " ") if reason else "unknown reason"
