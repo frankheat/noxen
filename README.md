@@ -20,11 +20,11 @@ then lets you inspect, modify, forward, or drop them from a terminal UI.
 - Shows action, component, data URI, flags, categories, extras, PendingIntent flags,
   and optional Java stack traces in a plain, section-based detail layout.
 - Attaches each exposed component's `Exported` flag and required permission (with its
-  protection level) to the component that matters — the receiver for inbound events,
-  the resolved target for outbound ones — plus any broadcast `receiverPermission`.
+  protection level) to the component that matters: the receiver for inbound events or
+  the resolved target for outbound ones. It also shows any broadcast `receiverPermission`.
 - Shows an **Info app** tab: a snapshot of the hooked app (identity, build flags, signing,
   permissions, and a searchable roster of all components with their exported flag,
-  required permission, and access class — `open`, `weak`, or `protected`).
+  required permission, and access class classified as `open`, `weak`, or `protected`).
 - Lets you modify intent action, data, categories, flags, and extras before forwarding.
 - Lets you drop intercepted intents.
 - Stores captured history, outcomes, filters, columns, and modified intent snapshots
