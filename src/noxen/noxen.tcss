@@ -145,12 +145,6 @@ TabPane {
     padding: 0 1;
     align: left middle;
 }
-#log_verbose_label {
-    width: auto;
-    height: 1;
-    content-align: left middle;
-    margin-right: 2;
-}
 #log_output {
     background: $surface;
     height: 1fr;
@@ -651,7 +645,7 @@ Footer {
     border: round $accent;
     background-tint: $surface 0%;
 }
-#info_exposed_group {
+.switch-control {
     width: auto;
     height: 3;
     padding: 0 1;
@@ -659,15 +653,15 @@ Footer {
     border: round $panel-lighten-2;
     align: left middle;
 }
-#info_exposed_group:focus-within { border: round $accent; }
-#info_exposed_group Switch {
+.switch-control:focus-within { border: round $accent; }
+.switch-control Switch {
     border: none;
     height: 1;
     padding: 0 1;
     margin: 0;
     background: $panel;
 }
-.info_switch_label { height: 1; content-align: left middle; margin-left: 1; }
+.switch-control-label { width: auto; height: 1; content-align: left middle; margin-left: 1; }
 #info_perm_table, #info_comp_table { height: 1fr; margin: 1 1 0 1; border: solid #2C3E3A; }
 #info_comp_detail { height: 12; margin: 0 1 1 1; border: solid #2C3E3A; background: $surface; }
 #info_overview_log { height: 1fr; padding: 1 2; }

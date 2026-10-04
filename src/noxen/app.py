@@ -960,15 +960,16 @@ class NoxenApp(App):
                                          ("receiver", "receiver"), ("provider", "provider")],
                                         id="info_comp_type", value="all", allow_blank=False,
                                     )
-                                    with Horizontal(id="info_exposed_group"):
+                                    with Horizontal(id="info_exposed_group", classes="switch-control"):
                                         yield Switch(value=False, id="info_comp_exposed")
-                                        yield Label("Exposed only", classes="info_switch_label")
+                                        yield Label("Exposed only", classes="switch-control-label")
                                 yield DataTable(id="info_comp_table", cursor_type="row")
                                 yield RichLog(id="info_comp_detail", markup=True, highlight=False, auto_scroll=False)
             with TabPane(" Log ", id="tab_log"):
                 with Horizontal(id="log_header"):
-                    yield Label("Verbose logs", id="log_verbose_label")
-                    yield Switch(value=self._log_verbose, id="log_verbose")
+                    with Horizontal(id="log_verbose_group", classes="switch-control"):
+                        yield Switch(value=self._log_verbose, id="log_verbose")
+                        yield Label("Verbose logs", id="log_verbose_label", classes="switch-control-label")
                 yield RichLog(id="log_output", markup=True, highlight=False)
             with TabPane(" Settings ", id="tab_settings"):
                 with VerticalScroll(id="settings_pane"):

@@ -1,6 +1,12 @@
+import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+
+from textual.containers import Horizontal
+from textual.widgets import Label, Switch
 
 from noxen.app import (
     HISTORY_COMMAND_OUTPUT_HEIGHT,
@@ -81,6 +87,36 @@ class AppLayoutTests(unittest.TestCase):
             log_debug("Hidden detail", "agent"),
             log_info("Visible event", "frida"),
         ])
+
+
+class SwitchControlLayoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_log_verbose_matches_info_exposed_control_structure(self):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                args = SimpleNamespace(
+                    project=None,
+                    new_project=os.path.join(tmp, "p.noxen"),
+                    skip_device_scan=True,
+                )
+                app = NoxenApp(args)
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    log_group = app.query_one("#log_verbose_group", Horizontal)
+                    info_group = app.query_one("#info_exposed_group", Horizontal)
+
+                    self.assertTrue(log_group.has_class("switch-control"))
+                    self.assertTrue(info_group.has_class("switch-control"))
+                    self.assertEqual(
+                        [child.id for child in log_group.children],
+                        ["log_verbose", "log_verbose_label"],
+                    )
+                    self.assertIsInstance(log_group.children[0], Switch)
+                    self.assertIsInstance(log_group.children[1], Label)
+                    self.assertTrue(log_group.children[1].has_class("switch-control-label"))
+            finally:
+                os.chdir(cwd)
 
 
 class _FakeLogOutput:
