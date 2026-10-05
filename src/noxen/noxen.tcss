@@ -1,12 +1,17 @@
+Screen {
+    background: $background;
+    color: $foreground;
+}
 Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     scrollbar-background: $surface;
-    scrollbar-color: #2C3E3A;
-    scrollbar-color-hover: #26A368;
-    scrollbar-color-active: #26A368;
+    scrollbar-color: $foreground-muted;
+    scrollbar-color-hover: $success;
+    scrollbar-color-active: $success;
 }
 #intercept_header {
     height: 3;
     background: $panel;
+    color: $foreground;
     padding: 0 1;
     align: left middle;
 }
@@ -28,9 +33,9 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 #intercept_header #btn_edit {
     height: 3;
     margin: 0 1 0 0;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     background: $panel;
-    color: #8A8F8D;
+    color: $foreground-muted;
     text-style: bold;
 }
 #intercept_header #intercept_toggle:focus,
@@ -41,57 +46,58 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 #intercept_header #btn_forward:hover,
 #intercept_header #btn_drop:hover,
 #intercept_header #btn_edit:hover {
-    border: round $panel-lighten-2;
-    background: $panel;
+    border: round $foreground-muted;
+    background: $boost;
     background-tint: $surface 0%;
 }
 #intercept_header #intercept_toggle.intercept-on,
 #intercept_header #intercept_toggle.intercept-on:focus,
 #intercept_header #intercept_toggle.intercept-on:hover {
-    border: round #26A368;
-    background: $panel;
-    color: #26A368;
+    border: round $success;
+    background: $boost;
+    color: $success;
 }
 #intercept_header #intercept_toggle.intercept-off,
 #intercept_header #intercept_toggle.intercept-off:focus,
 #intercept_header #intercept_toggle.intercept-off:hover {
-    border: round #F2C94C;
-    background: $panel;
-    color: #F2C94C;
+    border: round $warning;
+    background: $boost;
+    color: $warning;
 }
 #intercept_header #btn_forward.forward-ready,
 #intercept_header #btn_forward.forward-ready:focus,
 #intercept_header #btn_forward.forward-ready:hover {
-    border: round #0D8BD9;
-    background: $panel;
-    color: #58C4FF;
+    border: round $secondary-darken-1;
+    background: $boost;
+    color: $secondary;
 }
 #intercept_header #btn_drop.drop-ready,
 #intercept_header #btn_drop.drop-ready:focus,
 #intercept_header #btn_drop.drop-ready:hover {
-    border: round #B95B5B;
-    background: $panel;
-    color: #FFB1B1;
+    border: round $error-darken-1;
+    background: $boost;
+    color: $error;
 }
 #intercept_header #btn_edit.edit-ready,
 #intercept_header #btn_edit.edit-ready:focus,
 #intercept_header #btn_edit.edit-ready:hover {
-    border: round #9B8CFF;
-    background: $panel;
-    color: #D8D1FF;
+    border: round $secondary;
+    background: $boost;
+    color: $secondary-lighten-2;
 }
 #intercept_header #btn_forward:disabled,
 #intercept_header #btn_drop:disabled,
 #intercept_header #btn_edit:disabled {
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     background: $panel;
-    color: #8A8F8D;
+    color: $foreground-muted;
 }
 #intercept_header #btn_intercept_filters,
 #intercept_header #btn_intercept_stack {
     height: 3;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     background: transparent;
+    color: $foreground;
 }
 #intercept_header #btn_intercept_filters:focus,
 #intercept_header #btn_intercept_stack:focus,
@@ -99,22 +105,23 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 #intercept_header #btn_intercept_stack:hover {
     border: round $accent;
     background: transparent;
+    color: $accent;
 }
 #session_bar {
     height: 1;
-    background: #2C3E3A;
+    background: $secondary;
     padding: 0 1;
     align: right middle;
 }
 #session_bar.connected {
-    background: #26a368;
+    background: $success;
 }
 #session_info {
-    color: #F5F7F6;
+    color: $button-color-foreground;
     height: 1;
 }
 #session_bar.connected #session_info {
-    color: #000000;
+    color: $button-color-foreground;
 }
 #intercept_header #intercept_toggle {
     width: 21;
@@ -124,15 +131,16 @@ TabbedContent {
     height: 1fr;
 }
 Tabs .underline--bar {
-    color: #26a368;
+    color: $success;
 }
 Tab { text-style: bold; }
-Tab.-active { background: $panel; color: $text; }
-Tab.-active:focus { background: $panel; color: $text; }
-Tab.intercepted { color: #C94A8A; }
+Tab.-active { background: $panel; color: $foreground; }
+Tab.-active:focus { background: $panel; color: $foreground; }
+Tab.intercepted { color: $error; }
 TabPane {
     padding: 0;
     layout: vertical;
+    background: $content-background;
 }
 #intercept_output {
     background: $surface;
@@ -142,6 +150,7 @@ TabPane {
 #log_header {
     height: 3;
     background: $panel;
+    color: $foreground;
     padding: 0 1;
     align: left middle;
 }
@@ -153,17 +162,18 @@ TabPane {
 #history_table {
     height: 1fr;
     margin: 1 1 0 1;
-    border: solid #2C3E3A;
+    border: solid $foreground-muted;
 }
 #history_detail {
     height: 1fr;
     margin: 0 1 0 1;
     background: $surface;
-    border: solid #2C3E3A;
+    border: solid $foreground-muted;
 }
 #history_header {
     height: 3;
     background: $panel;
+    color: $foreground;
     padding: 0 1;
     align: left middle;
 }
@@ -186,13 +196,14 @@ TabPane {
     padding: 0 1;
     margin-right: 1;
     background: $panel;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
 }
 #history_header #btn_history_filters,
 #history_header #btn_history_stack {
     height: 3;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     background: transparent;
+    color: $foreground;
 }
 #history_header #btn_history_filters:focus,
 #history_header #btn_history_stack:focus,
@@ -200,6 +211,7 @@ TabPane {
 #history_header #btn_history_stack:hover {
     border: round $accent;
     background: transparent;
+    color: $accent;
 }
 #history_header #btn_columns {
     margin: 0;
@@ -207,13 +219,16 @@ TabPane {
     width: auto;
     min-width: 0;
     height: 3;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     background: $panel;
+    color: $foreground;
     text-style: bold;
 }
-#history_header #btn_columns:hover {
+#history_header #btn_columns:hover,
+#history_header #btn_columns:focus {
     border: round $accent;
     background: transparent;
+    color: $accent;
 }
 #intercept_cmd_output {
     height: 7;
@@ -227,7 +242,7 @@ TabPane {
 }
 #intercept_input_bar {
     height: 3;
-    border: round #F2C94C;
+    border: round $warning;
     padding: 0 1;
     align: left middle;
     background: $surface;
@@ -237,7 +252,7 @@ TabPane {
     height: 100%;
     content-align: left middle;
     margin-right: 1;
-    color: #F2C94C;
+    color: $warning;
 }
 Input {
     border: none;
@@ -248,10 +263,10 @@ Input:focus {
     background-tint: $surface 0%;
 }
 #intercept_input_bar.intercepted {
-    border: round red;
+    border: round $error;
 }
 #intercept_input_bar.intercepted #intercept_prompt_char {
-    color: red;
+    color: $error;
 }
 #intercept_cmd_suggestions {
     display: none;
@@ -262,18 +277,18 @@ Input:focus {
     background: $surface;
 }
 DataTable > .datatable--cursor {
-    background: #C94A8A;
-    color: #ffffff;
+    background: $primary;
+    color: $button-color-foreground;
 }
 DataTable > .datatable--header-hover {
-    background: #2C3E3A;
+    background: $primary-muted;
 }
 SelectOverlay {
-    border: tall #2C3E3A;
+    border: tall $foreground-muted;
 }
 OptionList > .option-list--option-highlighted {
-    background: #C94A8A;
-    color: #ffffff;
+    background: $primary;
+    color: $button-color-foreground;
 }
 #history_bar_container {
     display: none;
@@ -299,7 +314,7 @@ OptionList > .option-list--option-highlighted {
 }
 #history_input_bar {
     height: 3;
-    border: round #F2C94C;
+    border: round $warning;
     padding: 0 1;
     align: left middle;
     background: $surface;
@@ -309,18 +324,19 @@ OptionList > .option-list--option-highlighted {
     height: 100%;
     content-align: left middle;
     margin-right: 1;
-    color: #F2C94C;
+    color: $warning;
 }
 #settings_pane {
     padding: 1 2;
+    color: $foreground;
 }
 #settings_title {
     text-style: bold;
-    color: #26a368;
+    color: $success;
     margin-bottom: 1;
 }
 #settings_pane Rule {
-    color: #2C3E3A;
+    color: $foreground-muted;
     margin: 0 0 1 0;
 }
 .settings_row {
@@ -343,11 +359,11 @@ Switch:focus {
     background-tint: $surface 0%;
 }
 Switch > .switch--slider {
-    color: #C94A8A;
-    background: #2C3E3A;
+    color: $error;
+    background: $primary-muted;
 }
 Switch.-on > .switch--slider {
-    color: #26a368;
+    color: $success;
 }
 #settings_depth_input {
     width: 10;
@@ -362,17 +378,19 @@ Switch.-on > .switch--slider {
 }
 #settings_save {
     width: auto;
+    min-width: 0;
     height: 3;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     padding: 0 2;
     background: transparent;
+    color: $foreground;
     text-style: bold;
 }
 #settings_save:hover,
 #settings_save:focus {
-    border: round #26a368;
+    border: round $success;
     background: transparent;
-    color: #26a368;
+    color: $success;
     background-tint: $surface 0%;
 }
 #home_split {
@@ -381,7 +399,7 @@ Switch.-on > .switch--slider {
 #home_sidebar {
     width: 1fr;
     height: 1fr;
-    border-right: solid $panel-lighten-2;
+    border-right: solid $foreground-muted;
 }
 #home_logo {
     width: 1fr;
@@ -400,11 +418,11 @@ Switch.-on > .switch--slider {
 }
 #home_title {
     text-style: bold;
-    color: #26a368;
+    color: $success;
     margin-bottom: 1;
 }
 #home_form Rule {
-    color: #2C3E3A;
+    color: $foreground-muted;
     margin: 1 0;
 }
 .connect_row {
@@ -427,7 +445,7 @@ Switch.-on > .switch--slider {
 #home_hooks_path, #home_script_path {
     width: 1fr;
     height: 3;
-    border: tall #2C3E3A;
+    border: tall $foreground-muted;
     background: $surface;
     padding: 0 1;
 }
@@ -435,36 +453,40 @@ Switch.-on > .switch--slider {
 #home_hooks_clear, #home_script_clear {
     width: auto;
     height: 3;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     padding: 0 1;
     margin-left: 1;
     background: transparent;
+    color: $foreground;
     text-style: bold;
 }
 #home_hooks_browse:hover, #home_hooks_browse:focus,
 #home_script_browse:hover, #home_script_browse:focus {
     border: round $accent;
     background: transparent;
+    color: $accent;
 }
 #home_hooks_clear:hover, #home_hooks_clear:focus,
 #home_script_clear:hover, #home_script_clear:focus {
-    border: round #B95B5B;
-    color: #FFB1B1;
+    border: round $error-darken-1;
+    color: $error;
     background: transparent;
 }
 #home_refresh, #home_target_refresh {
     width: auto;
     height: 3;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     padding: 0 1;
     margin-left: 1;
     background: transparent;
+    color: $foreground;
     text-style: bold;
 }
 #home_refresh:hover, #home_target_refresh:hover,
 #home_refresh:focus, #home_target_refresh:focus {
     border: round $accent;
     background: transparent;
+    color: $accent;
 }
 #home_anr_row {
     height: 3;
@@ -485,25 +507,26 @@ Switch.-on > .switch--slider {
     width: 1fr;
 }
 #home_form Select > SelectCurrent {
-    border: tall #2C3E3A;
+    border: tall $foreground-muted;
     background: $surface;
 }
 #home_form Select:focus > SelectCurrent {
-    border: tall #2C3E3A;
+    border: tall $foreground-muted;
 }
 #home_btn {
     width: auto;
     height: 3;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     padding: 0 2;
     background: transparent;
+    color: $foreground;
     text-style: bold;
 }
 #home_btn:hover,
 #home_btn:focus {
-    border: round #26a368;
+    border: round $success;
     background: transparent;
-    color: #26a368;
+    color: $success;
     background-tint: $surface 0%;
 }
 #home_btn_row {
@@ -513,22 +536,23 @@ Switch.-on > .switch--slider {
 #home_disconnect {
     width: auto;
     height: 3;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     padding: 0 2;
     background: transparent;
+    color: $foreground;
     text-style: bold;
     margin-left: 1;
 }
 #home_disconnect:hover,
 #home_disconnect:focus {
-    border: round #B95B5B;
+    border: round $error-darken-1;
     background: transparent;
-    color: #FFB1B1;
+    color: $error;
     background-tint: $surface 0%;
 }
 #home_error {
     height: 1;
-    color: #C94A8A;
+    color: $error;
     margin-top: 1;
 }
 #edit_form {
@@ -541,21 +565,46 @@ Switch.-on > .switch--slider {
 }
 .ef_row { height: 1; align: left middle; margin-bottom: 1; }
 .ef_label { width: 12; content-align: left middle; }
-.ef_section { text-style: bold; color: #F2C94C; margin: 1 0; }
+.ef_section { text-style: bold; color: $warning; margin: 1 0; }
 .ef_x_row { height: 1; align: left middle; margin-bottom: 1; }
 .ef_x_key_label { width: 18; }
-.ef_x_type_label { width: 14; color: $text-muted; }
+.ef_x_type_label { width: 14; color: $foreground-muted; }
 .ef_x_key_input { width: 18; padding: 0; }
 .ef_x_type_select { width: 14; height: 1; }
 .ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
-.ef_x_rm { width: 3; height: 1; border: none; min-width: 3; padding: 0; }
+.ef_x_rm {
+    width: 3;
+    height: 1;
+    border: none;
+    min-width: 3;
+    padding: 0;
+    color: $foreground-muted;
+    background: transparent;
+}
+.ef_x_rm:hover, .ef_x_rm:focus {
+    color: $error;
+    background: $boost;
+    background-tint: $surface 0%;
+}
 #ef_extras { height: auto; }
 #ef_categories { height: auto; }
-#ef_add_extra { width: auto; height: 1; border: none; padding: 0 1; color: #F2C94C; }
-#ef_add_cat { width: auto; height: 1; border: none; padding: 0 1; color: #F2C94C; }
+#ef_add_extra, #ef_add_cat {
+    width: auto;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    color: $foreground;
+    background: transparent;
+}
+#ef_add_extra:hover, #ef_add_extra:focus,
+#ef_add_cat:hover, #ef_add_cat:focus {
+    color: $success;
+    background: $boost;
+    background-tint: $surface 0%;
+}
 .ef_cat_row { height: 1; align: left middle; margin-bottom: 1; }
 .ef_cat_input { padding: 0; }
-#edit_form Rule { margin: 0 2 0 0; color: #2C3E3A; }
+#edit_form Rule { margin: 0 2 0 0; color: $foreground-muted; }
 #app_footer {
     dock: bottom;
     height: 1;
@@ -569,7 +618,7 @@ Footer {
     width: auto;
     height: 1;
     background: $panel;
-    color: #8A8F8D;
+    color: $foreground-muted;
     content-align: right middle;
     padding: 0 2;
 }
@@ -579,7 +628,7 @@ Footer {
 #info_rail {
     width: 22;
     height: 1fr;
-    border-right: solid #2C3E3A;
+    border-right: solid $foreground-muted;
     padding: 1 0;
 }
 .info-nav {
@@ -599,6 +648,10 @@ Footer {
     background-tint: $surface 0%;
     text-style: none;
 }
+.info-nav:hover,
+.info-nav:focus {
+    color: $accent;
+}
 .info-nav.active,
 .info-nav.active:hover,
 .info-nav.active:focus,
@@ -607,14 +660,16 @@ Footer {
     border: none;
     tint: transparent;
     background-tint: $surface 0%;
+    color: $foreground;
     text-style: bold;
 }
-#info_main { width: 1fr; height: 1fr; }
-#info_empty { padding: 1 2; text-style: dim; }
+#info_main { width: 1fr; height: 1fr; color: $foreground; }
+#info_empty { padding: 1 2; color: $foreground-muted; }
 #info_switcher { height: 1fr; }
 .info_controls {
     height: 3;
     background: $panel;
+    color: $foreground;
     padding: 0 1;
     align: left middle;
 }
@@ -624,10 +679,10 @@ Footer {
     padding: 0 1;
     margin-right: 1;
     background: $panel;
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
 }
 .info_controls Input:focus {
-    border: round $accent;
+    border: round $foreground-muted;
     background-tint: $surface 0%;
 }
 .info_controls Select {
@@ -638,7 +693,7 @@ Footer {
 #info_comp_type { width: 19; }
 #info_perm_source { width: 21; }
 .info_controls Select > SelectCurrent {
-    border: round $panel-lighten-2;
+    border: round $foreground-muted;
     background: $panel;
 }
 .info_controls Select:focus > SelectCurrent {
@@ -650,7 +705,8 @@ Footer {
     height: 3;
     padding: 0 1;
     background: $panel;
-    border: round $panel-lighten-2;
+    color: $foreground;
+    border: round $foreground-muted;
     align: left middle;
 }
 .switch-control:focus-within { border: round $accent; }
@@ -661,7 +717,13 @@ Footer {
     margin: 0;
     background: $panel;
 }
-.switch-control-label { width: auto; height: 1; content-align: left middle; margin-left: 1; }
-#info_perm_table, #info_comp_table { height: 1fr; margin: 1 1 0 1; border: solid #2C3E3A; }
-#info_comp_detail { height: 12; margin: 0 1 1 1; border: solid #2C3E3A; background: $surface; }
+.switch-control-label {
+    width: auto;
+    height: 1;
+    color: $foreground;
+    content-align: left middle;
+    margin-left: 1;
+}
+#info_perm_table, #info_comp_table { height: 1fr; margin: 1 1 0 1; border: solid $foreground-muted; }
+#info_comp_detail { height: 12; margin: 0 1 1 1; border: solid $foreground-muted; background: $surface; }
 #info_overview_log { height: 1fr; padding: 1 2; }

@@ -79,9 +79,9 @@ from noxen.modals import (
     StackModal,
 )
 from noxen.rendering import (
-    HISTORY_OUTCOME_CELL,
     entry_to_filter_context,
     filter_sort_history_entries,
+    history_outcome_cell,
     history_row_values,
     payload_to_history_entry,
     render_intent_detail,
@@ -89,6 +89,7 @@ from noxen.rendering import (
 from noxen.settings import load_settings, save_settings
 from noxen.system_server_session import SystemServerConfig, SystemServerSession
 from noxen.textual_compat import SELECT_EMPTY, is_select_empty
+from noxen.ui_theme import register_noxen_themes, semantic_colors, themed_markup
 
 _HISTORY_COLUMNS = [
     ("id",        "#"),
@@ -117,7 +118,7 @@ INTERCEPT_ACTION_BUTTON_CLASSES = (
 )
 
 
-def markup_renderable(markup: str) -> Text:
+def markup_renderable(markup: str, dark: bool = True) -> Text:
     """Render a builder's markup string without Rich emoji-shortcode substitution.
 
     Rich treats ``:cd:`` (and similar) as emoji shortcodes, so app/intent data such
@@ -125,7 +126,15 @@ def markup_renderable(markup: str) -> Text:
     captured value. Style tags and the builders' bracket escaping are preserved; only
     the emoji pass is disabled. Use this for every RichLog write of rendered data.
     """
-    return Text.from_markup(markup, emoji=False)
+    return Text.from_markup(themed_markup(markup, dark), emoji=False)
+
+
+def app_markup_renderable(app, markup: str):
+    """Render themed markup, while keeping lightweight test doubles compatible."""
+    current_theme = getattr(app, "current_theme", None)
+    if current_theme is None:
+        return markup
+    return markup_renderable(markup, dark=current_theme.dark)
 
 
 def clamp_height(value: int, minimum: int, maximum: int | None = None) -> int:
@@ -153,11 +162,13 @@ class HomeLogo(Static):
     def on_resize(self) -> None:
         self._render_brand()
 
-    @staticmethod
-    def _lerp_color(t: float) -> str:
-        r = int(0xC9 + (0x26 - 0xC9) * t)
-        g = int(0x4A + (0xA3 - 0x4A) * t)
-        b = int(0x8A + (0x68 - 0x8A) * t)
+    def _lerp_color(self, t: float) -> str:
+        colors = semantic_colors(self.app.current_theme.dark)
+        start = colors.brand_start
+        end = colors.brand_end
+        r = int(int(start[1:3], 16) + (int(end[1:3], 16) - int(start[1:3], 16)) * t)
+        g = int(int(start[3:5], 16) + (int(end[3:5], 16) - int(start[3:5], 16)) * t)
+        b = int(int(start[5:7], 16) + (int(end[5:7], 16) - int(start[5:7], 16)) * t)
         return f"#{r:02x}{g:02x}{b:02x}"
 
     def _render_brand(self) -> None:
@@ -186,6 +197,7 @@ class HomeInfo(Static):
         self.refresh_info()
 
     def refresh_info(self) -> None:
+        colors = semantic_colors(self.app.current_theme.dark)
         try:
             noxen_ver = pkg_version("noxen")
         except PackageNotFoundError:
@@ -207,9 +219,9 @@ class HomeInfo(Static):
             modified = "—"
 
         self.update(
-            f"[dim]noxen[/dim]    [#26a368]{noxen_ver}[/#26a368]\n"
-            f"[dim]frida[/dim]    [#26a368]{frida_ver}[/#26a368]\n"
-            f"[dim]python[/dim]   [#26a368]{py_ver}[/#26a368]\n"
+            f"[dim]noxen[/dim]    [{colors.success}]{noxen_ver}[/{colors.success}]\n"
+            f"[dim]frida[/dim]    [{colors.success}]{frida_ver}[/{colors.success}]\n"
+            f"[dim]python[/dim]   [{colors.success}]{py_ver}[/{colors.success}]\n"
             f"\n"
             f"[dim]project[/dim]  {db_name}\n"
             f"[dim]created[/dim]  {created}\n"
@@ -235,6 +247,8 @@ class NoxenApp(App):
 
     def __init__(self, cli_args):
         super().__init__()
+        register_noxen_themes(self)
+        self.theme = "noxen-dark"
         self._skip_startup_device_scan = bool(getattr(cli_args, "skip_device_scan", False))
         self._session_config: SessionConfig | None = None
         self._settings = load_settings()
@@ -358,10 +372,43 @@ class NoxenApp(App):
                 pass
 
     def action_toggle_theme(self):
-        if self.theme == "textual-dark":
-            self.theme = "textual-light"
+        if self.theme == "noxen-dark":
+            self.theme = "noxen-light"
         else:
-            self.theme = "textual-dark"
+            self.theme = "noxen-dark"
+        self.call_after_refresh(self._refresh_theme_content)
+
+    def _render_markup(self, markup: str) -> Text:
+        return app_markup_renderable(self, markup)
+
+    def _refresh_theme_content(self) -> None:
+        """Rebuild color-bearing content after switching between paired palettes."""
+        try:
+            self.query_one("#home_logo", HomeLogo)._render_brand()
+            self.query_one("#home_info", HomeInfo).refresh_info()
+        except Exception:
+            pass
+        self._refresh_log_output()
+        self._refresh_history_table()
+        if self._app_info:
+            self._apply_app_info(self._app_info)
+        if self._history_selected_entry:
+            try:
+                detail = self.query_one("#history_detail", RichLog)
+                detail.clear()
+                detail.write(self._render_markup(render_intent_detail(
+                    self._history_selected_entry,
+                    show_stack=self._history_show_stack,
+                    stack_depth=self._history_stack_depth,
+                )))
+            except Exception:
+                pass
+        if self._current_intercepted_entry:
+            self._on_intercept_display(
+                "",
+                self._current_intercepted_entry.get("id"),
+                self._current_decision_id,
+            )
 
 
     def _enter_edit_mode(self):
@@ -687,7 +734,7 @@ class NoxenApp(App):
                     try:
                         intercept_output = self.query_one("#intercept_output", RichLog)
                         intercept_output.clear()
-                        intercept_output.write(markup_renderable(render_intent_detail(
+                        intercept_output.write(self._render_markup(render_intent_detail(
                             self._current_intercepted_entry,
                             show_stack=show,
                             stack_depth=depth,
@@ -992,7 +1039,7 @@ class NoxenApp(App):
                         )
                     yield Label("", id="settings_depth_error")
                     yield Rule()
-                    yield Button("Save", id="settings_save", variant="primary")
+                    yield Button("Save", id="settings_save")
         with Vertical(id="history_bar_container"):
             yield RichLog(id="history_cmd_output", markup=True, highlight=False)
             yield OptionList(id="history_cmd_suggestions")
@@ -1060,13 +1107,13 @@ class NoxenApp(App):
     def _try_connect(self):
         device_id = self.query_one("#home_device", Select).value
         if not getattr(self, "_home_devices", []) or is_select_empty(device_id):
-            self.query_one("#home_error", Label).update("[red]No device available[/red]")
+            self.query_one("#home_error", Label).update("No device available")
             return
 
         mode = self.query_one("#home_mode", Select).value
         target_val = self.query_one("#home_target_select", Select).value
         if is_select_empty(target_val):
-            self.query_one("#home_error", Label).update("[red]Select a target[/red]")
+            self.query_one("#home_error", Label).update("Select a target")
             return
         target = str(target_val)
 
@@ -1217,7 +1264,7 @@ class NoxenApp(App):
                 if generation != self._connect_scan_generation:
                     return
                 try:
-                    self.query_one("#home_error", Label).update(f"[red]Devices: {error}[/red]")
+                    self.query_one("#home_error", Label).update(f"Devices: {error}")
                 except Exception:
                     pass
                 self._home_devices = []
@@ -1266,7 +1313,7 @@ class NoxenApp(App):
             error = str(e)
             def _err():
                 try:
-                    self.query_one("#home_error", Label).update(f"[red]Apps: {error}[/red]")
+                    self.query_one("#home_error", Label).update(f"Apps: {error}")
                 except Exception:
                     pass
             self.call_from_thread(_err)
@@ -1351,7 +1398,7 @@ class NoxenApp(App):
                 self.query_one("#home_btn", Button).label = "Connect"
                 self.query_one("#home_btn", Button).disabled = False
                 self.query_one("#home_disconnect", Button).disabled = True
-                self.query_one("#home_error", Label).update(f"[red]{message}[/red]")
+                self.query_one("#home_error", Label).update(message)
             except Exception:
                 pass
             self._clear_info_tab()
@@ -1463,7 +1510,7 @@ class NoxenApp(App):
             self.query_one("#info_switcher", ContentSwitcher).display = True
             overview = self.query_one("#info_overview_log", RichLog)
             overview.clear()
-            overview.write(markup_renderable(render_overview(info)))
+            overview.write(self._render_markup(render_overview(info)))
             overview.scroll_home(animate=False)
             self._refresh_info_permissions()
             self._refresh_info_components()
@@ -1535,7 +1582,7 @@ class NoxenApp(App):
 
         def _do():
             try:
-                self.query_one(f"#{widget_id}", RichLog).write(text)
+                self.query_one(f"#{widget_id}", RichLog).write(self._render_markup(text))
             except Exception:
                 pass
             if notify and plain:
@@ -1567,7 +1614,7 @@ class NoxenApp(App):
                 output.clear()
                 for entry in self._log_entries:
                     if self._is_log_visible(entry):
-                        output.write(entry)
+                        output.write(app_markup_renderable(self, entry))
             except Exception:
                 pass
 
@@ -1627,7 +1674,14 @@ class NoxenApp(App):
         ctx = entry_to_filter_context(entry)
         if not self._history_filter_manager.is_visible(ctx):
             return
-        row_vals = history_row_values(entry, self._history_visible_cols, _HISTORY_COLUMNS)
+        colors = semantic_colors(self.current_theme.dark)
+        row_vals = history_row_values(
+            entry,
+            self._history_visible_cols,
+            _HISTORY_COLUMNS,
+            colors.success,
+            colors.error,
+        )
         table.add_row(*row_vals, key=str(entry["id"]))
 
     def _update_filter_count(self):
@@ -1689,8 +1743,15 @@ class NoxenApp(App):
 
     def _fill_table_rows(self, table, filtered):
         """Add rows to table from a filtered+sorted entry list."""
+        colors = semantic_colors(self.current_theme.dark)
         for entry in filtered:
-            row_vals = history_row_values(entry, self._history_visible_cols, _HISTORY_COLUMNS)
+            row_vals = history_row_values(
+                entry,
+                self._history_visible_cols,
+                _HISTORY_COLUMNS,
+                colors.success,
+                colors.error,
+            )
             table.add_row(*row_vals, key=str(entry["id"]))
 
     def _restore_cursor(self, table, filtered, saved_sel_id):
@@ -1763,7 +1824,7 @@ class NoxenApp(App):
         self._current_decision_id = decision_id
         self._current_intercepted_entry = entry
         self._staged_mods.clear()
-        rendered = markup_renderable(
+        rendered = app_markup_renderable(self,
             render_intent_detail(entry, show_stack=self.show_stack, stack_depth=self.stack_depth)
         )
 
@@ -1797,7 +1858,7 @@ class NoxenApp(App):
                     detail = self.query_one("#info_comp_detail", RichLog)
                     detail.clear()
                     own_package = ((self._app_info or {}).get("identity") or {}).get("package")
-                    detail.write(markup_renderable(render_component_detail(comp, own_package)))
+                    detail.write(self._render_markup(render_component_detail(comp, own_package)))
                     detail.scroll_home(animate=False)
                 except Exception:
                     pass
@@ -1813,7 +1874,7 @@ class NoxenApp(App):
             try:
                 detail = self.query_one("#history_detail", RichLog)
                 detail.clear()
-                detail.write(markup_renderable(render_intent_detail(
+                detail.write(self._render_markup(render_intent_detail(
                     entry,
                     show_stack=self._history_show_stack,
                     stack_depth=self._history_stack_depth,
@@ -2444,7 +2505,7 @@ class NoxenApp(App):
         try:
             detail = self.query_one("#history_detail", RichLog)
             detail.clear()
-            detail.write(markup_renderable(render_intent_detail(
+            detail.write(self._render_markup(render_intent_detail(
                 self._history_selected_entry,
                 show_stack=self._history_show_stack,
                 stack_depth=self._history_stack_depth,
@@ -2459,7 +2520,7 @@ class NoxenApp(App):
         try:
             intercept_output = self.query_one("#intercept_output", RichLog)
             intercept_output.clear()
-            intercept_output.write(markup_renderable(render_intent_detail(
+            intercept_output.write(self._render_markup(render_intent_detail(
                 self._current_intercepted_entry,
                 show_stack=self.show_stack,
                 stack_depth=self.stack_depth,
@@ -2536,7 +2597,12 @@ class NoxenApp(App):
             try:
                 table = self.query_one("#history_table", DataTable)
                 if "outcome" in self._history_visible_cols:
-                    table.update_cell(str(intent_id), "outcome", HISTORY_OUTCOME_CELL.get(outcome, ""))
+                    colors = semantic_colors(self.current_theme.dark)
+                    table.update_cell(
+                        str(intent_id),
+                        "outcome",
+                        history_outcome_cell(outcome, colors.success, colors.error),
+                    )
             except Exception:
                 pass
             if self._history_selected_entry and self._history_selected_entry.get("id") == intent_id:

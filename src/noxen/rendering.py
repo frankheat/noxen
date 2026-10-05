@@ -52,11 +52,18 @@ INTENT_FLAGS = [
     (0x80000000, ["FLAG_IGNORE_EPHEMERAL", "FLAG_RECEIVER_OFFLOAD"]),
 ]
 
-HISTORY_OUTCOME_CELL = {
-    "forwarded":          Text("→",  style="bold #26a368"),
-    "modified_forwarded": Text("✎→", style="bold #26a368"),
-    "dropped":            Text("✗",  style="bold red"),
-}
+def history_outcome_cell(
+    outcome: str | None,
+    success_color: str = "#26a368",
+    error_color: str = "red",
+) -> Text:
+    if outcome == "forwarded":
+        return Text("→", style=f"bold {success_color}")
+    if outcome == "modified_forwarded":
+        return Text("✎→", style=f"bold {success_color}")
+    if outcome == "dropped":
+        return Text("✗", style=f"bold {error_color}")
+    return Text("")
 
 
 def decode_pending_intent_flags(raw_flags):
@@ -184,7 +191,13 @@ def filter_sort_history_entries(
     return filtered
 
 
-def history_row_values(entry: dict, visible_columns: set[str], columns: list[tuple[str, str]]) -> list:
+def history_row_values(
+    entry: dict,
+    visible_columns: set[str],
+    columns: list[tuple[str, str]],
+    success_color: str = "#26a368",
+    error_color: str = "red",
+) -> list:
     info = entry.get("intent", {}) or {}
     extras = info.get("extras", {}) or {}
     timestamp = entry.get("timestamp", "")
@@ -192,13 +205,13 @@ def history_row_values(entry: dict, visible_columns: set[str], columns: list[tup
     outcome = entry.get("outcome")
     all_values = {
         "id":        str(entry["id"]),
-        "outcome":   HISTORY_OUTCOME_CELL.get(outcome, Text("")),
+        "outcome":   history_outcome_cell(outcome, success_color, error_color),
         "time":      time_str,
         "method":    str(entry.get("method") or ""),
         "class":     str(entry.get("class") or ""),
         "component": str(info.get("component") or ""),
         "action":    str(info.get("action") or ""),
-        "extras":    Text("✓", style="#26a368") if extras else "",
+        "extras":    Text("✓", style=success_color) if extras else "",
     }
     return [all_values[key] for key, _label in columns if key in visible_columns]
 

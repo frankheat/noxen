@@ -24,6 +24,7 @@ from noxen.history_columns import (
     parse_history_column_width,
 )
 from noxen.textual_compat import is_select_empty
+from noxen.ui_theme import semantic_colors, themed_markup
 
 
 class _VisibleTree(DirectoryTree):
@@ -38,22 +39,22 @@ class FileBrowserModal(ModalScreen):
         width: 70;
         height: 30;
         background: $surface;
-        border: solid $panel-lighten-2;
+        border: solid $foreground-muted;
         padding: 1 2;
     }
     #fbm_title {
         text-style: bold;
-        color: #26a368;
+        color: $success;
         margin-bottom: 1;
     }
     #fbm_tree {
         height: 1fr;
-        border: solid #2C3E3A;
+        border: solid $foreground-muted;
         margin-bottom: 1;
     }
     #fbm_selected {
         height: 1;
-        color: $text-muted;
+        color: $foreground-muted;
         margin-bottom: 1;
     }
     #fbm_buttons {
@@ -63,19 +64,21 @@ class FileBrowserModal(ModalScreen):
     #fbm_buttons Button {
         width: auto;
         height: 3;
-        border: round $panel-lighten-2;
+        border: round $foreground-muted;
         padding: 0 2;
         background: transparent;
+        color: $foreground;
         text-style: bold;
         margin-left: 1;
     }
     #fbm_ok:hover, #fbm_ok:focus {
-        border: round #26a368;
-        color: #26a368;
+        border: round $success;
+        color: $success;
         background-tint: $surface 0%;
     }
     #fbm_cancel:hover, #fbm_cancel:focus {
-        border: round $panel-lighten-2;
+        border: round $accent;
+        color: $accent;
         background-tint: $surface 0%;
     }
     """
@@ -120,20 +123,33 @@ class ColumnSelectModal(ModalScreen):
         height: auto;
         max-height: 90%;
         background: $surface;
-        border: solid $panel-lighten-2;
+        border: solid $foreground-muted;
         padding: 0 2 1 2;
     }
     #csm_topbar { dock: top; height: 1; align: right middle; }
-    #csm_btn_close { height: 1; border: none; padding: 0; width: auto; min-width: 1; }
+    #csm_btn_close {
+        height: 1;
+        border: none;
+        padding: 0;
+        width: auto;
+        min-width: 1;
+        color: $foreground-muted;
+        background: transparent;
+    }
+    #csm_btn_close:hover, #csm_btn_close:focus {
+        color: $error;
+        background: $boost;
+        background-tint: $surface 0%;
+    }
     #csm_title { width: 100%; content-align: center middle; text-style: bold; margin-bottom: 1; }
     #csm_table {
         height: auto;
-        border: solid $panel;
+        border: solid $foreground-muted;
         padding: 0 1;
         margin-top: 1;
     }
     .csm_header_row, .csm_column_row { height: 1; align: left middle; }
-    .csm_header { text-style: bold; color: $text-muted; }
+    .csm_header { text-style: bold; color: $foreground-muted; }
     .csm_column_label { width: 16; content-align: left middle; }
     .csm_show_label { width: 8; content-align: left middle; }
     .csm_width_label { width: 11; content-align: left middle; }
@@ -144,6 +160,13 @@ class ColumnSelectModal(ModalScreen):
         border: none;
         padding: 0;
         margin-right: 5;
+        color: $foreground;
+        background: transparent;
+    }
+    .csm_show_button:hover, .csm_show_button:focus {
+        color: $accent;
+        background: $boost;
+        background-tint: $surface 0%;
     }
     .csm_width_cell { width: 11; height: 1; align: left middle; }
     .csm_width_input {
@@ -151,40 +174,41 @@ class ColumnSelectModal(ModalScreen):
         height: 1;
         border: none;
         padding: 0;
-        color: $text;
+        color: $foreground;
     }
     .csm_width_input:focus {
         border: none;
-        color: $text;
+        color: $foreground;
         background-tint: $surface 0%;
     }
     .csm_width_input:disabled {
         opacity: 100%;
         border: none;
-        color: $text-muted;
+        color: $foreground-muted;
     }
     #csm_width_actions { height: 3; margin-top: 1; align: right middle; }
     #csm_width_actions Button {
         width: auto;
         height: 3;
-        border: round $panel-lighten-2;
+        border: round $foreground-muted;
         padding: 0 2;
         background: transparent;
+        color: $foreground;
         text-style: bold;
         margin-left: 1;
     }
     #csm_btn_apply_widths:hover,
     #csm_btn_apply_widths:focus {
-        border: round #26a368;
+        border: round $success;
         background: transparent;
-        color: #26a368;
+        color: $success;
         background-tint: $surface 0%;
     }
     #csm_btn_reset_widths:hover,
     #csm_btn_reset_widths:focus {
-        border: round #B95B5B;
+        border: round $error-darken-1;
         background: transparent;
-        color: #FFB1B1;
+        color: $error;
         background-tint: $surface 0%;
     }
     #csm_status { height: 1; margin-top: 1; }
@@ -278,12 +302,14 @@ class ColumnSelectModal(ModalScreen):
     def _apply_widths(self):
         widths, error = self._collect_widths()
         if error:
-            self.query_one("#csm_status", Label).update(error)
+            self.query_one("#csm_status", Label).update(
+                Text.from_markup(themed_markup(error, self.app.current_theme.dark), emoji=False)
+            )
             return
         self._widths = widths
         if self._on_widths_changed is not None:
             self._on_widths_changed(dict(self._widths))
-        self.query_one("#csm_status", Label).update("[#26a368]Column widths applied[/#26a368]")
+        self.query_one("#csm_status", Label).update("[bold]Column widths applied[/bold]")
 
     def _reset_widths(self):
         self._widths = {}
@@ -291,7 +317,7 @@ class ColumnSelectModal(ModalScreen):
             self.query_one(f"#csm_width_{key}", Input).value = ""
         if self._on_widths_changed is not None:
             self._on_widths_changed({})
-        self.query_one("#csm_status", Label).update("[#26a368]Column widths reset[/#26a368]")
+        self.query_one("#csm_status", Label).update("[bold]Column widths reset[/bold]")
 
     def on_button_pressed(self, event: Button.Pressed):
         event.stop()
@@ -322,7 +348,7 @@ class HelpModal(ModalScreen):
         height: auto;
         max-height: 65%;
         background: $surface;
-        border: solid $panel-lighten-2;
+        border: solid $foreground-muted;
         padding: 0 2 1 2;
     }
     #help_topbar {
@@ -330,7 +356,20 @@ class HelpModal(ModalScreen):
         height: 1;
         align: right middle;
     }
-    #help_close { height: 1; border: none; padding: 0; width: auto; min-width: 1; }
+    #help_close {
+        height: 1;
+        border: none;
+        padding: 0;
+        width: auto;
+        min-width: 1;
+        color: $foreground-muted;
+        background: transparent;
+    }
+    #help_close:hover, #help_close:focus {
+        color: $error;
+        background: $boost;
+        background-tint: $surface 0%;
+    }
     #help_title {
         width: 100%;
         content-align: center middle;
@@ -371,11 +410,25 @@ class StackModal(ModalScreen):
         width: 40;
         height: auto;
         background: $surface;
-        border: solid $panel-lighten-2;
+        border: solid $foreground-muted;
         padding: 0 2 1 2;
     }
     #sm_topbar { dock: top; height: 1; align: right middle; }
-    #sm_close { height: 1; border: none; padding: 0; width: auto; min-width: 1; text-style: bold }
+    #sm_close {
+        height: 1;
+        border: none;
+        padding: 0;
+        width: auto;
+        min-width: 1;
+        color: $foreground-muted;
+        background: transparent;
+        text-style: bold;
+    }
+    #sm_close:hover, #sm_close:focus {
+        color: $error;
+        background: $boost;
+        background-tint: $surface 0%;
+    }
     #sm_title { width: 100%; content-align: center middle; text-style: bold; margin-bottom: 1; }
     #sm_toggle_row { height: auto; align: left middle; margin-top: 1; }
     #sm_toggle_row Label { width: auto; margin-right: 1; }
@@ -387,16 +440,16 @@ class StackModal(ModalScreen):
     #sm_footer { height: 3; align: right middle; margin-top: 1; }
     #sm_save {
         height: 3;
-        border: round #26a368;
+        border: round $foreground-muted;
         background: transparent;
-        color: #26a368;
+        color: $foreground;
         padding: 0 1;
         width: auto;
     }
     #sm_save:hover, #sm_save:focus {
-        border: round #26a368;
+        border: round $success;
         background: transparent;
-        color: #26a368;
+        color: $success;
         background-tint: $surface 0%;
     }
     """
@@ -420,7 +473,7 @@ class StackModal(ModalScreen):
                 yield Input(value=str(self._depth), id="sm_depth_input")
             yield Label("", id="sm_error")
             with Horizontal(id="sm_footer"):
-                yield Button("Save", id="sm_save", variant="primary")
+                yield Button("Save", id="sm_save")
 
     def on_button_pressed(self, event: Button.Pressed):
         event.stop()
@@ -455,7 +508,7 @@ class FilterModal(ModalScreen):
         height: auto;
         max-height: 90%;
         background: $surface;
-        border: solid $panel-lighten-2;
+        border: solid $foreground-muted;
         padding: 0 2 1 2;
     }
     #hfm_topbar {
@@ -463,23 +516,47 @@ class FilterModal(ModalScreen):
         height: 1;
         align: right middle;
     }
-    #hfm_btn_close { height: 1; border: none; padding: 0; width: auto; min-width: 1; }
+    #hfm_btn_close {
+        height: 1;
+        border: none;
+        padding: 0;
+        width: auto;
+        min-width: 1;
+        color: $foreground-muted;
+        background: transparent;
+    }
+    #hfm_btn_close:hover, #hfm_btn_close:focus {
+        color: $error;
+        background: $boost;
+        background-tint: $surface 0%;
+    }
     #hfm_title {
         width: 100%;
         content-align: center middle;
         text-style: bold;
         margin-bottom: 1;
     }
-    .hfm_section { color: $text; margin-top: 1; text-style: bold; }
-    FilterModal Rule { color: $text-muted; margin: 1 0; }
+    .hfm_section { color: $foreground; margin-top: 1; text-style: bold; }
+    FilterModal Rule { color: $foreground-muted; margin: 1 0; }
     #hfm_filters_table {
         height: auto;
         max-height: 10;
-        border: solid $panel;
+        border: solid $foreground-muted;
         margin-top: 1;
     }
     #hfm_remove_row { height: auto; margin-top: 1; }
-    #hfm_remove_row Button { height: 1; border: none; padding: 0 1; }
+    #hfm_remove_row Button {
+        height: 1;
+        border: none;
+        padding: 0 1;
+        color: $foreground;
+        background: transparent;
+    }
+    #hfm_btn_remove:hover, #hfm_btn_remove:focus {
+        color: $error;
+        background: $boost;
+        background-tint: $surface 0%;
+    }
     #hfm_type_row   { height: auto; margin-top: 1; align: left middle; }
     #hfm_type_row Label { width: auto; margin-right: 1; content-align: left middle; }
     #hfm_sel_type { height: 1; }
@@ -490,35 +567,49 @@ class FilterModal(ModalScreen):
     .hfm_pair_sel { height: 1; }
     .hfm_pair_sel > SelectCurrent { border: none; height: 1; padding: 0 1; }
     .hfm_pair_row Input { width: 1fr; }
-    .hfm_pair_rm { width: 3; height: 1; border: none; min-width: 3; }
+    .hfm_pair_rm {
+        width: 3;
+        height: 1;
+        border: none;
+        min-width: 3;
+        color: $foreground-muted;
+        background: transparent;
+    }
+    .hfm_pair_rm:hover, .hfm_pair_rm:focus {
+        color: $error;
+        background: $boost;
+        background-tint: $surface 0%;
+    }
     #hfm_add_ctrl { height: auto; margin-top: 1; align: left middle; }
     #hfm_add_ctrl_spacer { width: 1fr; }
     #hfm_btn_add_pair {
         height: 3;
-        border: round $panel-lighten-2;
+        border: round $foreground-muted;
         background: transparent;
+        color: $foreground;
         padding: 0 1;
     }
     #hfm_btn_add_pair:hover, #hfm_btn_add_pair:focus {
         border: round $accent;
         background: transparent;
+        color: $accent;
         background-tint: $surface 0%;
     }
     #hfm_btn_add_filter {
         height: 3;
-        border: round #26a368;
+        border: round $foreground-muted;
         background: transparent;
-        color: #26a368;
+        color: $foreground;
         padding: 0 1;
     }
     #hfm_btn_add_filter:hover, #hfm_btn_add_filter:focus {
-        border: round #26a368;
+        border: round $success;
         background: transparent;
-        color: #26a368;
+        color: $success;
         background-tint: $surface 0%;
     }
     #hfm_status { height: 1; margin-top: 1; }
-    #hfm_filters_table:focus { border: solid $panel; background-tint: $surface 0%; }
+    #hfm_filters_table:focus { border: solid $foreground-muted; background-tint: $surface 0%; }
     """
 
     VALID_KEYS = sorted(FilterManager.VALID_KEYS)
@@ -560,7 +651,7 @@ class FilterModal(ModalScreen):
             yield Label("Active filters", classes="hfm_section")
             yield DataTable(id="hfm_filters_table", cursor_type="row")
             with Horizontal(id="hfm_remove_row"):
-                yield Button("Remove selected", id="hfm_btn_remove", variant="error", disabled=True)
+                yield Button("Remove selected", id="hfm_btn_remove", disabled=True)
             yield Rule()
             yield Label("Add filter", classes="hfm_section")
             with Horizontal(id="hfm_type_row"):
@@ -570,7 +661,7 @@ class FilterModal(ModalScreen):
             with Horizontal(id="hfm_add_ctrl"):
                 yield Button("+ Add condition", id="hfm_btn_add_pair")
                 yield Label("", id="hfm_add_ctrl_spacer")
-                yield Button("Add Filter", id="hfm_btn_add_filter", variant="primary")
+                yield Button("Add Filter", id="hfm_btn_add_filter")
             yield Label("", id="hfm_status", markup=True)
 
     def on_mount(self):
@@ -587,7 +678,8 @@ class FilterModal(ModalScreen):
         table.clear()
         for f in self._fm.export():
             enabled = f.get("enabled", True)
-            on_cell = Text("✓", style="bold green") if enabled else Text("○", style="dim")
+            success = semantic_colors(self.app.current_theme.dark).success
+            on_cell = Text("✓", style=f"bold {success}") if enabled else Text("○", style="dim")
             rule_str = " ".join(f"{k}={v}" for k, v in f["rule"].items())
             table.add_row(on_cell, str(f["id"]), f["type"], rule_str, key=str(f["id"]))
         self._selected_filter_id = None
@@ -703,7 +795,9 @@ class FilterModal(ModalScreen):
         self._on_filters_changed()
 
     def _set_status(self, msg: str):
-        self.query_one("#hfm_status", Label).update(msg)
+        self.query_one("#hfm_status", Label).update(
+            Text.from_markup(themed_markup(msg, self.app.current_theme.dark), emoji=False)
+        )
 
     def on_button_pressed(self, event: Button.Pressed):
         event.stop()

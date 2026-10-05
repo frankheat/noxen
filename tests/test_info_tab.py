@@ -10,7 +10,7 @@ from noxen.app import NoxenApp, markup_renderable
 
 
 def project_args(path):
-    return SimpleNamespace(project=None, new_project=path)
+    return SimpleNamespace(project=None, new_project=path, skip_device_scan=True)
 
 
 SNAPSHOT = {
