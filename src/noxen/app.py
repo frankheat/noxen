@@ -964,7 +964,6 @@ class NoxenApp(App):
                         Label("❯", id="intercept_prompt_char"),
                         Input(
                             id="intercept_command_input",
-                            disabled=True,
                             placeholder="Intent command, or / for app commands",
                             suggester=CommandSuggester(INTERCEPT_COMPLETIONS),
                             select_on_focus=False,
@@ -1349,7 +1348,6 @@ class NoxenApp(App):
                 self.query_one("#home_btn", Button).disabled = True
                 self.query_one("#home_disconnect", Button).disabled = False
                 self.query_one("#home_error", Label).update("")
-                self.query_one("#intercept_command_input", Input).disabled = False
                 self.query_one("#main_tabs", TabbedContent).active = "tab_intercept"
             except Exception:
                 pass

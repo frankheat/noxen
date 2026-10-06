@@ -47,6 +47,28 @@ class CommandBarVisibilityTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    async def test_intercept_command_input_is_available_without_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                app = NoxenApp(project_args_without_device_scan(os.path.join(tmp, "missing.noxen")))
+                async with app.run_test(size=(100, 32)) as pilot:
+                    tabs = app.query_one("#main_tabs")
+                    command_input = app.query_one("#intercept_command_input")
+
+                    self.assertIsNone(app.frida_session)
+                    self.assertFalse(command_input.disabled)
+
+                    tabs.active = "tab_intercept"
+                    await pilot.pause()
+                    await pilot.click("#intercept_command_input")
+                    await pilot.pause()
+
+                    self.assertTrue(command_input.has_focus)
+            finally:
+                os.chdir(previous_cwd)
+
     async def test_ctrl_b_toggles_intercept_and_history_command_bars_independently(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_cwd = os.getcwd()
