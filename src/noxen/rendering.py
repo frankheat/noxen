@@ -353,9 +353,9 @@ def _extras_lines(extras: dict) -> list[str]:
     rows = []
     for key, value in extras.items():
         value = value or {}
-        simple = _simple_type(value.get("type"))
+        simple = value.get("noxenType") or _simple_type(value.get("type"))
         raw = value.get("value")
-        shown = f'"{_markup(raw)}"' if simple == "String" and raw is not None else _markup(raw)
+        shown = f'"{_markup(raw)}"' if simple in {"String", "string"} and raw is not None else _markup(raw)
         rows.append((_markup(key), simple, shown))
     key_w = max([len("KEY")] + [len(k) for k, _, _ in rows])
     type_w = max([len("TYPE")] + [len(t) for _, t, _ in rows])

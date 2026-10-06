@@ -568,9 +568,9 @@ Switch.-on > .switch--slider {
 .ef_section { text-style: bold; color: $warning; margin: 1 0; }
 .ef_x_row { height: 1; align: left middle; margin-bottom: 1; }
 .ef_x_key_label { width: 18; }
-.ef_x_type_label { width: 14; color: $foreground-muted; }
+.ef_x_type_label { width: 25; color: $foreground-muted; }
 .ef_x_key_input { width: 18; padding: 0; }
-.ef_x_type_select { width: 14; height: 1; }
+.ef_x_type_select { width: 25; height: 1; }
 .ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
 .ef_x_rm {
     width: 3;

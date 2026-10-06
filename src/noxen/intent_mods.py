@@ -1,11 +1,73 @@
 import copy
+import re
 
 
 IntentMod = tuple[str, str, str, str]
 IntentModParseResult = tuple[IntentMod | None, str | None]
 
 
-VALID_EXTRA_TYPES = frozenset({"int", "bool", "boolean", "float", "long", "string", "double"})
+EXTRA_TYPE_OPTIONS = (
+    ("String", "string"),
+    ("Null string", "null"),
+    ("Boolean", "bool"),
+    ("Integer", "int"),
+    ("Long", "long"),
+    ("Float", "float"),
+    ("Double", "double"),
+    ("URI", "uri"),
+    ("Component", "component"),
+    ("Integer array", "int[]"),
+    ("Long array", "long[]"),
+    ("Float array", "float[]"),
+    ("Double array", "double[]"),
+    ("String array", "string[]"),
+    ("Integer list", "int-list"),
+    ("Long list", "long-list"),
+    ("Float list", "float-list"),
+    ("Double list", "double-list"),
+    ("String list", "string-list"),
+)
+
+EXTRA_VALUE_PLACEHOLDERS = {
+    "string": "hello",
+    "null": "not used",
+    "bool": "true",
+    "int": "5",
+    "long": "5000000000",
+    "float": "3.14",
+    "double": "3.1415926535",
+    "uri": "content://example/items/1",
+    "component": "com.example/.MainActivity",
+    "int[]": "1,2,3",
+    "long[]": "5000000000,6000000000",
+    "float[]": "1.5,2.5,3.5",
+    "double[]": "1.25,2.5,3.75",
+    "string[]": r"one,two,comma\,inside",
+    "int-list": "1,2,3",
+    "long-list": "5000000000,6000000000",
+    "float-list": "1.5,2.5,3.5",
+    "double-list": "1.25,2.5,3.75",
+    "string-list": r"one,two,comma\,inside",
+}
+
+VALID_EXTRA_TYPES = frozenset(value for _label, value in EXTRA_TYPE_OPTIONS)
+
+EXTRA_TYPE_ALIASES = {
+    "boolean": "bool",
+    "null-string": "null",
+    "string-null": "null",
+    "component-name": "component",
+    "integer": "int",
+    "integer[]": "int[]",
+    "integer-list": "int-list",
+    # adb flag names are accepted without their leading dashes.
+    "es": "string", "esn": "null", "ez": "bool", "ei": "int",
+    "el": "long", "ef": "float", "ed": "double", "eu": "uri",
+    "ecn": "component", "eia": "int[]", "ela": "long[]",
+    "efa": "float[]", "eda": "double[]", "esa": "string[]",
+    "eial": "int-list", "elal": "long-list", "efal": "float-list",
+    "edal": "double-list", "esal": "string-list",
+}
 
 JAVA_TYPE_TO_SIMPLE = {
     "java.lang.String": "string",
@@ -17,7 +79,44 @@ JAVA_TYPE_TO_SIMPLE = {
     "java.lang.Short": "int",
     "java.lang.Byte": "int",
     "java.lang.Character": "string",
+    "android.net.Uri": "uri",
+    "android.content.ComponentName": "component",
+    "[I": "int[]",
+    "[J": "long[]",
+    "[F": "float[]",
+    "[D": "double[]",
+    "[Ljava.lang.String;": "string[]",
 }
+
+EXTRA_TYPE_TO_JAVA = {
+    "string": "java.lang.String",
+    "null": "java.lang.String",
+    "bool": "java.lang.Boolean",
+    "int": "java.lang.Integer",
+    "long": "java.lang.Long",
+    "float": "java.lang.Float",
+    "double": "java.lang.Double",
+    "uri": "android.net.Uri",
+    "component": "android.content.ComponentName",
+    "int[]": "[I",
+    "long[]": "[J",
+    "float[]": "[F",
+    "double[]": "[D",
+    "string[]": "[Ljava.lang.String;",
+    "int-list": "java.util.ArrayList",
+    "long-list": "java.util.ArrayList",
+    "float-list": "java.util.ArrayList",
+    "double-list": "java.util.ArrayList",
+    "string-list": "java.util.ArrayList",
+}
+
+_INTEGER_RANGES = {
+    "int": (-(2 ** 31), 2 ** 31 - 1),
+    "long": (-(2 ** 63), 2 ** 63 - 1),
+}
+_FLOAT_RE = re.compile(
+    r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?[fFdD]?$"
+)
 
 
 def java_type_display(java_type: str) -> str:
@@ -25,6 +124,111 @@ def java_type_display(java_type: str) -> str:
     if not java_type:
         return "-"
     return java_type.replace("$", ".").rsplit(".", 1)[-1]
+
+
+def normalize_extra_type(extra_type: str) -> str | None:
+    value = str(extra_type or "").lower()
+    value = value[2:] if value.startswith("--") else value
+    value = EXTRA_TYPE_ALIASES.get(value, value)
+    return value if value in VALID_EXTRA_TYPES else None
+
+
+def validate_extra_value(extra_type: str, value: str) -> str | None:
+    """Validate the textual form accepted by the agent for an adb-compatible extra."""
+    canonical = normalize_extra_type(extra_type)
+    if canonical is None:
+        return f"Unknown extra type: {extra_type}"
+    if canonical == "null":
+        return None
+    if canonical == "bool":
+        text = str(value).lower()
+        if text not in {"true", "t", "false", "f"}:
+            try:
+                _decode_android_int(text)
+            except ValueError:
+                return "Boolean value must be true, false, t, f, or an integer"
+        return None
+    if canonical == "component":
+        package, separator, class_name = str(value).partition("/")
+        if not separator or not package or not class_name:
+            return "Component must use package/class syntax"
+        return None
+    if canonical in {"uri", "string"}:
+        return None
+
+    element_type = canonical.removesuffix("[]").removesuffix("-list")
+    values = split_extra_values(str(value)) if canonical.endswith(("[]", "-list")) else [str(value)]
+    if element_type == "string":
+        return None
+    if not values or any(item == "" for item in values):
+        return f"{canonical} requires comma-separated values"
+    for item in values:
+        if element_type in _INTEGER_RANGES:
+            try:
+                number = _decode_android_int(item) if element_type == "int" else int(item, 10)
+            except ValueError:
+                return f"Invalid {element_type} value: {item}"
+            low, high = _INTEGER_RANGES[element_type]
+            if not low <= number <= high:
+                return f"{element_type.capitalize()} value out of range: {item}"
+        elif element_type in {"float", "double"}:
+            normalized = item.strip()
+            if normalized.lower() not in {"nan", "+nan", "-nan", "infinity", "+infinity", "-infinity"}:
+                if not _FLOAT_RE.fullmatch(normalized):
+                    return f"Invalid {element_type} value: {item}"
+                try:
+                    float(normalized.rstrip("fFdD"))
+                except ValueError:
+                    return f"Invalid {element_type} value: {item}"
+    return None
+
+
+def split_extra_values(value: str) -> list[str]:
+    r"""Split a comma list, interpreting ``\,`` as a literal comma."""
+    values = []
+    current = []
+    escaped = False
+    for char in value:
+        if escaped:
+            if char not in {",", "\\"}:
+                current.append("\\")
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == ",":
+            values.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    if escaped:
+        current.append("\\")
+    values.append("".join(current))
+    return values
+
+
+def _decode_android_int(value: str) -> int:
+    """Mirror Java Integer.decode, as used by adb for --ei/--eia/--eial."""
+    text = str(value).strip()
+    sign = 1
+    if text.startswith(("+", "-")):
+        if text[0] == "-":
+            sign = -1
+        text = text[1:]
+    if text.startswith(("0x", "0X")):
+        radix, digits = 16, text[2:]
+    elif text.startswith("#"):
+        radix, digits = 16, text[1:]
+    elif len(text) > 1 and text.startswith("0"):
+        radix, digits = 8, text[1:]
+    else:
+        radix, digits = 10, text
+    if not digits:
+        raise ValueError(value)
+    number = sign * int(digits, radix)
+    if not -(2 ** 31) <= number <= 2 ** 31 - 1:
+        raise ValueError(value)
+    return number
 
 
 def parse_intent_mod_command(parts: list[str]) -> IntentModParseResult:
@@ -87,8 +291,14 @@ def apply_mods_to_entry(entry: dict, mods: list[IntentMod]) -> None:
         elif mod_type == "extra_rem":
             info["extras"].pop(key, None)
         elif mod_type == "extra_add":
-            java_type = original_extras.get(key, {}).get("type") or extra_type
-            info["extras"][key] = {"type": java_type, "value": value}
+            canonical = normalize_extra_type(extra_type) or "string"
+            existing = original_extras.get(key, {})
+            java_type = existing.get("type") if existing.get("noxenType") == canonical else None
+            info["extras"][key] = {
+                "type": java_type or EXTRA_TYPE_TO_JAVA[canonical],
+                "value": None if canonical == "null" else value,
+                "noxenType": canonical,
+            }
 
 
 def parse_flag_value(value: str) -> int | None:
@@ -114,11 +324,21 @@ def _flag_mod(parts: list[str], mod_type: str, usage: str) -> IntentModParseResu
 
 def _extra_add_mod(parts: list[str]) -> IntentModParseResult:
     if len(parts) < 3:
-        return None, "[red]Usage: +x (type) <key> <value>[/red]"
+        return None, "[red]Usage: +x [type] <key> <value>[/red]"
 
-    possible_type = parts[1].lower()
-    if possible_type in VALID_EXTRA_TYPES and len(parts) >= 4:
-        return ("extra_add", parts[2], " ".join(parts[3:]), possible_type), None
+    possible_type = normalize_extra_type(parts[1])
+    if possible_type == "null":
+        if len(parts) != 3:
+            return None, "[red]Usage: +x null <key>[/red]"
+        return ("extra_add", parts[2], "", "null"), None
+    if possible_type is not None:
+        if len(parts) < 4:
+            return None, "[red]Usage: +x [type] <key> <value>[/red]"
+        value = " ".join(parts[3:])
+        error = validate_extra_value(possible_type, value)
+        if error:
+            return None, f"[red]{error}[/red]"
+        return ("extra_add", parts[2], value, possible_type), None
     return ("extra_add", parts[1], " ".join(parts[2:]), "string"), None
 
 

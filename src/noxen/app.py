@@ -63,12 +63,14 @@ from noxen.frida_devices import enumerate_preferred_devices
 from noxen.frida_session import FridaSession, SessionConfig
 from noxen.history_columns import normalize_history_column_widths
 from noxen.intent_mods import (
+    EXTRA_TYPE_OPTIONS,
+    EXTRA_VALUE_PLACEHOLDERS,
     JAVA_TYPE_TO_SIMPLE,
-    VALID_EXTRA_TYPES,
     apply_mods_to_entry,
     java_type_display,
     parse_flag_value,
     parse_intent_mod_command,
+    validate_extra_value,
 )
 from noxen.logging_ui import is_debug_log, log_debug, log_info, log_success, log_warning
 from noxen.modals import (
@@ -431,7 +433,7 @@ class NoxenApp(App):
         self._edit_removed_keys = set()
         for key, extra in (info.get("extras", {}) or {}).items():
             java_type = extra.get("type") or ""
-            simple_type = JAVA_TYPE_TO_SIMPLE.get(java_type)
+            simple_type = extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(java_type)
             self._add_edit_extra_row(key, simple_type, str(extra.get("value", "") or ""), is_new=False, java_type=java_type)
 
         flags_val = info.get("flags") or 0
@@ -481,18 +483,17 @@ class NoxenApp(App):
         self._edit_extra_rows[n] = {"key": key, "is_new": is_new, "type": simple_type or "string"}
 
         if is_new:
-            type_opts = [(t, t) for t in sorted(VALID_EXTRA_TYPES)]
             row = Horizontal(
                 Input(id=f"ef_xk_{n}", placeholder="key", classes="ef_x_key_input"),
-                Select(type_opts, id=f"ef_xt_{n}", value="string",
+                Select(EXTRA_TYPE_OPTIONS, id=f"ef_xt_{n}", value="string",
                        allow_blank=False, classes="ef_x_type_select"),
-                Input(id=f"ef_xv_{n}", placeholder="value"),
+                Input(id=f"ef_xv_{n}", placeholder=EXTRA_VALUE_PLACEHOLDERS["string"]),
                 Button("✕", id=f"ef_xrm_{n}", classes="ef_x_rm"),
                 id=f"ef_x_{n}", classes="ef_x_row",
             )
         else:
-            editable = simple_type is not None
-            type_label = java_type_display(java_type)
+            editable = simple_type is not None and simple_type != "null"
+            type_label = simple_type or java_type_display(java_type)
             row = Horizontal(
                 Label(key, classes="ef_x_key_label"),
                 Label(type_label, classes="ef_x_type_label"),
@@ -544,8 +545,13 @@ class NoxenApp(App):
                 new_val = self.query_one(f"#ef_xv_{n}", Input).value
                 orig_val = str(orig_extras.get(row_info["key"], {}).get("value", "") or "")
                 if new_val != orig_val:
+                    error = validate_extra_value(row_info["type"], new_val)
+                    if error:
+                        raise ValueError(f"{row_info['key']}: {error}")
                     mods.append(("extra_rem", row_info["key"], "", ""))
                     mods.append(("extra_add", row_info["key"], new_val, row_info["type"]))
+            except ValueError:
+                raise
             except Exception:
                 pass
 
@@ -557,7 +563,12 @@ class NoxenApp(App):
                 type_val = str(self.query_one(f"#ef_xt_{n}", Select).value)
                 val = self.query_one(f"#ef_xv_{n}", Input).value
                 if key:
+                    error = validate_extra_value(type_val, val)
+                    if error:
+                        raise ValueError(f"{key}: {error}")
                     mods.append(("extra_add", key, val, type_val))
+            except ValueError:
+                raise
             except Exception:
                 pass
 
@@ -579,7 +590,11 @@ class NoxenApp(App):
         """Main-thread helper: collect mods, exit edit mode, then forward."""
         if not self._edit_mode:
             return
-        mods = self._collect_edit_mods()
+        try:
+            mods = self._collect_edit_mods()
+        except ValueError as error:
+            self.notify(str(error), title="Invalid extra", severity="error")
+            return
         self._exit_edit_mode()
         self._apply_mods_and_forward_worker(mods)
 
@@ -1150,6 +1165,18 @@ class NoxenApp(App):
             self._refresh_info_permissions()
         elif event.select.id == "info_comp_type":
             self._refresh_info_components()
+        elif (event.select.id or "").startswith("ef_xt_"):
+            n = event.select.id.rsplit("_", 1)[-1]
+            try:
+                value_input = self.query_one(f"#ef_xv_{n}", Input)
+                extra_type = str(event.value)
+                is_null = extra_type == "null"
+                value_input.disabled = is_null
+                value_input.placeholder = EXTRA_VALUE_PLACEHOLDERS.get(extra_type, "value")
+                if is_null:
+                    value_input.value = ""
+            except Exception:
+                pass
 
     def on_device_selected(self, device_id):
         if not device_id:

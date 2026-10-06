@@ -13465,6 +13465,194 @@ std_string_c_str (StdString * self)
     }
     return "";
   }
+  function normalizeExtraType(extraType) {
+    var value = String(extraType || "string").toLowerCase();
+    if (value.indexOf("--") === 0) value = value.slice(2);
+    var aliases = {
+      "boolean": "bool",
+      "integer": "int",
+      "integer[]": "int[]",
+      "integer-list": "int-list",
+      "null-string": "null",
+      "string-null": "null",
+      "component-name": "component",
+      "es": "string",
+      "esn": "null",
+      "ez": "bool",
+      "ei": "int",
+      "el": "long",
+      "ef": "float",
+      "ed": "double",
+      "eu": "uri",
+      "ecn": "component",
+      "eia": "int[]",
+      "ela": "long[]",
+      "efa": "float[]",
+      "eda": "double[]",
+      "esa": "string[]",
+      "eial": "int-list",
+      "elal": "long-list",
+      "efal": "float-list",
+      "edal": "double-list",
+      "esal": "string-list"
+    };
+    return aliases[value] || value;
+  }
+  function splitExtraValues(value) {
+    var result = [];
+    var current = "";
+    var escaped = false;
+    var text = String(value);
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (escaped) {
+        if (ch !== "," && ch !== "\\") current += "\\";
+        current += ch;
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === ",") {
+        result.push(current);
+        current = "";
+      } else {
+        current += ch;
+      }
+    }
+    if (escaped) current += "\\";
+    result.push(current);
+    return result;
+  }
+  function escapeExtraString(value) {
+    return String(value).replace(/\\/g, "\\\\").replace(/,/g, "\\,");
+  }
+  function parseAndroidInt(value) {
+    var text = String(value).trim();
+    var sign = 1;
+    if (text[0] === "+" || text[0] === "-") {
+      if (text[0] === "-") sign = -1;
+      text = text.slice(1);
+    }
+    var radix = 10;
+    if (text.indexOf("0x") === 0 || text.indexOf("0X") === 0) {
+      radix = 16;
+      text = text.slice(2);
+    } else if (text[0] === "#") {
+      radix = 16;
+      text = text.slice(1);
+    } else if (text.length > 1 && text[0] === "0") {
+      radix = 8;
+      text = text.slice(1);
+    }
+    var valid = radix === 16 ? /^[0-9a-fA-F]+$/ : radix === 8 ? /^[0-7]+$/ : /^\d+$/;
+    if (!valid.test(text)) throw new Error("Invalid int value: " + value);
+    var number = sign * parseInt(text, radix);
+    if (number < -2147483648 || number > 2147483647) {
+      throw new Error("Int value out of range: " + value);
+    }
+    return number;
+  }
+  function parseBooleanExtra(value) {
+    var text = String(value).toLowerCase();
+    if (text === "true" || text === "t") return true;
+    if (text === "false" || text === "f") return false;
+    return parseAndroidInt(text) !== 0;
+  }
+  function extraListValue(value, canonicalType) {
+    var items = splitExtraValues(value);
+    var elementType = canonicalType.replace(/\[\]$/, "").replace(/-list$/, "");
+    var IntegerJava = Java.use("java.lang.Integer");
+    var LongJava = Java.use("java.lang.Long");
+    var FloatJava = Java.use("java.lang.Float");
+    var DoubleJava = Java.use("java.lang.Double");
+    var StringJava = Java.use("java.lang.String");
+    return items.map(function(item) {
+      if (elementType === "int") return IntegerJava.valueOf(parseAndroidInt(item));
+      if (elementType === "long") return LongJava.valueOf(String(item));
+      if (elementType === "float") return FloatJava.valueOf(String(item));
+      if (elementType === "double") return DoubleJava.valueOf(String(item));
+      return StringJava.$new(String(item));
+    });
+  }
+  function extraArrayValue(value, canonicalType) {
+    var items = splitExtraValues(value);
+    var elementType = canonicalType.replace(/\[\]$/, "");
+    var LongJava = Java.use("java.lang.Long");
+    var FloatJava = Java.use("java.lang.Float");
+    var DoubleJava = Java.use("java.lang.Double");
+    return items.map(function(item) {
+      if (elementType === "int") return parseAndroidInt(item);
+      if (elementType === "long") return int64(String(item));
+      if (elementType === "float") return FloatJava.valueOf(String(item)).floatValue();
+      if (elementType === "double") return DoubleJava.valueOf(String(item)).doubleValue();
+      return String(item);
+    });
+  }
+  function serializeRecognizedExtra(value, typeName) {
+    var canonical = null;
+    var values = null;
+    var scalarTypes = {
+      "java.lang.String": "string",
+      "java.lang.Boolean": "bool",
+      "java.lang.Integer": "int",
+      "java.lang.Long": "long",
+      "java.lang.Float": "float",
+      "java.lang.Double": "double",
+      "android.content.ComponentName": "component"
+    };
+    if (scalarTypes[typeName] || typeName.indexOf("android.net.Uri$") === 0) {
+      canonical = scalarTypes[typeName] || "uri";
+      if (canonical === "component") {
+        var componentValue = Java.cast(value, Java.use("android.content.ComponentName"));
+        return { noxenType: canonical, value: String(componentValue.flattenToString()) };
+      }
+      return { noxenType: canonical, value: String(value) };
+    }
+    var arrayTypes = {
+      "[I": "int[]",
+      "[J": "long[]",
+      "[F": "float[]",
+      "[D": "double[]",
+      "[Ljava.lang.String;": "string[]"
+    };
+    if (arrayTypes[typeName]) {
+      canonical = arrayTypes[typeName];
+      values = [];
+      var ReflectArray = Java.use("java.lang.reflect.Array");
+      var arrayLength = ReflectArray.getLength(value);
+      for (var i = 0; i < arrayLength; i++) {
+        var arrayItem = ReflectArray.get(value, i);
+        values.push(canonical === "string[]" ? escapeExtraString(arrayItem) : String(arrayItem));
+      }
+    } else if (typeName === "java.util.ArrayList") {
+      var elementClass = null;
+      values = [];
+      var listValue = Java.cast(value, Java.use("java.util.ArrayList"));
+      for (var j = 0; j < listValue.size(); j++) {
+        var item = listValue.get(j);
+        if (item !== null && elementClass === null) {
+          if (item.$className) {
+            elementClass = String(item.$className);
+          } else if (typeof item.getClass === "function") {
+            elementClass = String(item.getClass().getName());
+          }
+        }
+        values.push(item === null ? "null" : String(item));
+      }
+      var listTypes = {
+        "java.lang.Integer": "int-list",
+        "java.lang.Long": "long-list",
+        "java.lang.Float": "float-list",
+        "java.lang.Double": "double-list",
+        "java.lang.String": "string-list"
+      };
+      canonical = listTypes[elementClass] || null;
+      if (canonical === "string-list") {
+        values = values.map(escapeExtraString);
+      }
+    }
+    if (!canonical) return null;
+    return { noxenType: canonical, value: values.join(",") };
+  }
   function beginHold(className, methodName) {
     holdCounter += 1;
     var holdId = "noxen-" + Process.id + "-" + holdCounter;
@@ -13513,8 +13701,19 @@ std_string_c_str (StdString * self)
         while (iterator.hasNext()) {
           var key = iterator.next();
           var value = extras.get(key);
-          var type = value ? value.getClass().getName() : null;
-          extrasObj[key] = { type, value: value ? value.toString() : null };
+          var type = value ? String(value.getClass().getName()) : null;
+          try {
+            var recognized = value ? serializeRecognizedExtra(value, type) : null;
+            extrasObj[key] = {
+              type,
+              value: recognized ? recognized.value : value ? value.toString() : null
+            };
+            if (recognized) extrasObj[key].noxenType = recognized.noxenType;
+            else if (value === null) extrasObj[key].noxenType = "null";
+          } catch (extraError) {
+            extrasObj[key] = { type, value: value ? String(value) : null };
+            send("[!] Extra serialization failed for " + key + " (" + type + "): " + extraError);
+          }
         }
       }
       infoIntent.extras = extrasObj;
@@ -13546,18 +13745,48 @@ std_string_c_str (StdString * self)
         } else if (mod.type === "extra_add") {
           var key = mod.key;
           var val = mod.val;
-          var eType = mod.extraType || "string";
+          var eType = normalizeExtraType(mod.extraType);
           if (eType === "int") {
-            intent.putExtra.overload("java.lang.String", "int").call(intent, key, parseInt(val));
+            intent.putExtra.overload("java.lang.String", "int").call(intent, key, parseAndroidInt(val));
           } else if (eType === "bool" || eType === "boolean") {
-            var bVal = String(val).toLowerCase() === "true";
-            intent.putExtra.overload("java.lang.String", "boolean").call(intent, key, bVal);
+            intent.putExtra.overload("java.lang.String", "boolean").call(intent, key, parseBooleanExtra(val));
           } else if (eType === "long") {
             intent.putExtra.overload("java.lang.String", "long").call(intent, key, int64(val));
           } else if (eType === "float") {
-            intent.putExtra.overload("java.lang.String", "float").call(intent, key, parseFloat(val));
+            var scalarFloat = Java.use("java.lang.Float").valueOf(String(val)).floatValue();
+            intent.putExtra.overload("java.lang.String", "float").call(intent, key, scalarFloat);
           } else if (eType === "double") {
-            intent.putExtra.overload("java.lang.String", "double").call(intent, key, parseFloat(val));
+            var scalarDouble = Java.use("java.lang.Double").valueOf(String(val)).doubleValue();
+            intent.putExtra.overload("java.lang.String", "double").call(intent, key, scalarDouble);
+          } else if (eType === "null") {
+            intent.putExtra.overload("java.lang.String", "java.lang.String").call(intent, key, null);
+          } else if (eType === "uri") {
+            intent.putExtra.overload("java.lang.String", "android.os.Parcelable").call(intent, key, UriJava.parse(String(val)));
+          } else if (eType === "component") {
+            var ComponentNameJava = Java.use("android.content.ComponentName");
+            var component = ComponentNameJava.unflattenFromString(String(val));
+            if (component === null) throw new Error("Bad component name: " + val);
+            intent.putExtra.overload("java.lang.String", "android.os.Parcelable").call(intent, key, component);
+          } else if (/\[\]$/.test(eType)) {
+            var arrayItems = extraArrayValue(val, eType);
+            var primitiveType = eType.slice(0, -2);
+            var javaArrayType = primitiveType === "string" ? "java.lang.String" : primitiveType;
+            var arrayValue = Java.array(javaArrayType, arrayItems);
+            var arrayOverloads = {
+              "int[]": "[I",
+              "long[]": "[J",
+              "float[]": "[F",
+              "double[]": "[D",
+              "string[]": "[Ljava.lang.String;"
+            };
+            intent.putExtra.overload("java.lang.String", arrayOverloads[eType]).call(intent, key, arrayValue);
+          } else if (/-list$/.test(eType)) {
+            var ArrayListJava = Java.use("java.util.ArrayList");
+            var list = ArrayListJava.$new();
+            extraListValue(val, eType).forEach(function(item) {
+              list.add(item);
+            });
+            intent.putExtra.overload("java.lang.String", "java.io.Serializable").call(intent, key, list);
           } else {
             intent.putExtra.overload("java.lang.String", "java.lang.String").call(intent, key, String(val));
           }

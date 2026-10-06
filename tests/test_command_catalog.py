@@ -1,6 +1,7 @@
 import unittest
 
 from noxen.commands import (
+    HELP_MENU,
     HISTORY_COMPLETIONS,
     INTENT_COMMAND_BASES,
     INTERCEPT_COMPLETIONS,
@@ -35,11 +36,20 @@ class CommandCatalogTests(unittest.TestCase):
 
         self.assertIn("forward", bare_commands)
         self.assertIn("drop", bare_commands)
-        self.assertIn("+x (type) <k> <v>", bare_commands)
+        self.assertIn("+x [type] <key> <value>", bare_commands)
         self.assertNotIn("stack on", bare_commands)
         self.assertNotIn("filters", bare_commands)
         self.assertNotIn("ignore <rule>", bare_commands)
         self.assertNotIn("off", bare_commands)
+
+    def test_help_lists_every_extra_type_with_an_individual_example(self):
+        examples = HELP_MENU["Extra Types"]
+
+        self.assertEqual(len(examples), 19)
+        self.assertTrue(all(command.startswith("  ") for command, _example in examples))
+        self.assertTrue(all(example.startswith("+x ") for _command, example in examples))
+        completion_commands = {template for template, _description in INTERCEPT_COMPLETIONS}
+        self.assertTrue(all(command.strip() not in completion_commands for command, _example in examples))
 
     def test_global_commands_use_slash_namespace(self):
         commands = [template for template, _desc in INTERCEPT_COMPLETIONS]

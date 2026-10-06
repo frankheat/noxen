@@ -342,11 +342,11 @@ class HelpModal(ModalScreen):
     CSS = """
     HelpModal { align: center middle; }
     #help_dialog {
-        width: 90%;
-        max-width: 90;
+        width: 92%;
+        max-width: 110;
         min-width: 40;
         height: auto;
-        max-height: 65%;
+        max-height: 85%;
         background: $surface;
         border: solid $foreground-muted;
         padding: 0 2 1 2;
@@ -376,6 +376,29 @@ class HelpModal(ModalScreen):
         text-style: bold;
         margin-bottom: 1;
     }
+    .help_section {
+        width: 100%;
+        height: 2;
+        padding-top: 1;
+        text-style: bold;
+        color: $foreground;
+    }
+    .help_row {
+        width: 100%;
+        height: auto;
+        min-height: 1;
+    }
+    .help_command {
+        width: 30;
+        height: auto;
+        padding-left: 4;
+        color: $foreground;
+    }
+    .help_description {
+        width: 1fr;
+        height: auto;
+        color: $foreground;
+    }
     """
 
     def __init__(self, menu):
@@ -388,9 +411,11 @@ class HelpModal(ModalScreen):
                 yield Button("✕", id="help_close")
             yield Label("Help", id="help_title")
             for category, cmds in self._menu.items():
-                yield Label(f"\n{category.upper()}", classes="hfm_section")
+                yield Label(category.upper(), classes="help_section", markup=False)
                 for command, desc in cmds:
-                    yield Label(f"    {command:<28} {desc}")
+                    with Horizontal(classes="help_row"):
+                        yield Label(command.strip(), classes="help_command", markup=False)
+                        yield Label(desc, classes="help_description", markup=False)
             yield Label("")
 
     def on_button_pressed(self, event: Button.Pressed):
