@@ -489,13 +489,113 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("  [dim]Action        :[/dim] a.B", rendered)
         self.assertIn("[dim]└─ Exported            :[/dim] true", rendered)
         self.assertIn("com.example/.R [dim](resolved)[/dim]", rendered)
-        self.assertIn("[dim]String[/dim]", rendered)
+        self.assertIn("k [String] : \"v\"", plain(rendered))
         self.assertIn('"v"', rendered)
         dim_text = "".join(
             plain(rendered)[span.start:span.end]
             for span in Text.from_markup(rendered).spans if "dim" in str(span.style)
         )
         self.assertNotIn("a.B", dim_text)  # values keep full brightness
+
+    def test_structured_extras_render_as_bounded_static_tree(self):
+        entry = {
+            "id": 11,
+            "timestamp": "2026-10-07T08:00:00+00:00",
+            "class": "com.example.MainActivity",
+            "method": "startActivity",
+            "intent": {
+                "extras": {
+                    "user_id": {
+                        "type": "java.lang.Integer", "value": "42", "noxenType": "int",
+                        "structured": {
+                            "kind": "scalar", "type": "java.lang.Integer",
+                            "displayType": "int", "noxenType": "int", "value": "42",
+                        },
+                    },
+                    "options": {
+                        "type": "android.os.Bundle", "value": "Bundle (2 items)",
+                        "structured": {
+                            "kind": "bundle", "type": "android.os.Bundle", "displayType": "Bundle",
+                            "count": 2, "items": [
+                                {"key": "retry", "value": {
+                                    "kind": "scalar", "type": "java.lang.Boolean",
+                                    "displayType": "boolean", "noxenType": "bool", "value": "true",
+                                }},
+                                {"key": "next", "value": {
+                                    "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
+                                    "action": "com.example.OPEN", "component": "com.example/.DetailActivity",
+                                    "data": None, "flags": 1, "categories": [],
+                                    "extras": {
+                                        "kind": "bundle", "type": "android.os.Bundle", "displayType": "Bundle",
+                                        "count": 1, "items": [{"key": "account", "value": {
+                                            "kind": "opaque", "type": "com.example.Account",
+                                            "displayType": "com.example.Account",
+                                        }}],
+                                    },
+                                }},
+                            ],
+                        },
+                    },
+                },
+                "extrasMeta": {"count": 4, "capturedCount": 2, "omitted": 2},
+            },
+            "stackTrace": [],
+        }
+
+        rendered = render_intent_detail(entry)
+        visible = plain(rendered)
+
+        Text.from_markup(rendered)
+        self.assertIn("[EXTRAS] (4)", visible)
+        self.assertIn("├─ user_id [int] : 42", visible)
+        self.assertIn("└─ next [Intent]", visible)
+        self.assertIn("Action        : com.example.OPEN", visible)
+        self.assertIn("account [com.example.Account]", visible)
+        self.assertIn("opaque object", visible)
+        self.assertIn("2 additional extras omitted", visible)
+
+    def test_structured_extras_render_references_errors_and_truncation(self):
+        entry = {
+            "id": 12, "timestamp": "2026-10-07T08:00:00+00:00",
+            "class": "com.example.MainActivity", "method": "getIntent", "stackTrace": [],
+            "intent": {
+                "extras": {
+                    "cycle": {"type": "android.os.Bundle", "value": "reference to #1", "structured": {
+                        "kind": "reference", "type": "android.os.Bundle", "referenceId": 1,
+                    }},
+                    "deep": {"type": "android.os.Bundle", "value": "truncated", "structured": {
+                        "kind": "truncated", "type": "android.os.Bundle", "reason": "maximum depth reached",
+                    }},
+                    "broken": {"type": None, "value": "unreadable", "structured": {
+                        "kind": "error", "type": None, "reason": "value could not be read",
+                    }},
+                },
+            },
+        }
+
+        visible = plain(render_intent_detail(entry))
+
+        self.assertIn("cycle [Bundle] : reference to #1", visible)
+        self.assertIn("deep [Bundle] : maximum depth reached", visible)
+        self.assertIn("broken [?] : value could not be read", visible)
+
+    def test_structured_extra_control_characters_do_not_break_tree_rows(self):
+        entry = {
+            "id": 13, "timestamp": "2026-10-07T08:00:00+00:00",
+            "class": "com.example.MainActivity", "method": "getIntent", "stackTrace": [],
+            "intent": {"extras": {"text": {
+                "type": "java.lang.String", "value": "first\nsecond",
+                "structured": {
+                    "kind": "scalar", "type": "java.lang.String", "displayType": "String",
+                    "noxenType": "string", "value": "first\nsecond",
+                },
+            }}},
+        }
+
+        visible = plain(render_intent_detail(entry))
+
+        self.assertIn('text [String] : "first\\nsecond"', visible)
+        self.assertNotIn("first\nsecond", visible)
 
 
 if __name__ == "__main__":

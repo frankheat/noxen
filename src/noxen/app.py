@@ -433,8 +433,17 @@ class NoxenApp(App):
         self._edit_removed_keys = set()
         for key, extra in (info.get("extras", {}) or {}).items():
             java_type = extra.get("type") or ""
-            simple_type = extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(java_type)
-            self._add_edit_extra_row(key, simple_type, str(extra.get("value", "") or ""), is_new=False, java_type=java_type)
+            simple_type = None if extra.get("editable") is False else (
+                extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(java_type)
+            )
+            self._add_edit_extra_row(
+                key,
+                simple_type,
+                str(extra.get("value", "") or ""),
+                is_new=False,
+                java_type=java_type,
+                removable=not extra.get("keyTruncated", False),
+            )
 
         flags_val = info.get("flags") or 0
         try:
@@ -477,7 +486,15 @@ class NoxenApp(App):
         )
         self.query_one("#ef_categories").mount(row)
 
-    def _add_edit_extra_row(self, key: str, simple_type, value: str, is_new: bool, java_type: str = ""):
+    def _add_edit_extra_row(
+        self,
+        key: str,
+        simple_type,
+        value: str,
+        is_new: bool,
+        java_type: str = "",
+        removable: bool = True,
+    ):
         self._edit_extra_counter += 1
         n = self._edit_extra_counter
         self._edit_extra_rows[n] = {"key": key, "is_new": is_new, "type": simple_type or "string"}
@@ -498,7 +515,7 @@ class NoxenApp(App):
                 Label(key, classes="ef_x_key_label"),
                 Label(type_label, classes="ef_x_type_label"),
                 Input(id=f"ef_xv_{n}", value=value, disabled=not editable),
-                Button("✕", id=f"ef_xrm_{n}", classes="ef_x_rm"),
+                Button("✕", id=f"ef_xrm_{n}", classes="ef_x_rm", disabled=not removable),
                 id=f"ef_x_{n}", classes="ef_x_row",
             )
 

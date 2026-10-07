@@ -347,24 +347,225 @@ def _payload_lines(info: dict, attack_surface: dict) -> list[str]:
     return lines
 
 
-def _extras_lines(extras: dict) -> list[str]:
-    if not extras:
+_EXTRA_RENDER_MAX_DEPTH = 12
+_EXTRA_RENDER_MAX_LINES = 400
+_EXTRA_RENDER_MAX_TEXT = 2048
+
+_ARRAY_DISPLAY_TYPES = {
+    "[Z": "boolean[]",
+    "[B": "byte[]",
+    "[C": "char[]",
+    "[S": "short[]",
+    "[I": "int[]",
+    "[J": "long[]",
+    "[F": "float[]",
+    "[D": "double[]",
+    "[Ljava.lang.String;": "String[]",
+}
+
+
+def _extra_display_text(value) -> str:
+    """Single-line, bounded text so an extra cannot break or flood the layout."""
+    if value is None:
+        return "None"
+    text = str(value).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    if len(text) > _EXTRA_RENDER_MAX_TEXT:
+        text = text[:_EXTRA_RENDER_MAX_TEXT] + "…"
+    return _markup(text)
+
+
+def _extra_type_name(node: dict) -> str:
+    display = node.get("displayType") or node.get("noxenType")
+    if display:
+        return str(display)
+    java_type = node.get("type")
+    return _ARRAY_DISPLAY_TYPES.get(str(java_type), _simple_type(java_type))
+
+
+def _extra_type_markup(type_name: str) -> str:
+    return f"[dim]\\[{_markup(type_name)}][/dim]"
+
+
+def _extra_tree_prefix(prefix: str, is_last: bool) -> str:
+    return f"[dim]{_markup(prefix + ('└─ ' if is_last else '├─ '))}[/dim]"
+
+
+def _legacy_extra_node(extra: dict) -> dict:
+    """Adapt captures made before structured extras to the tree renderer."""
+    return {
+        "kind": "null" if extra.get("value") is None else "scalar",
+        "type": extra.get("type"),
+        "displayType": extra.get("noxenType") or _simple_type(extra.get("type")),
+        "noxenType": extra.get("noxenType"),
+        "value": extra.get("value"),
+    }
+
+
+def _intent_extra_children(node: dict) -> list[tuple[str | None, dict]]:
+    children: list[tuple[str | None, dict]] = [
+        ("Action", {"kind": "field", "value": node.get("action") or "None"}),
+        ("Data (URI)", {"kind": "field", "value": node.get("data") or "None"}),
+        ("Component", {"kind": "field", "value": node.get("component") or "None"}),
+    ]
+    if node.get("package"):
+        children.append(("Package", {"kind": "field", "value": node.get("package")}))
+    children.append(("Flags", {"kind": "field", "markup": _format_intent_flags(node.get("flags") or 0)}))
+    for category in node.get("categories") or []:
+        children.append(("Category", {"kind": "field", "value": category}))
+    if node.get("categoriesTruncated"):
+        children.append((None, {"kind": "status", "value": "additional categories omitted"}))
+    extras = node.get("extras")
+    if isinstance(extras, dict):
+        children.append(("Extras", extras))
+    for error in node.get("errors") or []:
+        children.append((None, {"kind": "status", "value": error}))
+    return children
+
+
+def _extra_node_children(node: dict) -> list[tuple[str | None, dict]]:
+    kind = node.get("kind")
+    children: list[tuple[str | None, dict]] = []
+    if kind == "bundle":
+        for item in node.get("items") or []:
+            if isinstance(item, dict) and isinstance(item.get("value"), dict):
+                label = str(item.get("key") if item.get("key") is not None else "null")
+                if item.get("keyTruncated"):
+                    label += "…"
+                children.append((label, item["value"]))
+    elif kind in {"array", "list"}:
+        for index, item in enumerate(node.get("items") or []):
+            if isinstance(item, dict):
+                children.append((f"[{index}]", item))
+    elif kind == "intent":
+        children.extend(_intent_extra_children(node))
+    elif kind == "opaque":
+        children.append((None, {"kind": "status", "value": "opaque object"}))
+
+    omitted = node.get("omitted")
+    if isinstance(omitted, int) and omitted > 0:
+        children.append((None, {"kind": "status", "value": f"{omitted} additional items omitted"}))
+    if node.get("error"):
+        children.append((None, {"kind": "status", "value": node.get("error")}))
+    return children
+
+
+def _extra_node_header(label: str | None, node: dict) -> str:
+    kind = node.get("kind")
+    label_text = f"[bold]{_markup(label)}[/bold]" if label is not None else ""
+    if kind == "status":
+        return f"[dim]{_extra_display_text(node.get('value'))}[/dim]"
+    if kind == "field":
+        value = node.get("markup") if node.get("markup") is not None else _extra_display_text(node.get("value"))
+        return f"[dim]{_markup(label or ''):<13} :[/dim] {value}"
+
+    type_name = _extra_type_name(node)
+    typed_label = f"{label_text} {_extra_type_markup(type_name)}".strip()
+    if kind == "null":
+        return f"{typed_label} : null"
+    if kind == "scalar":
+        raw = node.get("value")
+        shown = _extra_display_text(raw)
+        if str(node.get("noxenType") or type_name).lower() in {"string", "char"} and raw is not None:
+            shown = f'"{shown}"'
+        suffix = " [dim](truncated)[/dim]" if node.get("truncated") else ""
+        return f"{typed_label} : {shown}{suffix}"
+    if kind in {"bundle", "array", "list"}:
+        count = node.get("count")
+        if count is not None:
+            noun = "item" if count == 1 else "items"
+            return f"{typed_label} [dim]({_markup(count)} {noun})[/dim]"
+        return typed_label
+    if kind == "intent":
+        return typed_label
+    if kind == "reference":
+        return f"{typed_label} : [dim]reference to #{_markup(node.get('referenceId'))}[/dim]"
+    if kind == "opaque":
+        # Preserve the complete class name: it is the only useful fact about an opaque value.
+        opaque_type = node.get("type") or type_name
+        return f"{label_text} {_extra_type_markup(str(opaque_type))}".strip()
+    if kind == "truncated":
+        return f"{typed_label} : [dim]{_extra_display_text(node.get('reason') or 'truncated')}[/dim]"
+    if kind == "error":
+        return f"{typed_label} : [dim]{_extra_display_text(node.get('reason') or 'unreadable value')}[/dim]"
+    return f"{typed_label} : [dim]unsupported structured value[/dim]"
+
+
+def _render_extra_node(
+    lines: list[str],
+    label: str | None,
+    node: dict,
+    prefix: str,
+    is_last: bool,
+    context: dict,
+    depth: int,
+) -> None:
+    if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
+        return
+    if depth > _EXTRA_RENDER_MAX_DEPTH:
+        lines.append(_extra_tree_prefix(prefix, is_last) + "[dim]rendering depth limit reached[/dim]")
+        context["lines"] += 1
+        return
+    if not isinstance(node, dict):
+        node = {"kind": "error", "reason": "invalid structured value"}
+
+    node_id = id(node)
+    if node_id in context["active"]:
+        lines.append(_extra_tree_prefix(prefix, is_last) + "[dim]invalid recursive model[/dim]")
+        context["lines"] += 1
+        return
+
+    lines.append(_extra_tree_prefix(prefix, is_last) + _extra_node_header(label, node))
+    context["lines"] += 1
+    if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
+        return
+
+    context["active"].add(node_id)
+    try:
+        children = _extra_node_children(node)
+        child_prefix = prefix + ("   " if is_last else "│  ")
+        for index, (child_label, child_node) in enumerate(children):
+            _render_extra_node(
+                lines,
+                child_label,
+                child_node,
+                child_prefix,
+                index == len(children) - 1,
+                context,
+                depth + 1,
+            )
+            if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
+                break
+    finally:
+        context["active"].discard(node_id)
+
+
+def _extras_lines(extras: dict, metadata: dict | None = None) -> list[str]:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if not extras and not metadata.get("error") and not metadata.get("omitted"):
         return []
-    rows = []
-    for key, value in extras.items():
-        value = value or {}
-        simple = value.get("noxenType") or _simple_type(value.get("type"))
-        raw = value.get("value")
-        shown = f'"{_markup(raw)}"' if simple in {"String", "string"} and raw is not None else _markup(raw)
-        rows.append((_markup(key), simple, shown))
-    key_w = max([len("KEY")] + [len(k) for k, _, _ in rows])
-    type_w = max([len("TYPE")] + [len(t) for _, t, _ in rows])
-    value_w = min(max([len("VALUE")] + [len(v) for _, _, v in rows]), 50)
-    lines = [f"{_section('EXTRAS')} ({len(extras)})"]
-    lines.append(f"  [dim]{'KEY':<{key_w}}   {'TYPE':<{type_w}}   VALUE[/dim]")
-    lines.append("  [dim]" + "-" * (key_w + type_w + value_w + 6) + "[/dim]")
-    for key, simple, shown in rows:
-        lines.append(f"  {key:<{key_w}}   [dim]{simple:<{type_w}}[/dim]   {shown}")
+
+    count = metadata.get("count")
+    if not isinstance(count, int):
+        count = len(extras)
+    lines = [f"{_section('EXTRAS')} ({count})"]
+    roots: list[tuple[str | None, dict]] = []
+    for key, extra in extras.items():
+        extra = extra if isinstance(extra, dict) else {}
+        structured = extra.get("structured")
+        node = structured if isinstance(structured, dict) else _legacy_extra_node(extra)
+        roots.append((str(key), node))
+    omitted = metadata.get("omitted")
+    if isinstance(omitted, int) and omitted > 0:
+        roots.append((None, {"kind": "status", "value": f"{omitted} additional extras omitted"}))
+    if metadata.get("error"):
+        roots.append((None, {"kind": "status", "value": metadata.get("error")}))
+
+    context = {"lines": 0, "active": set()}
+    for index, (label, node) in enumerate(roots):
+        _render_extra_node(lines, label, node, "  ", index == len(roots) - 1, context, 0)
+        if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
+            lines.append("  [dim]… extra rendering limit reached[/dim]")
+            break
     return lines
 
 
@@ -389,7 +590,7 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     pending = _format_pending_flags(pending_flags_raw)
     if pending is not None:
         out += ["", _section("PENDING INTENT"), _row("Flags", pending)]
-    extras = _extras_lines(info.get("extras") or {})
+    extras = _extras_lines(info.get("extras") or {}, info.get("extrasMeta"))
     if extras:
         out.append("")
         out += extras

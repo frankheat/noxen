@@ -52,6 +52,40 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    async def test_opaque_and_truncated_key_extras_are_safely_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                app = NoxenApp(project_args(os.path.join(tmp, "opaque.noxen")))
+                async with app.run_test(size=(120, 36)) as pilot:
+                    app.query_one("#main_tabs").active = "tab_intercept"
+                    app._current_intercepted_entry = {
+                        "intent": {
+                            "categories": [], "flags": 0,
+                            "extras": {"account": {
+                                "type": "com.example.Account", "value": "(opaque object)",
+                                "editable": False,
+                            }, "long-key…": {
+                                "type": "java.lang.String", "value": "value",
+                                "editable": False, "keyTruncated": True,
+                            }},
+                        }
+                    }
+
+                    app._enter_edit_mode()
+                    await pilot.pause()
+
+                    rows_by_key = {row["key"]: number for number, row in app._edit_extra_rows.items()}
+                    opaque_row = rows_by_key["account"]
+                    truncated_row = rows_by_key["long-key…"]
+                    self.assertTrue(app.query_one(f"#ef_xv_{opaque_row}", Input).disabled)
+                    self.assertFalse(app.query_one(f"#ef_xrm_{opaque_row}").disabled)
+                    self.assertTrue(app.query_one(f"#ef_xv_{truncated_row}", Input).disabled)
+                    self.assertTrue(app.query_one(f"#ef_xrm_{truncated_row}").disabled)
+            finally:
+                os.chdir(previous_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

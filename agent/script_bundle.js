@@ -13587,71 +13587,396 @@ std_string_c_str (StdString * self)
       return String(item);
     });
   }
-  function serializeRecognizedExtra(value, typeName) {
-    var canonical = null;
-    var values = null;
-    var scalarTypes = {
-      "java.lang.String": "string",
-      "java.lang.Boolean": "bool",
-      "java.lang.Integer": "int",
-      "java.lang.Long": "long",
-      "java.lang.Float": "float",
-      "java.lang.Double": "double",
-      "android.content.ComponentName": "component"
+  var EXTRA_MAX_DEPTH = 8;
+  var EXTRA_MAX_CONTAINER_ITEMS = 50;
+  var EXTRA_MAX_TOTAL_NODES = 300;
+  var EXTRA_MAX_STRING_LENGTH = 2048;
+  var EXTRA_MAX_VALUE_ERRORS = 3;
+  function createExtraSerializationContext() {
+    return {
+      seen: Java.use("java.util.IdentityHashMap").$new(),
+      nextReferenceId: 1,
+      nodes: 0
     };
-    if (scalarTypes[typeName] || typeName.indexOf("android.net.Uri$") === 0) {
-      canonical = scalarTypes[typeName] || "uri";
-      if (canonical === "component") {
-        var componentValue = Java.cast(value, Java.use("android.content.ComponentName"));
-        return { noxenType: canonical, value: String(componentValue.flattenToString()) };
-      }
-      return { noxenType: canonical, value: String(value) };
+  }
+  function boundedExtraText(value) {
+    var text = String(value);
+    if (text.length <= EXTRA_MAX_STRING_LENGTH) {
+      return { value: text, truncated: false, originalLength: text.length };
     }
-    var arrayTypes = {
-      "[I": "int[]",
-      "[J": "long[]",
-      "[F": "float[]",
-      "[D": "double[]",
-      "[Ljava.lang.String;": "string[]"
+    return {
+      value: text.slice(0, EXTRA_MAX_STRING_LENGTH),
+      truncated: true,
+      originalLength: text.length
     };
-    if (arrayTypes[typeName]) {
-      canonical = arrayTypes[typeName];
-      values = [];
-      var ReflectArray = Java.use("java.lang.reflect.Array");
-      var arrayLength = ReflectArray.getLength(value);
-      for (var i = 0; i < arrayLength; i++) {
-        var arrayItem = ReflectArray.get(value, i);
-        values.push(canonical === "string[]" ? escapeExtraString(arrayItem) : String(arrayItem));
+  }
+  function extraTypeName(value) {
+    if (value === null || typeof value === "undefined") return null;
+    try {
+      return String(value.getClass().getName());
+    } catch (_) {
+      try {
+        return value.$className ? String(value.$className) : null;
+      } catch (_2) {
+        return null;
       }
-    } else if (typeName === "java.util.ArrayList") {
-      var elementClass = null;
-      values = [];
-      var listValue = Java.cast(value, Java.use("java.util.ArrayList"));
-      for (var j = 0; j < listValue.size(); j++) {
-        var item = listValue.get(j);
-        if (item !== null && elementClass === null) {
-          if (item.$className) {
-            elementClass = String(item.$className);
-          } else if (typeof item.getClass === "function") {
-            elementClass = String(item.getClass().getName());
-          }
+    }
+  }
+  function extraErrorKind(error) {
+    try {
+      if (error && error.$className) return String(error.$className);
+      if (error && typeof error.getClass === "function") return String(error.getClass().getName());
+      if (error && error.name) return String(error.name);
+    } catch (_) {
+    }
+    return "error";
+  }
+  function reserveExtraNode(context, typeName, depth) {
+    if (depth > EXTRA_MAX_DEPTH) {
+      return { kind: "truncated", type: typeName, reason: "maximum depth reached" };
+    }
+    if (context.nodes >= EXTRA_MAX_TOTAL_NODES) {
+      return { kind: "truncated", type: typeName, reason: "maximum node count reached" };
+    }
+    context.nodes += 1;
+    return null;
+  }
+  function registerExtraContainer(value, typeName, context) {
+    var existing = context.seen.get(value);
+    if (existing !== null) {
+      return {
+        reference: {
+          kind: "reference",
+          type: typeName,
+          referenceId: Number(typeof existing.intValue === "function" ? existing.intValue() : existing)
         }
-        values.push(item === null ? "null" : String(item));
-      }
-      var listTypes = {
-        "java.lang.Integer": "int-list",
-        "java.lang.Long": "long-list",
-        "java.lang.Float": "float-list",
-        "java.lang.Double": "double-list",
-        "java.lang.String": "string-list"
       };
-      canonical = listTypes[elementClass] || null;
-      if (canonical === "string-list") {
-        values = values.map(escapeExtraString);
+    }
+    var referenceId = context.nextReferenceId++;
+    context.seen.put(value, Java.use("java.lang.Integer").valueOf(referenceId));
+    return { referenceId };
+  }
+  function scalarExtraNode(value, typeName) {
+    var scalarTypes = {
+      "java.lang.String": ["String", "string"],
+      "java.lang.Boolean": ["boolean", "bool"],
+      "java.lang.Byte": ["byte", null],
+      "java.lang.Short": ["short", null],
+      "java.lang.Integer": ["int", "int"],
+      "java.lang.Long": ["long", "long"],
+      "java.lang.Float": ["float", "float"],
+      "java.lang.Double": ["double", "double"],
+      "java.lang.Character": ["char", null]
+    };
+    var scalar = scalarTypes[typeName];
+    if (scalar) {
+      var text = boundedExtraText(value);
+      var node = {
+        kind: "scalar",
+        type: typeName,
+        displayType: scalar[0],
+        value: text.value
+      };
+      if (scalar[1] && !text.truncated) node.noxenType = scalar[1];
+      if (text.truncated) {
+        node.truncated = true;
+        node.originalLength = text.originalLength;
+      }
+      return node;
+    }
+    if (typeName === "android.content.ComponentName") {
+      var component = Java.cast(value, Java.use("android.content.ComponentName"));
+      var componentText = boundedExtraText(component.flattenToString());
+      var componentNode = {
+        kind: "scalar",
+        type: typeName,
+        displayType: "Component",
+        value: componentText.value
+      };
+      if (!componentText.truncated) componentNode.noxenType = "component";
+      if (componentText.truncated) {
+        componentNode.truncated = true;
+        componentNode.originalLength = componentText.originalLength;
+      }
+      return componentNode;
+    }
+    if (typeName && (typeName === "android.net.Uri" || typeName.indexOf("android.net.Uri$") === 0)) {
+      var uriText = boundedExtraText(value);
+      var uriNode = { kind: "scalar", type: typeName, displayType: "URI", value: uriText.value };
+      if (!uriText.truncated) uriNode.noxenType = "uri";
+      if (uriText.truncated) {
+        uriNode.truncated = true;
+        uriNode.originalLength = uriText.originalLength;
+      }
+      return uriNode;
+    }
+    return null;
+  }
+  function serializeExtraArray(value, typeName, context, depth) {
+    var registered = registerExtraContainer(value, typeName, context);
+    if (registered.reference) return registered.reference;
+    var node = {
+      kind: "array",
+      type: typeName,
+      displayType: typeName,
+      referenceId: registered.referenceId,
+      count: 0,
+      items: []
+    };
+    try {
+      var ReflectArray = Java.use("java.lang.reflect.Array");
+      var length = Number(ReflectArray.getLength(value));
+      node.count = length;
+      var captured = Math.min(length, EXTRA_MAX_CONTAINER_ITEMS);
+      for (var i = 0; i < captured; i++) {
+        node.items.push(serializeExtraNode(ReflectArray.get(value, i), context, depth + 1));
+      }
+      if (length > captured) node.omitted = length - captured;
+    } catch (error) {
+      node.error = "array inspection failed (" + extraErrorKind(error) + ")";
+    }
+    return node;
+  }
+  function serializeExtraList(value, typeName, context, depth) {
+    var registered = registerExtraContainer(value, typeName, context);
+    if (registered.reference) return registered.reference;
+    var node = {
+      kind: "list",
+      type: typeName,
+      displayType: "ArrayList",
+      referenceId: registered.referenceId,
+      count: 0,
+      items: []
+    };
+    try {
+      var list = Java.cast(value, Java.use("java.util.ArrayList"));
+      var size = Number(list.size());
+      node.count = size;
+      var captured = Math.min(size, EXTRA_MAX_CONTAINER_ITEMS);
+      for (var i = 0; i < captured; i++) {
+        node.items.push(serializeExtraNode(list.get(i), context, depth + 1));
+      }
+      if (size > captured) node.omitted = size - captured;
+    } catch (error) {
+      node.error = "list inspection failed (" + extraErrorKind(error) + ")";
+    }
+    return node;
+  }
+  function serializeBundleNode(value, typeName, context, depth) {
+    var registered = registerExtraContainer(value, typeName, context);
+    if (registered.reference) return registered.reference;
+    var node = {
+      kind: "bundle",
+      type: typeName,
+      displayType: typeName === "android.os.PersistableBundle" ? "PersistableBundle" : "Bundle",
+      referenceId: registered.referenceId,
+      count: 0,
+      items: []
+    };
+    try {
+      var bundle = Java.cast(value, Java.use(typeName));
+      var size = Number(bundle.size());
+      node.count = size;
+      var iterator = bundle.keySet().iterator();
+      var captured = 0;
+      var errors2 = 0;
+      while (iterator.hasNext() && captured < EXTRA_MAX_CONTAINER_ITEMS) {
+        var javaKey = iterator.next();
+        var keyText = boundedExtraText(javaKey);
+        var child;
+        try {
+          child = serializeExtraNode(bundle.get(javaKey), context, depth + 1);
+        } catch (error) {
+          errors2 += 1;
+          child = {
+            kind: "error",
+            type: null,
+            reason: "value could not be read (" + extraErrorKind(error) + ")"
+          };
+        }
+        node.items.push({
+          key: keyText.value,
+          keyTruncated: keyText.truncated,
+          keyOriginalLength: keyText.truncated ? keyText.originalLength : void 0,
+          value: child
+        });
+        captured += 1;
+        if (errors2 >= EXTRA_MAX_VALUE_ERRORS) {
+          node.error = "inspection stopped after repeated value errors";
+          break;
+        }
+      }
+      if (size > captured) node.omitted = size - captured;
+    } catch (error) {
+      node.error = "bundle could not be read (" + extraErrorKind(error) + ")";
+    }
+    return node;
+  }
+  function readNestedIntent(value, node, field, reader) {
+    try {
+      node[field] = reader(value);
+    } catch (error) {
+      if (!node.errors) node.errors = [];
+      node.errors.push(field + " could not be read (" + extraErrorKind(error) + ")");
+    }
+  }
+  function serializeIntentNode(value, typeName, context, depth) {
+    var registered = registerExtraContainer(value, typeName, context);
+    if (registered.reference) return registered.reference;
+    var intentValue = Java.cast(value, Java.use("android.content.Intent"));
+    var node = {
+      kind: "intent",
+      type: typeName,
+      displayType: "Intent",
+      referenceId: registered.referenceId
+    };
+    readNestedIntent(intentValue, node, "component", function(intent) {
+      var component = intent.getComponent();
+      return component ? String(component.getPackageName()) + "/" + String(component.getClassName()) : null;
+    });
+    readNestedIntent(intentValue, node, "action", function(intent) {
+      var action = intent.getAction();
+      return action === null ? null : boundedExtraText(action).value;
+    });
+    readNestedIntent(intentValue, node, "data", function(intent) {
+      var data = intent.getDataString();
+      return data === null ? null : boundedExtraText(data).value;
+    });
+    readNestedIntent(intentValue, node, "package", function(intent) {
+      var packageName = intent.getPackage();
+      return packageName === null ? null : boundedExtraText(packageName).value;
+    });
+    readNestedIntent(intentValue, node, "flags", function(intent) {
+      return Number(intent.getFlags());
+    });
+    readNestedIntent(intentValue, node, "categories", function(intent) {
+      var categories = [];
+      var categorySet = intent.getCategories();
+      if (categorySet === null) return categories;
+      var iterator = categorySet.iterator();
+      while (iterator.hasNext() && categories.length < EXTRA_MAX_CONTAINER_ITEMS) {
+        categories.push(boundedExtraText(iterator.next()).value);
+      }
+      if (iterator.hasNext()) node.categoriesTruncated = true;
+      return categories;
+    });
+    readNestedIntent(intentValue, node, "extras", function(intent) {
+      var extras = intent.getExtras();
+      return extras === null ? null : serializeExtraNode(extras, context, depth + 1);
+    });
+    return node;
+  }
+  function serializeExtraNode(value, context, depth) {
+    if (value === null || typeof value === "undefined") {
+      var nullLimit = reserveExtraNode(context, null, depth);
+      return nullLimit || { kind: "null", type: null, displayType: "null", value: null };
+    }
+    var typeName = extraTypeName(value);
+    var limit = reserveExtraNode(context, typeName, depth);
+    if (limit) return limit;
+    try {
+      var scalar = scalarExtraNode(value, typeName);
+      if (scalar) return scalar;
+      if (typeName === "android.os.Bundle" || typeName === "android.os.PersistableBundle") {
+        return serializeBundleNode(value, typeName, context, depth);
+      }
+      if (typeName === "android.content.Intent") {
+        return serializeIntentNode(value, typeName, context, depth);
+      }
+      if (typeName && typeName[0] === "[") {
+        return serializeExtraArray(value, typeName, context, depth);
+      }
+      if (typeName === "java.util.ArrayList") {
+        return serializeExtraList(value, typeName, context, depth);
+      }
+      return { kind: "opaque", type: typeName, displayType: typeName || "Object" };
+    } catch (error) {
+      return {
+        kind: "error",
+        type: typeName,
+        reason: "value serialization failed (" + extraErrorKind(error) + ")"
+      };
+    }
+  }
+  function legacyCollectionValue(node) {
+    if (node.error || node.omitted || !node.items || node.items.length !== node.count || node.items.length === 0) {
+      return null;
+    }
+    var canonical = null;
+    if (node.kind === "array") {
+      var arrayTypes = {
+        "[I": "int[]",
+        "[J": "long[]",
+        "[F": "float[]",
+        "[D": "double[]",
+        "[Ljava.lang.String;": "string[]"
+      };
+      canonical = arrayTypes[node.type] || null;
+    } else if (node.kind === "list") {
+      var firstType = node.items[0].noxenType;
+      var listTypes = {
+        "int": "int-list",
+        "long": "long-list",
+        "float": "float-list",
+        "double": "double-list",
+        "string": "string-list"
+      };
+      canonical = listTypes[firstType] || null;
+      for (var i = 0; canonical && i < node.items.length; i++) {
+        if (node.items[i].kind !== "scalar" || node.items[i].noxenType !== firstType || node.items[i].truncated) {
+          canonical = null;
+        }
       }
     }
     if (!canonical) return null;
+    var values = [];
+    for (var j = 0; j < node.items.length; j++) {
+      var item = node.items[j];
+      if (item.kind !== "scalar" || item.truncated) return null;
+      values.push(canonical === "string[]" || canonical === "string-list" ? escapeExtraString(item.value) : item.value);
+    }
     return { noxenType: canonical, value: values.join(",") };
+  }
+  function extraNodeSummary(node) {
+    if (!node) return null;
+    if (node.kind === "null") return null;
+    if (node.kind === "scalar") return node.value;
+    if (node.kind === "bundle") return node.displayType + " (" + node.count + " items)";
+    if (node.kind === "intent") {
+      var count = node.extras && node.extras.count ? node.extras.count : 0;
+      return "Intent (" + count + (count === 1 ? " extra)" : " extras)");
+    }
+    if (node.kind === "array" || node.kind === "list") {
+      return node.displayType + " (" + node.count + " items)";
+    }
+    if (node.kind === "reference") return "reference to #" + node.referenceId;
+    if (node.kind === "opaque") return "(opaque object)";
+    if (node.kind === "truncated") return "(truncated: " + node.reason + ")";
+    return "(unreadable value)";
+  }
+  function extraEnvelopeFromNode(node) {
+    var envelope = {
+      type: node ? node.type : null,
+      value: extraNodeSummary(node),
+      structuredVersion: 1,
+      structured: node,
+      editable: false
+    };
+    if (!node) return envelope;
+    if (node.kind === "null") envelope.noxenType = "null";
+    if (node.kind === "scalar" && node.noxenType && !node.truncated) {
+      envelope.noxenType = node.noxenType;
+      envelope.value = node.value;
+      envelope.editable = node.noxenType !== "null";
+    } else if (node.kind === "array" || node.kind === "list") {
+      var collection = legacyCollectionValue(node);
+      if (collection) {
+        envelope.noxenType = collection.noxenType;
+        envelope.value = collection.value;
+        envelope.editable = true;
+      }
+    }
+    return envelope;
   }
   function beginHold(className, methodName) {
     holdCounter += 1;
@@ -13681,45 +14006,83 @@ std_string_c_str (StdString * self)
     try {
       var component = intent.getComponent();
       infoIntent.component = component ? component.getPackageName() + "/" + component.getClassName() : null;
+    } catch (e) {
+      infoIntent.component = null;
+    }
+    try {
       infoIntent.action = intent.getAction() || null;
+    } catch (e) {
+      infoIntent.action = null;
+    }
+    try {
       infoIntent.data = intent.getDataString() || null;
+    } catch (e) {
+      infoIntent.data = null;
+    }
+    try {
       infoIntent.package = intent.getPackage() || null;
+    } catch (e) {
+      infoIntent.package = null;
+    }
+    try {
       infoIntent.flags = intent.getFlags();
+    } catch (e) {
+      infoIntent.flags = 0;
+    }
+    var catList = [];
+    try {
       var cats = intent.getCategories();
-      var catList = [];
       if (cats !== null) {
-        var iterator = cats.iterator();
-        while (iterator.hasNext()) {
-          catList.push(iterator.next().toString());
+        var catIterator = cats.iterator();
+        while (catIterator.hasNext() && catList.length < EXTRA_MAX_CONTAINER_ITEMS) {
+          catList.push(boundedExtraText(catIterator.next()).value);
         }
       }
-      infoIntent.categories = catList;
-      var extrasObj = {};
+    } catch (e) {
+      send("[!] Intent categories could not be read (" + extraErrorKind(e) + ")");
+    }
+    infoIntent.categories = catList;
+    var extrasObj = /* @__PURE__ */ Object.create(null);
+    try {
       var extras = intent.getExtras();
       if (extras) {
-        var iterator = extras.keySet().iterator();
-        while (iterator.hasNext()) {
-          var key = iterator.next();
-          var value = extras.get(key);
-          var type = value ? String(value.getClass().getName()) : null;
-          try {
-            var recognized = value ? serializeRecognizedExtra(value, type) : null;
-            extrasObj[key] = {
-              type,
-              value: recognized ? recognized.value : value ? value.toString() : null
-            };
-            if (recognized) extrasObj[key].noxenType = recognized.noxenType;
-            else if (value === null) extrasObj[key].noxenType = "null";
-          } catch (extraError) {
-            extrasObj[key] = { type, value: value ? String(value) : null };
-            send("[!] Extra serialization failed for " + key + " (" + type + "): " + extraError);
+        var context = createExtraSerializationContext();
+        var root = serializeExtraNode(extras, context, 0);
+        if (root && root.kind === "bundle") {
+          for (var i = 0; i < root.items.length; i++) {
+            var item = root.items[i];
+            var capturedKey = item.key;
+            if (Object.prototype.hasOwnProperty.call(extrasObj, capturedKey)) {
+              var suffix = "\u2026#" + (i + 1);
+              capturedKey = capturedKey.slice(0, Math.max(0, EXTRA_MAX_STRING_LENGTH - suffix.length)) + suffix;
+            }
+            extrasObj[capturedKey] = extraEnvelopeFromNode(item.value);
+            if (item.keyTruncated) {
+              extrasObj[capturedKey].keyTruncated = true;
+              extrasObj[capturedKey].editable = false;
+            }
           }
+          infoIntent.extrasMeta = {
+            count: root.count,
+            capturedCount: root.items.length,
+            omitted: root.omitted || 0,
+            error: root.error || null,
+            referenceId: root.referenceId
+          };
+        } else if (root) {
+          infoIntent.extrasMeta = { count: 0, capturedCount: 0, omitted: 0, error: extraNodeSummary(root) };
         }
       }
-      infoIntent.extras = extrasObj;
     } catch (e) {
-      send("[!] Intent dump failed: " + e);
+      infoIntent.extrasMeta = {
+        count: 0,
+        capturedCount: 0,
+        omitted: 0,
+        error: "extras could not be read (" + extraErrorKind(e) + ")"
+      };
+      send("[!] Intent extras could not be read (" + extraErrorKind(e) + ")");
     }
+    infoIntent.extras = extrasObj;
     return infoIntent;
   }
   function applyModifications(intent) {
