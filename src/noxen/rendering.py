@@ -52,6 +52,11 @@ INTENT_FLAGS = [
     (0x80000000, ["FLAG_IGNORE_EPHEMERAL", "FLAG_RECEIVER_OFFLOAD"]),
 ]
 
+_HISTORY_SEARCH_MAX_DEPTH = 12
+_HISTORY_SEARCH_MAX_NODES = 400
+_HISTORY_SEARCH_MAX_TERM = 2048
+_HISTORY_SEARCH_MAX_TEXT = 32768
+
 def history_outcome_cell(
     outcome: str | None,
     success_color: str = "#26a368",
@@ -152,23 +157,140 @@ def history_sort_key(entry: dict, column: str | None):
     return ""
 
 
-def history_search_matches(entry: dict, query: str) -> bool:
+def history_search_text(entry: dict) -> str:
+    """Build a bounded, normalized index of user-visible History values."""
+    terms: list[str] = []
+    seen: set[str] = set()
+    state = {"chars": 0, "nodes": 0, "full": False}
+
+    def add(value) -> None:
+        if state["full"] or value is None or not isinstance(value, (str, int, float, bool)):
+            return
+        term = str(value)[:_HISTORY_SEARCH_MAX_TERM].lower()
+        if not term or term in seen:
+            return
+        remaining = _HISTORY_SEARCH_MAX_TEXT - state["chars"]
+        if remaining <= 0:
+            state["full"] = True
+            return
+        if len(term) > remaining:
+            term = term[:remaining]
+            state["full"] = True
+        if term:
+            seen.add(term)
+            terms.append(term)
+            state["chars"] += len(term) + 1
+        if state["chars"] >= _HISTORY_SEARCH_MAX_TEXT:
+            state["full"] = True
+
+    def visit(node, depth: int = 0) -> None:
+        if (
+            state["full"]
+            or depth > _HISTORY_SEARCH_MAX_DEPTH
+            or state["nodes"] >= _HISTORY_SEARCH_MAX_NODES
+            or not isinstance(node, dict)
+        ):
+            return
+        state["nodes"] += 1
+        kind = node.get("kind")
+
+        for field in ("type", "displayType", "noxenType"):
+            add(node.get(field))
+
+        if kind in {"scalar", "null", "status", "field"}:
+            add(node.get("value"))
+        elif kind == "bundle":
+            items = node.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if state["full"] or state["nodes"] >= _HISTORY_SEARCH_MAX_NODES:
+                        break
+                    if isinstance(item, dict):
+                        add(item.get("key"))
+                        visit(item.get("value"), depth + 1)
+        elif kind in {"array", "list"}:
+            items = node.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if state["full"] or state["nodes"] >= _HISTORY_SEARCH_MAX_NODES:
+                        break
+                    visit(item, depth + 1)
+        elif kind == "intent":
+            for field in ("action", "data", "component", "package", "flags"):
+                add(node.get(field))
+            categories = node.get("categories")
+            if isinstance(categories, list):
+                for category in categories:
+                    add(category)
+            if node.get("categoriesTruncated"):
+                add("additional categories omitted")
+            visit(node.get("extras"), depth + 1)
+            errors = node.get("errors")
+            if isinstance(errors, list):
+                for error in errors:
+                    add(error)
+        elif kind == "opaque":
+            add("opaque")
+        elif kind == "reference":
+            add("reference")
+            add(node.get("referenceId"))
+        elif kind == "truncated":
+            add("truncated")
+            add(node.get("reason"))
+        elif kind == "error":
+            add("unreadable")
+            add(node.get("reason"))
+
+        omitted = node.get("omitted")
+        if isinstance(omitted, int) and omitted > 0:
+            add("additional items omitted")
+        add(node.get("error"))
+
+    info = entry.get("intent")
+    info = info if isinstance(info, dict) else {}
+    for value in (
+        entry.get("class"),
+        entry.get("method"),
+        info.get("action"),
+        info.get("component"),
+        info.get("data"),
+        info.get("flags"),
+    ):
+        add(value)
+
+    categories = info.get("categories")
+    if isinstance(categories, list):
+        for category in categories:
+            add(category)
+
+    extras = info.get("extras")
+    if isinstance(extras, dict):
+        for key, envelope in extras.items():
+            if state["full"]:
+                break
+            add(key)
+            if not isinstance(envelope, dict):
+                continue
+            structured = envelope.get("structured")
+            if isinstance(structured, dict):
+                visit(structured)
+            else:
+                for field in ("type", "noxenType", "value"):
+                    add(envelope.get(field))
+
+    metadata = info.get("extrasMeta")
+    if isinstance(metadata, dict):
+        omitted = metadata.get("omitted")
+        if isinstance(omitted, int) and omitted > 0:
+            add("additional extras omitted")
+        add(metadata.get("error"))
+
+    return "\0".join(terms)
+
+
+def history_search_matches(entry: dict, query: str, search_text: str | None = None) -> bool:
     normalized_query = query.lower()
-    info = entry.get("intent", {}) or {}
-    fields = [
-        str(entry.get("class") or ""),
-        str(entry.get("method") or ""),
-        str(info.get("action") or ""),
-        str(info.get("component") or ""),
-        str(info.get("data") or ""),
-        str(info.get("flags") or ""),
-    ]
-    for category in info.get("categories", []):
-        fields.append(str(category))
-    for key, value in (info.get("extras") or {}).items():
-        fields.append(str(key))
-        fields.append(str(value.get("value", "")))
-    return any(normalized_query in field.lower() for field in fields)
+    return normalized_query in (search_text if search_text is not None else history_search_text(entry))
 
 
 def filter_sort_history_entries(
@@ -177,6 +299,7 @@ def filter_sort_history_entries(
     search_text: str = "",
     sort_column: str | None = None,
     sort_reverse: bool = False,
+    search_index: dict[int, str] | None = None,
 ) -> list[dict]:
     filtered = []
     for entry in list(entries):
@@ -185,7 +308,14 @@ def filter_sort_history_entries(
         filtered.append(entry)
 
     if search_text:
-        filtered = [entry for entry in filtered if history_search_matches(entry, search_text)]
+        filtered = [
+            entry for entry in filtered
+            if history_search_matches(
+                entry,
+                search_text,
+                search_index.get(id(entry)) if search_index is not None else None,
+            )
+        ]
     if sort_column:
         filtered.sort(key=lambda entry: history_sort_key(entry, sort_column), reverse=sort_reverse)
     return filtered

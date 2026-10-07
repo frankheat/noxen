@@ -85,6 +85,7 @@ from noxen.rendering import (
     filter_sort_history_entries,
     history_outcome_cell,
     history_row_values,
+    history_search_text,
     payload_to_history_entry,
     render_intent_detail,
 )
@@ -304,6 +305,9 @@ class NoxenApp(App):
         self.system_server_session: SystemServerSession | None = None
         self.frida_session = None
         self.db, self._all_intents = self._init_project(cli_args)
+        self._history_search_index = {
+            id(entry): history_search_text(entry) for entry in self._all_intents
+        }
         saved_cols = self.db.load_history_columns()
         if saved_cols is not None:
             self._history_visible_cols = set(saved_cols)
@@ -653,6 +657,7 @@ class NoxenApp(App):
 
         if entry is not None and mods:
             apply_mods_to_entry(entry, mods)
+            self._history_search_index[id(entry)] = history_search_text(entry)
 
         outcome = "modified_forwarded" if mods else "forwarded"
         self._update_outcome(intent_id, outcome)
@@ -1675,6 +1680,7 @@ class NoxenApp(App):
         db_id = self.db.save_intent(entry)
         entry["id"] = db_id if db_id else len(self._all_intents) + 1
         self._all_intents.append(entry)
+        self._history_search_index[id(entry)] = history_search_text(entry)
         self._pending_append.append(entry)
         if not self._history_refresh_pending:
             self._history_refresh_pending = True
@@ -1781,6 +1787,7 @@ class NoxenApp(App):
             self._history_search_text,
             self._sort_column,
             self._sort_reverse,
+            self._history_search_index,
         )
 
     def _fill_table_rows(self, table, filtered):
@@ -2018,6 +2025,7 @@ class NoxenApp(App):
 
     def action_clear_history(self):
         self._all_intents.clear()
+        self._history_search_index.clear()
         self._history_selected_entry = None
         try:
             self.query_one("#history_table", DataTable).clear(columns=False)

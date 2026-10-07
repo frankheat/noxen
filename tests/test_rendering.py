@@ -10,6 +10,7 @@ from noxen.rendering import (
     filter_sort_history_entries,
     history_row_values,
     history_search_matches,
+    history_search_text,
     history_sort_key,
     payload_to_filter_context,
     payload_to_history_entry,
@@ -140,6 +141,141 @@ class RenderingTests(unittest.TestCase):
         self.assertTrue(history_search_matches(entry, "token"))
         self.assertTrue(history_search_matches(entry, "secret-value"))
         self.assertFalse(history_search_matches(entry, "missing"))
+
+    def test_history_search_matches_nested_structured_values(self):
+        entry = {
+            "class": "com.example.MainActivity",
+            "method": "getIntent",
+            "intent": {
+                "extras": {
+                    "payload": {
+                        "type": "android.os.Bundle",
+                        "value": "Bundle (2 items)",
+                        "structured": {
+                            "kind": "bundle",
+                            "type": "android.os.Bundle",
+                            "omitted": 4,
+                            "items": [
+                                {
+                                    "key": "bundle_tags",
+                                    "value": {
+                                        "kind": "array",
+                                        "type": "[Ljava.lang.String;",
+                                        "items": [{
+                                            "kind": "scalar",
+                                            "type": "java.lang.String",
+                                            "value": "deep-value",
+                                        }],
+                                    },
+                                },
+                                {
+                                    "key": "next",
+                                    "value": {
+                                        "kind": "intent",
+                                        "type": "android.content.Intent",
+                                        "action": "com.example.NESTED",
+                                        "data": "content://example/item/5",
+                                        "component": "com.example/.NestedActivity",
+                                        "package": "com.example",
+                                        "flags": 16,
+                                        "categories": ["com.example.CATEGORY"],
+                                        "extras": {
+                                            "kind": "bundle",
+                                            "items": [
+                                                {
+                                                    "key": "account",
+                                                    "value": {
+                                                        "kind": "opaque",
+                                                        "type": "com.example.Account",
+                                                    },
+                                                },
+                                                {
+                                                    "key": "deeper",
+                                                    "value": {
+                                                        "kind": "intent",
+                                                        "type": "android.content.Intent",
+                                                        "action": "com.example.DEEPEST",
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                    "broken": {
+                        "structured": {
+                            "kind": "error",
+                            "reason": "value could not be read",
+                        },
+                    },
+                },
+                "extrasMeta": {"omitted": 2, "error": "some extras were unavailable"},
+            },
+        }
+
+        for query in (
+            "bundle_tags",
+            "deep-value",
+            "com.example.nested",
+            "content://example/item/5",
+            "nestedactivity",
+            "com.example.category",
+            "com.example.account",
+            "com.example.deepest",
+            "opaque",
+            "unreadable",
+            "could not be read",
+            "additional items omitted",
+            "additional extras omitted",
+            "some extras were unavailable",
+        ):
+            with self.subTest(query=query):
+                self.assertTrue(history_search_matches(entry, query))
+
+    def test_history_search_index_is_bounded_and_tolerates_malformed_nodes(self):
+        entry = {
+            "class": object(),
+            "intent": {
+                "categories": "not-a-list",
+                "extras": {
+                    "malformed": {"structured": {"kind": "bundle", "items": [None, "bad"]}},
+                    "large": {"structured": {
+                        "kind": "array",
+                        "items": [
+                            {"kind": "scalar", "value": f"value-{index}-" + ("x" * 3000)}
+                            for index in range(500)
+                        ],
+                    }},
+                },
+            },
+        }
+
+        search_text = history_search_text(entry)
+
+        self.assertLessEqual(len(search_text), 32768)
+        self.assertIn("malformed", search_text)
+        self.assertIn("value-0", search_text)
+
+    def test_filter_sort_history_entries_uses_prebuilt_search_index(self):
+        entry = {
+            "id": 1,
+            "class": "com.example.MainActivity",
+            "method": "getIntent",
+            "intent": {"extras": {}},
+        }
+        filters = FilterManager()
+        search_index = {id(entry): "prebuilt\0nested-only"}
+
+        filtered = filter_sort_history_entries(
+            [entry],
+            filters,
+            search_text="nested-only",
+            search_index=search_index,
+        )
+
+        self.assertEqual(filtered, [entry])
 
     def test_filter_sort_history_entries_applies_filters_search_and_sort(self):
         entries = [
