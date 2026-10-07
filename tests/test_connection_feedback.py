@@ -118,6 +118,8 @@ class ConnectionFeedbackTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(app.query_one("#home_btn", Button).disabled)
                     self.assertEqual(str(app.query_one("#home_btn", Button).label), "Connecting…")
                     self.assertFalse(app.query_one("#session_bar").has_class("connected"))
+                    self.assertTrue(app.query_one("#session_bar").has_class("connecting"))
+                    self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#65B8E8")
 
                     release.set()
                     for _ in range(100):
@@ -135,6 +137,18 @@ class ConnectionFeedbackTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(str(app.query_one("#home_btn", Button).label), "Connect")
                     self.assertTrue(app.query_one("#home_disconnect", Button).disabled)
                     self.assertEqual(str(app.query_one("#session_info", Label).render()), "Not connected")
+                    self.assertFalse(app.query_one("#session_bar").has_class("connecting"))
+                    self.assertFalse(app.query_one("#session_bar").has_class("connected"))
+                    self.assertTrue(app.query_one("#session_bar").has_class("connection-error"))
+                    self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#D76470")
+                    failed_generation = app._connection_generation
+                    app._connection_generation += 1
+                    app._clear_session_error_state(failed_generation)
+                    self.assertTrue(app.query_one("#session_bar").has_class("connection-error"))
+                    app._clear_session_error_state()
+                    await pilot.pause()
+                    self.assertFalse(app.query_one("#session_bar").has_class("connection-error"))
+                    self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#1B2723")
                     self.assertIn(message, str(app.query_one("#home_error", Label).render()))
                     self.assertEqual(notices, [(message, {"severity": "error", "timeout": 6})])
                     self.assertIn("unable to connect to remote frida-server", app._log_entries[-1])
@@ -178,6 +192,7 @@ class ConnectionFeedbackTests(unittest.IsolatedAsyncioTestCase):
 
                     self.assertEqual(app.query_one("#main_tabs").active, "tab_home")
                     self.assertEqual(app._connection_state, "connecting")
+                    self.assertTrue(app.query_one("#session_bar").has_class("connecting"))
 
                     release.set()
                     for _ in range(100):
@@ -189,6 +204,7 @@ class ConnectionFeedbackTests(unittest.IsolatedAsyncioTestCase):
 
                     self.assertEqual(app.query_one("#main_tabs").active, "tab_intercept")
                     self.assertEqual(app._connection_state, "connected")
+                    self.assertFalse(app.query_one("#session_bar").has_class("connecting"))
                     self.assertTrue(app.query_one("#session_bar").has_class("connected"))
                     self.assertTrue(app.query_one("#home_btn", Button).disabled)
                     self.assertFalse(app.query_one("#home_disconnect", Button).disabled)

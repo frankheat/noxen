@@ -296,6 +296,7 @@ class NoxenApp(App):
         self._history_command_bar_visible = self._settings["history_command_bar"]
         self._home_devices = []
         self._connect_scan_generation = 0
+        self._connection_generation = 0
         self._connection_state = "disconnected"
         self._session_device_id = ""
         self._session_api_level: int | None = None
@@ -1208,9 +1209,13 @@ class NoxenApp(App):
 
         cfg = self._session_config
         target = cfg.target_label()
+        self._connection_generation += 1
         self._connection_state = "connecting"
         self._session_device_id = device_id
         self._session_api_level = None
+        self.query_one("#session_bar").remove_class("connection-error")
+        self.query_one("#session_bar").remove_class("connected")
+        self.query_one("#session_bar").add_class("connecting")
         self.query_one("#session_info", Label).update(f"Connecting to {target}  ·  {device_id}…")
         self.query_one("#home_btn", Button).label = "Connecting…"
         self.query_one("#home_btn", Button).disabled = True
@@ -1392,6 +1397,8 @@ class NoxenApp(App):
                 self.query_one("#session_info", Label).update(
                     f"{target}  ·  {self._session_device_id}{api}"
                 )
+                self.query_one("#session_bar").remove_class("connection-error")
+                self.query_one("#session_bar").remove_class("connecting")
                 self.query_one("#session_bar").add_class("connected")
                 self.query_one("#home_btn", Button).label = "Connect"
                 self.query_one("#home_btn", Button).disabled = True
@@ -1440,7 +1447,9 @@ class NoxenApp(App):
 
         def _do():
             try:
+                self.query_one("#session_bar").remove_class("connecting")
                 self.query_one("#session_bar").remove_class("connected")
+                self.query_one("#session_bar").add_class("connection-error")
                 self.query_one("#session_info", Label).update("Not connected")
                 self.query_one("#home_btn", Button).label = "Connect"
                 self.query_one("#home_btn", Button).disabled = False
@@ -1450,6 +1459,8 @@ class NoxenApp(App):
                 pass
             self._clear_info_tab()
             self.notify(message, severity="error", timeout=6)
+            generation = self._connection_generation
+            self.set_timer(3, lambda: self._clear_session_error_state(generation))
 
         try:
             self.call_from_thread(_do)
@@ -1468,6 +1479,8 @@ class NoxenApp(App):
 
         def _do():
             try:
+                self.query_one("#session_bar").remove_class("connection-error")
+                self.query_one("#session_bar").remove_class("connecting")
                 self.query_one("#session_bar").remove_class("connected")
                 self.query_one("#session_info", Label).update("Not connected")
                 self.query_one("#home_btn", Button).label = "Connect"
@@ -1491,6 +1504,8 @@ class NoxenApp(App):
         self._cleanup_system_server_session()
         self.set_intercept_state(False)
         try:
+            self.query_one("#session_bar").remove_class("connection-error")
+            self.query_one("#session_bar").remove_class("connecting")
             self.query_one("#session_bar").remove_class("connected")
             self.query_one("#session_info", Label).update("Not connected")
             self.query_one("#home_btn", Button).label = "Connect"
@@ -1499,6 +1514,20 @@ class NoxenApp(App):
         except Exception:
             pass
         self._clear_info_tab()
+
+    def _clear_session_error_state(self, generation: int | None = None) -> None:
+        if (
+            self._connection_state != "disconnected"
+            or (
+                generation is not None
+                and generation != self._connection_generation
+            )
+        ):
+            return
+        try:
+            self.query_one("#session_bar").remove_class("connection-error")
+        except Exception:
+            pass
 
     # --- Info app tab ---
 

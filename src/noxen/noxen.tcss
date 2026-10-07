@@ -109,18 +109,26 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 }
 #session_bar {
     height: 1;
-    background: $secondary;
+    background: $panel;
     padding: 0 1;
     align: right middle;
+}
+#session_bar.connecting {
+    background: $secondary;
 }
 #session_bar.connected {
     background: $success;
 }
+#session_bar.connection-error {
+    background: $error;
+}
 #session_info {
-    color: $button-color-foreground;
+    color: $foreground-muted;
     height: 1;
 }
-#session_bar.connected #session_info {
+#session_bar.connecting #session_info,
+#session_bar.connected #session_info,
+#session_bar.connection-error #session_info {
     color: $button-color-foreground;
 }
 #intercept_header #intercept_toggle {

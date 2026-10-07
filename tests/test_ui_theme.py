@@ -78,6 +78,8 @@ class ThemeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 async with app.run_test(size=(120, 40)) as pilot:
                     self.assertEqual(app.theme, "noxen-dark")
                     self.assertEqual(app.current_theme.background, NOXEN_DARK_THEME.background)
+                    self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#1B2723")
+                    self.assertEqual(app.query_one("#session_info").styles.color.hex, "#E8EFEC99")
 
                     app.action_toggle_theme()
                     await pilot.pause()
@@ -88,6 +90,8 @@ class ThemeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(app.current_theme.dark)
                     self.assertEqual(app.screen.styles.background.hex, "#F3F6F4")
                     self.assertEqual(app.screen.styles.color.hex, "#17211D")
+                    self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#E7ECE9")
+                    self.assertEqual(app.query_one("#session_info").styles.color.hex, "#17211D99")
                     self.assertEqual(
                         app.query_one("#log_verbose_label").styles.color.hex,
                         "#17211D",
