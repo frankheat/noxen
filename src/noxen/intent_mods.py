@@ -263,10 +263,14 @@ def apply_mods_to_entry(entry: dict, mods: list[IntentMod]) -> None:
         return
 
     entry["original_intent"] = copy.deepcopy(entry.get("intent") or {})
-    original_intent = entry["original_intent"]
-    original_extras = original_intent.get("extras") or {}
+    entry["intent"] = apply_mods_to_intent(entry["original_intent"], mods)
 
-    info = entry["intent"] = dict(entry.get("intent") or {})
+
+def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
+    """Return an Intent snapshot with ordered modifications applied."""
+    original_intent = copy.deepcopy(intent or {})
+    original_extras = original_intent.get("extras") or {}
+    info = copy.deepcopy(original_intent)
     info["categories"] = list(info.get("categories") or [])
     info["extras"] = dict(info.get("extras") or {})
 
@@ -283,11 +287,11 @@ def apply_mods_to_entry(entry: dict, mods: list[IntentMod]) -> None:
         elif mod_type == "flag_add":
             flag = parse_flag_value(value)
             if flag is not None:
-                info["flags"] = _current_flags(info) | flag
+                info["flags"] = (_current_flags(info) | flag) & 0xFFFFFFFF
         elif mod_type == "flag_rem":
             flag = parse_flag_value(value)
             if flag is not None:
-                info["flags"] = _current_flags(info) & ~flag
+                info["flags"] = (_current_flags(info) & ~flag) & 0xFFFFFFFF
         elif mod_type == "extra_rem":
             info["extras"].pop(key, None)
         elif mod_type == "extra_add":
@@ -299,6 +303,60 @@ def apply_mods_to_entry(entry: dict, mods: list[IntentMod]) -> None:
                 "value": None if canonical == "null" else value,
                 "noxenType": canonical,
             }
+    return info
+
+
+def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
+    """Build ordered modifications that turn an original snapshot into a draft."""
+    before = original or {}
+    after = draft or {}
+    mods: list[IntentMod] = []
+
+    for field in ("action", "data"):
+        old_value = before.get(field) or ""
+        new_value = after.get(field) or ""
+        if new_value != old_value:
+            mods.append((field, "", str(new_value), ""))
+
+    old_categories = list(before.get("categories") or [])
+    new_categories = list(after.get("categories") or [])
+    for category in old_categories:
+        if category not in new_categories:
+            mods.append(("cat_rem", "", category, ""))
+    for category in new_categories:
+        if category not in old_categories:
+            mods.append(("cat_add", "", category, ""))
+
+    old_flags = _current_flags(before)
+    new_flags = _current_flags(after)
+    if new_flags != old_flags:
+        if old_flags:
+            mods.append(("flag_rem", "", str(old_flags), ""))
+        if new_flags:
+            mods.append(("flag_add", "", str(new_flags), ""))
+
+    old_extras = before.get("extras") or {}
+    new_extras = after.get("extras") or {}
+    for key in old_extras:
+        if key not in new_extras:
+            mods.append(("extra_rem", key, "", ""))
+    for key, extra in new_extras.items():
+        old_extra = old_extras.get(key)
+        if old_extra == extra:
+            continue
+        canonical = normalize_extra_type(
+            extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(extra.get("type") or "")
+        )
+        if canonical is None:
+            # Opaque values are read-only in the editor. They can disappear from the
+            # draft, but cannot be reconstructed safely from their display string.
+            continue
+        if old_extra is not None:
+            mods.append(("extra_rem", key, "", ""))
+        value = "" if extra.get("value") is None else str(extra.get("value"))
+        mods.append(("extra_add", key, value, canonical))
+
+    return mods
 
 
 def parse_flag_value(value: str) -> int | None:
@@ -346,4 +404,5 @@ def _extra_add_mod(parts: list[str]) -> IntentModParseResult:
 
 
 def _current_flags(info: dict) -> int:
-    return parse_flag_value(info.get("flags") or 0) or 0
+    parsed = parse_flag_value(info.get("flags") or 0)
+    return 0 if parsed is None else parsed & 0xFFFFFFFF

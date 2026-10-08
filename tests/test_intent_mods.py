@@ -4,6 +4,8 @@ from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
     apply_mods_to_entry,
+    apply_mods_to_intent,
+    diff_intents,
     java_type_display,
     normalize_extra_type,
     parse_flag_value,
@@ -60,6 +62,60 @@ class IntentModsTests(unittest.TestCase):
         apply_mods_to_entry(entry, [("flag_rem", "", "0x10", "")])
 
         self.assertEqual(entry["intent"]["flags"], 1)
+
+    def test_apply_mods_to_intent_is_pure_and_diff_round_trips(self):
+        original = {
+            "action": "old.action",
+            "data": None,
+            "flags": -1,
+            "categories": ["old.category", "keep.category"],
+            "extras": {
+                "keep": {"type": "java.lang.Short", "value": "5"},
+                "change": {"type": "java.lang.String", "value": "old"},
+                "opaque": {
+                    "type": "com.example.Secret", "value": "(opaque object)",
+                    "editable": False,
+                },
+            },
+        }
+        draft = apply_mods_to_intent(original, [
+            ("action", "", "new.action", ""),
+            ("data", "", "content://items/1", ""),
+            ("cat_rem", "", "old.category", ""),
+            ("cat_add", "", "new.category", ""),
+            ("flag_rem", "", "0x80000000", ""),
+            ("extra_rem", "change", "", ""),
+            ("extra_add", "change", "1,2,3", "int[]"),
+            ("extra_add", "empty", "", "string"),
+            ("extra_add", "optional", "", "null"),
+        ])
+
+        self.assertEqual(original["action"], "old.action")
+        self.assertEqual(original["extras"]["change"]["value"], "old")
+        replayed = apply_mods_to_intent(original, diff_intents(original, draft))
+        self.assertEqual(replayed, draft)
+        self.assertEqual(replayed["extras"]["keep"]["type"], "java.lang.Short")
+        self.assertEqual(replayed["extras"]["opaque"], original["extras"]["opaque"])
+
+    def test_diff_treats_signed_and_unsigned_flags_as_the_same_mask(self):
+        self.assertEqual(
+            diff_intents(
+                {"flags": -1, "categories": [], "extras": {}},
+                {"flags": 0xFFFFFFFF, "categories": [], "extras": {}},
+            ),
+            [],
+        )
+
+    def test_opaque_extra_can_be_removed_but_is_never_reconstructed(self):
+        opaque = {"type": "com.example.Secret", "value": "opaque", "editable": False}
+        original = {"categories": [], "extras": {"secret": opaque}, "flags": 0}
+
+        self.assertEqual(
+            diff_intents(original, {"categories": [], "extras": {}, "flags": 0}),
+            [("extra_rem", "secret", "", "")],
+        )
+        changed = {"categories": [], "extras": {"secret": {**opaque, "value": "changed"}}, "flags": 0}
+        self.assertEqual(diff_intents(original, changed), [])
 
     def test_java_type_display(self):
         self.assertEqual(java_type_display("java.lang.String"), "String")

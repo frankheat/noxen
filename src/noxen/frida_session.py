@@ -355,6 +355,20 @@ class FridaSession:
     def forward(self, decision_id=None):
         return bool(self._script.exports_sync.forward(decision_id))
 
+    @staticmethod
+    def _rpc_mods(mods):
+        return [
+            {"type": mod_type, "key": key, "val": value, "extraType": extra_type}
+            for mod_type, key, value, extra_type in mods
+        ]
+
+    def forward_with_mods(self, mods, decision_id=None):
+        return bool(
+            self._script.exports_sync.forward_with_mods(
+                self._rpc_mods(mods), decision_id
+            )
+        )
+
     def drop(self, decision_id=None):
         return bool(self._script.exports_sync.drop(decision_id))
 
@@ -374,6 +388,16 @@ class FridaSession:
     def intercept_off(self):
         self._blocking_enabled = False
         self._script.exports_sync.interceptoff()
+
+    def intercept_off_with_mods(self, mods, decision_id=None):
+        disabled = bool(
+            self._script.exports_sync.intercept_off_with_mods(
+                self._rpc_mods(mods), decision_id
+            )
+        )
+        if disabled:
+            self._blocking_enabled = False
+        return disabled
 
     def is_ready(self) -> bool:
         with self._lock:

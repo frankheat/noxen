@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import re
@@ -67,6 +68,8 @@ from noxen.intent_mods import (
     EXTRA_VALUE_PLACEHOLDERS,
     JAVA_TYPE_TO_SIMPLE,
     apply_mods_to_entry,
+    apply_mods_to_intent,
+    diff_intents,
     java_type_display,
     parse_flag_value,
     parse_intent_mod_command,
@@ -294,10 +297,9 @@ class NoxenApp(App):
         self._edit_forward_pending = False
         self._edit_extra_counter = 0
         self._edit_extra_rows: dict = {}
-        self._edit_removed_keys: set = set()
+        self._edit_display_info: dict = {}
         self._edit_cat_counter = 0
         self._edit_cat_rows: dict = {}
-        self._edit_removed_categories: set = set()
         self._staged_mods: list = []
         self._active_tab = "tab_intercept"
         self._startup_messages = []
@@ -434,40 +436,10 @@ class NoxenApp(App):
     def _enter_edit_mode(self):
         if not self._current_intercepted_entry or self._edit_mode:
             return
-        entry = self._current_intercepted_entry
-        info = entry.get("intent", {}) or {}
-
-        self.query_one("#ef_action", Input).value = info.get("action", "") or ""
-        self.query_one("#ef_data", Input).value = info.get("data", "") or ""
-
-        self.query_one("#ef_categories").remove_children()
-        self._edit_cat_rows = {}
-        self._edit_removed_categories = set()
-        for cat in (info.get("categories", []) or []):
-            self._add_edit_category_row(cat, is_new=False)
-
-        self.query_one("#ef_extras").remove_children()
-        self._edit_extra_rows = {}
-        self._edit_removed_keys = set()
-        for key, extra in (info.get("extras", {}) or {}).items():
-            java_type = extra.get("type") or ""
-            simple_type = None if extra.get("editable") is False else (
-                extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(java_type)
-            )
-            self._add_edit_extra_row(
-                key,
-                simple_type,
-                str(extra.get("value", "") or ""),
-                is_new=False,
-                java_type=java_type,
-                removable=not extra.get("keyTruncated", False),
-            )
-
-        flags_val = info.get("flags") or 0
-        try:
-            self.query_one("#ef_flags", Input).value = hex(int(flags_val)) if flags_val else ""
-        except Exception:
-            self.query_one("#ef_flags", Input).value = ""
+        original = self._current_intercepted_entry.get("intent", {}) or {}
+        draft = apply_mods_to_intent(original, self._staged_mods)
+        self._staged_mods.clear()
+        self._populate_edit_form(draft)
 
         self.query_one("#intercept_output").display = False
         ef = self.query_one("#edit_form")
@@ -484,6 +456,50 @@ class NoxenApp(App):
         edit_button.display = False
         self.refresh_bindings()
 
+    def _populate_edit_form(self, info: dict) -> None:
+        self._edit_display_info = info
+
+        self.query_one("#ef_action", Input).value = info.get("action", "") or ""
+        self.query_one("#ef_data", Input).value = info.get("data", "") or ""
+
+        self.query_one("#ef_categories").remove_children()
+        self._edit_cat_rows = {}
+        for cat in (info.get("categories", []) or []):
+            self._add_edit_category_row(cat)
+
+        self.query_one("#ef_extras").remove_children()
+        self._edit_extra_rows = {}
+        original_extras = (
+            (self._current_intercepted_entry or {}).get("intent", {}).get("extras", {}) or {}
+        )
+        for key, extra in (info.get("extras", {}) or {}).items():
+            java_type = extra.get("type") or ""
+            simple_type = None if extra.get("editable") is False else (
+                extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(java_type)
+            )
+            original_extra = original_extras.get(key)
+            original_type = None if original_extra is None else (
+                original_extra.get("noxenType")
+                or JAVA_TYPE_TO_SIMPLE.get(original_extra.get("type") or "")
+            )
+            is_new = original_extra is None or (
+                simple_type is not None and simple_type != original_type
+            )
+            self._add_edit_extra_row(
+                key,
+                simple_type,
+                str(extra.get("value", "") or ""),
+                is_new=is_new,
+                java_type=java_type,
+                removable=not extra.get("keyTruncated", False),
+            )
+
+        flags_val = info.get("flags") or 0
+        try:
+            self.query_one("#ef_flags", Input).value = hex(int(flags_val)) if flags_val else ""
+        except Exception:
+            self.query_one("#ef_flags", Input).value = ""
+
     def _exit_edit_mode(self):
         if not self._edit_mode:
             return
@@ -493,6 +509,8 @@ class NoxenApp(App):
         edit_form.disabled = False
         self._edit_mode = False
         self._edit_forward_pending = False
+        self._staged_mods.clear()
+        self._edit_display_info = {}
         forward_button = self.query_one("#btn_forward", Button)
         forward_button.label = "Forward"
         forward_button.remove_class("apply-forward")
@@ -527,10 +545,43 @@ class NoxenApp(App):
         self._set_edit_forward_pending(False)
         self.notify(message, title="Apply & Forward failed", severity="error")
 
-    def _add_edit_category_row(self, value: str, is_new: bool):
+    def _show_edit_validation_error(self, error: _EditValidationError) -> None:
+        self.notify(str(error), title=error.title, severity="error")
+        try:
+            self.query_one(error.selector).focus()
+        except Exception:
+            pass
+
+    def _mod_safety_error(self, mod: tuple) -> str | None:
+        mod_type, key, _value, _extra_type = mod
+        if mod_type not in {"extra_add", "extra_rem"}:
+            return None
+        extras = (
+            (self._current_intercepted_entry or {}).get("intent", {}).get("extras", {}) or {}
+        )
+        if (extras.get(key) or {}).get("keyTruncated"):
+            return f"Extra '{key}' has a truncated key and cannot be modified safely"
+        return None
+
+    def _apply_command_mod_to_editor(self, mod: tuple) -> str | None:
+        if not self._edit_mode:
+            return "The visual Intent editor is no longer active"
+        if self._edit_forward_pending:
+            return "Apply & Forward is already in progress"
+        if error := self._mod_safety_error(mod):
+            return error
+        try:
+            draft = self._collect_edit_draft()
+        except _EditValidationError as error:
+            self._show_edit_validation_error(error)
+            return f"Fix the invalid editor field first: {error}"
+        self._populate_edit_form(apply_mods_to_intent(draft, [mod]))
+        return None
+
+    def _add_edit_category_row(self, value: str):
         self._edit_cat_counter += 1
         n = self._edit_cat_counter
-        self._edit_cat_rows[n] = {"orig_value": value if not is_new else None, "is_new": is_new}
+        self._edit_cat_rows[n] = {}
         row = Horizontal(
             Input(id=f"ef_cv_{n}", value=value,
                   placeholder="e.g. android.intent.category.DEFAULT",
@@ -554,11 +605,18 @@ class NoxenApp(App):
         self._edit_extra_rows[n] = {"key": key, "is_new": is_new, "type": simple_type or "string"}
 
         if is_new:
+            selected_type = simple_type or "string"
+            is_null = selected_type == "null"
             row = Horizontal(
-                Input(id=f"ef_xk_{n}", placeholder="key", classes="ef_x_key_input"),
-                Select(EXTRA_TYPE_OPTIONS, id=f"ef_xt_{n}", value="string",
+                Input(id=f"ef_xk_{n}", value=key, placeholder="key", classes="ef_x_key_input"),
+                Select(EXTRA_TYPE_OPTIONS, id=f"ef_xt_{n}", value=selected_type,
                        allow_blank=False, classes="ef_x_type_select"),
-                Input(id=f"ef_xv_{n}", placeholder=EXTRA_VALUE_PLACEHOLDERS["string"]),
+                Input(
+                    id=f"ef_xv_{n}",
+                    value="" if is_null else value,
+                    placeholder=EXTRA_VALUE_PLACEHOLDERS[selected_type],
+                    disabled=is_null,
+                ),
                 Button("✕", id=f"ef_xrm_{n}", classes="ef_x_rm"),
                 id=f"ef_x_{n}", classes="ef_x_row",
             )
@@ -575,113 +633,92 @@ class NoxenApp(App):
 
         self.query_one("#ef_extras").mount(row)
 
-    def _collect_edit_mods(self) -> list:
-        entry = self._current_intercepted_entry
-        info = entry.get("intent", {}) or {}
-        mods = []
+    def _collect_edit_draft(self) -> dict:
+        original = (self._current_intercepted_entry or {}).get("intent", {}) or {}
+        draft = apply_mods_to_intent(original, [])
+        draft["action"] = self.query_one("#ef_action", Input).value or None
+        draft["data"] = self.query_one("#ef_data", Input).value or None
 
-        new_action = self.query_one("#ef_action", Input).value.strip()
-        if new_action != (info.get("action", "") or ""):
-            mods.append(("action", "", new_action, ""))
-
-        new_data = self.query_one("#ef_data", Input).value.strip()
-        if new_data != (info.get("data", "") or ""):
-            mods.append(("data", "", new_data, ""))
-
-        for cat in self._edit_removed_categories:
-            mods.append(("cat_rem", "", cat, ""))
-
-        for n, row_info in self._edit_cat_rows.items():
-            try:
-                val = self.query_one(f"#ef_cv_{n}", Input).value.strip()
-                orig = row_info["orig_value"]
-                if row_info["is_new"]:
-                    if val:
-                        mods.append(("cat_add", "", val, ""))
-                elif val != (orig or ""):
-                    mods.append(("cat_rem", "", orig, ""))
-                    if val:
-                        mods.append(("cat_add", "", val, ""))
-            except Exception:
-                pass
-
-        for key in self._edit_removed_keys:
-            mods.append(("extra_rem", key, "", ""))
-
-        orig_extras = info.get("extras", {}) or {}
-        for n, row_info in self._edit_extra_rows.items():
-            if row_info["is_new"] or row_info["key"] in self._edit_removed_keys:
+        categories = []
+        for n in self._edit_cat_rows:
+            value = self.query_one(f"#ef_cv_{n}", Input).value.strip()
+            if not value:
                 continue
-            try:
-                new_val = self.query_one(f"#ef_xv_{n}", Input).value
-                orig_val = str(orig_extras.get(row_info["key"], {}).get("value", "") or "")
-                if new_val != orig_val:
-                    error = validate_extra_value(row_info["type"], new_val)
-                    if error:
-                        raise _EditValidationError(
-                            f"{row_info['key']}: {error}",
-                            f"#ef_xv_{n}",
-                        )
-                    mods.append(("extra_rem", row_info["key"], "", ""))
-                    mods.append(("extra_add", row_info["key"], new_val, row_info["type"]))
-            except ValueError:
-                raise
-            except Exception:
-                pass
+            if value in categories:
+                raise _EditValidationError(
+                    f"Duplicate category: {value}",
+                    f"#ef_cv_{n}",
+                    title="Invalid category",
+                )
+            categories.append(value)
+        draft["categories"] = categories
 
-        active_keys = {
-            row_info["key"]
-            for row_info in self._edit_extra_rows.values()
-            if not row_info["is_new"] and row_info["key"] not in self._edit_removed_keys
-        }
+        extras = {}
+        displayed_extras = self._edit_display_info.get("extras", {}) or {}
         for n, row_info in self._edit_extra_rows.items():
-            if not row_info["is_new"]:
-                continue
-            try:
+            if row_info["is_new"]:
                 key = self.query_one(f"#ef_xk_{n}", Input).value.strip()
-                type_val = str(self.query_one(f"#ef_xt_{n}", Select).value)
-                val = self.query_one(f"#ef_xv_{n}", Input).value
+                extra_type = str(self.query_one(f"#ef_xt_{n}", Select).value)
+                value = self.query_one(f"#ef_xv_{n}", Input).value
                 if not key:
-                    if val:
+                    if value:
                         raise _EditValidationError(
                             "Extra key is required",
                             f"#ef_xk_{n}",
                         )
                     continue
-                if key in active_keys:
-                    raise _EditValidationError(
-                        f"Duplicate extra key: {key}",
-                        f"#ef_xk_{n}",
-                    )
-                active_keys.add(key)
-                error = validate_extra_value(type_val, val)
-                if error:
-                    raise _EditValidationError(
-                        f"{key}: {error}",
-                        f"#ef_xv_{n}",
-                    )
-                mods.append(("extra_add", key, val, type_val))
-            except _EditValidationError:
-                raise
-            except Exception:
-                pass
+            else:
+                key = row_info["key"]
+                extra_type = row_info["type"]
+                value = self.query_one(f"#ef_xv_{n}", Input).value
 
-        old_flags = parse_flag_value(info.get("flags") or 0) or 0
-        new_flags_str = self.query_one("#ef_flags", Input).value.strip()
-        new_flags = parse_flag_value(new_flags_str) if new_flags_str else 0
-        if new_flags is None:
+            if key in extras:
+                raise _EditValidationError(
+                    f"Duplicate extra key: {key}",
+                    f"#ef_xk_{n}" if row_info["is_new"] else f"#ef_xv_{n}",
+                )
+
+            snapshot = displayed_extras.get(key)
+            if snapshot is not None and snapshot.get("editable") is False:
+                extras[key] = copy.deepcopy(snapshot)
+                continue
+
+            displayed_value = "" if snapshot is None else str(snapshot.get("value", "") or "")
+            if not row_info["is_new"] and snapshot is not None and value == displayed_value:
+                extras[key] = copy.deepcopy(snapshot)
+                continue
+
+            error = validate_extra_value(extra_type, value)
+            if error:
+                raise _EditValidationError(
+                    f"{key}: {error}",
+                    f"#ef_xv_{n}",
+                )
+            rebuild_mods = []
+            if snapshot is not None:
+                rebuild_mods.append(("extra_rem", key, "", ""))
+            rebuild_mods.append(("extra_add", key, value, extra_type))
+            rebuilt = apply_mods_to_intent(
+                {"extras": {key: snapshot} if snapshot is not None else {}},
+                rebuild_mods,
+            )
+            extras[key] = rebuilt["extras"][key]
+        draft["extras"] = extras
+
+        flags_text = self.query_one("#ef_flags", Input).value.strip()
+        flags = parse_flag_value(flags_text) if flags_text else 0
+        if flags is None:
             raise _EditValidationError(
                 "Flags must be a 32-bit integer or bit mask, for example 0x10000000",
                 "#ef_flags",
                 title="Invalid flags",
             )
-        if new_flags != old_flags:
-            if old_flags:
-                mods.append(("flag_rem", "", str(old_flags), ""))
-            if new_flags:
-                mods.append(("flag_add", "", str(new_flags), ""))
+        draft["flags"] = flags
+        return draft
 
-        return mods
+    def _collect_edit_mods(self) -> list:
+        original = (self._current_intercepted_entry or {}).get("intent", {}) or {}
+        return diff_intents(original, self._collect_edit_draft())
 
     def _forward_from_edit_mode(self):
         """Validate the form and keep it open until Frida confirms forwarding."""
@@ -690,11 +727,7 @@ class NoxenApp(App):
         try:
             mods = self._collect_edit_mods()
         except _EditValidationError as error:
-            self.notify(str(error), title=error.title, severity="error")
-            try:
-                self.query_one(error.selector).focus()
-            except Exception:
-                pass
+            self._show_edit_validation_error(error)
             return
         self._set_edit_forward_pending(True)
         self._apply_mods_and_forward_worker(mods)
@@ -711,15 +744,8 @@ class NoxenApp(App):
             decision_id = self._current_decision_id
             intent_id = self._current_intercept_id
             resolved = self._current_intercepted_entry
-            all_mods = list(self._staged_mods) + list(mods)
-            for mod_type, key, val, extra_type in mods:
-                if not self.frida_session.stage_mod(mod_type, key, val, extra_type, decision_id):
-                    self.call_from_thread(
-                        self._restore_editor_after_forward_failure,
-                        "No matching intent is blocked to modify",
-                    )
-                    return
-            if not self.frida_session.forward(decision_id):
+            all_mods = list(mods)
+            if not self.frida_session.forward_with_mods(all_mods, decision_id):
                 self.call_from_thread(
                     self._restore_editor_after_forward_failure,
                     "No matching intent is blocked to forward",
@@ -737,10 +763,11 @@ class NoxenApp(App):
         if self._current_intercepted_entry is None or self._current_intercept_id is None:
             self.write_cmd("[red]No intent blocked to modify[/red]")
             return
-        if not self.frida_session.stage_mod(mod_type, key, val, extra_type, self._current_decision_id):
-            self.write_cmd("[red]No matching intent blocked to modify[/red]")
+        mod = (mod_type, key, val, extra_type)
+        if error := self._mod_safety_error(mod):
+            self.write_cmd(f"[red]{error}[/red]")
             return
-        self._staged_mods.append((mod_type, key, val, extra_type))
+        self._staged_mods.append(mod)
 
     def _finalize_forward(self, intent_id: int | None, resolved_entry: dict | None, mods: list) -> None:
         entry = resolved_entry
@@ -813,13 +840,11 @@ class NoxenApp(App):
             self._add_edit_extra_row("", None, "", is_new=True)
             return
         elif event.button.id == "ef_add_cat":
-            self._add_edit_category_row("", is_new=True)
+            self._add_edit_category_row("")
             return
         elif (event.button.id or "").startswith("ef_crm_"):
             n = int(event.button.id.split("_")[-1])
-            row_info = self._edit_cat_rows.pop(n, None)
-            if row_info and not row_info["is_new"] and row_info["orig_value"]:
-                self._edit_removed_categories.add(row_info["orig_value"])
+            self._edit_cat_rows.pop(n, None)
             try:
                 self.query_one(f"#ef_cat_{n}").remove()
             except Exception:
@@ -827,9 +852,7 @@ class NoxenApp(App):
             return
         elif (event.button.id or "").startswith("ef_xrm_"):
             n = int(event.button.id.split("_")[-1])
-            row_info = self._edit_extra_rows.pop(n, None)
-            if row_info and not row_info["is_new"]:
-                self._edit_removed_keys.add(row_info["key"])
+            self._edit_extra_rows.pop(n, None)
             try:
                 self.query_one(f"#ef_x_{n}").remove()
             except Exception:
@@ -2696,8 +2719,20 @@ class NoxenApp(App):
         else:
             intent_id = self._current_intercept_id
             resolved = self._current_intercepted_entry
-            mods = list(self._staged_mods)
-            self.frida_session.intercept_off()
+            if self._edit_mode:
+                try:
+                    mods = self.call_from_thread(self._collect_edit_mods)
+                except _EditValidationError as error:
+                    self.call_from_thread(self._show_edit_validation_error, error)
+                    write_fn(f"[red]{error}[/red]")
+                    return
+            else:
+                mods = list(self._staged_mods)
+            if not self.frida_session.intercept_off_with_mods(
+                mods, self._current_decision_id
+            ):
+                write_fn("[red]Could not disable interception for the active intent[/red]")
+                return
             self.set_intercept_state(False)
             self.update_intercept_button(False)
             self._finalize_forward(intent_id, resolved, mods)
@@ -2760,7 +2795,9 @@ class NoxenApp(App):
                 intent_id = self._current_intercept_id
                 resolved = self._current_intercepted_entry
                 mods = list(self._staged_mods)
-                if not self.frida_session.forward(self._current_decision_id):
+                if not self.frida_session.forward_with_mods(
+                    mods, self._current_decision_id
+                ):
                     self.write_cmd("[red]No matching intent blocked to forward[/red]")
                     return
                 self.set_intercept_state(False)
@@ -2781,7 +2818,14 @@ class NoxenApp(App):
                 if error:
                     self.write_cmd(error)
                 elif mod:
-                    self._stage_current_mod(*mod)
+                    if self._edit_mode:
+                        error = self.call_from_thread(
+                            self._apply_command_mod_to_editor, mod
+                        )
+                        if error:
+                            self.write_cmd(f"[red]{error}[/red]")
+                    else:
+                        self._stage_current_mod(*mod)
                 else:
                     self.write_cmd(f"[red]Unknown command '{cmd}' — try /help[/red]")
 

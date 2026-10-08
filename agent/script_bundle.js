@@ -14090,9 +14090,9 @@ std_string_c_str (StdString * self)
     try {
       modQueue.forEach(function(mod) {
         if (mod.type === "action") {
-          intent.setAction(mod.val);
+          intent.setAction(mod.val === "" ? null : mod.val);
         } else if (mod.type === "data") {
-          if (UriJava) intent.setData(UriJava.parse(mod.val));
+          if (UriJava) intent.setData(mod.val === "" ? null : UriJava.parse(mod.val));
         } else if (mod.type === "cat_add") {
           intent.addCategory(mod.val);
         } else if (mod.type === "cat_rem") {
@@ -14362,6 +14362,59 @@ std_string_c_str (StdString * self)
   function matchesActiveDecision(decisionId) {
     return waiting && (!decisionId || decisionId === activeDecisionId);
   }
+  function normalizeRpcMods(mods) {
+    if (!Array.isArray(mods)) throw new Error("modifications must be an array");
+    var supported = {
+      action: true,
+      data: true,
+      cat_add: true,
+      cat_rem: true,
+      flag_add: true,
+      flag_rem: true,
+      extra_add: true,
+      extra_rem: true
+    };
+    return mods.map(function(mod) {
+      if (!mod || !supported[mod.type]) {
+        throw new Error("unsupported modification type");
+      }
+      return {
+        type: String(mod.type),
+        key: mod.key === null || mod.key === void 0 ? "" : String(mod.key),
+        val: mod.val === null || mod.val === void 0 ? "" : String(mod.val),
+        extraType: mod.extraType === null || mod.extraType === void 0 ? "" : String(mod.extraType)
+      };
+    });
+  }
+  function resumeWithMods(mods, decisionId, disableInterception) {
+    var normalized;
+    try {
+      normalized = normalizeRpcMods(mods);
+    } catch (e) {
+      send("[!] Invalid modification set: " + e);
+      return false;
+    }
+    var resumed = false;
+    try {
+      Java.performNow(function() {
+        if (matchesActiveDecision(decisionId) && lock) {
+          modQueue = normalized;
+          if (disableInterception) blockEnabled = false;
+          resumeMode = "forward";
+          Java.synchronized(lock, function() {
+            lock.notify();
+          });
+          resumed = true;
+        } else if (disableInterception && !waiting && !decisionId) {
+          blockEnabled = false;
+          resumed = true;
+        }
+      });
+    } catch (e) {
+      send("[!] Forward resume failed: " + e);
+    }
+    return resumed;
+  }
   function returnTypeName(overload) {
     try {
       return overload.returnType.className || overload.returnType.name || "";
@@ -14467,6 +14520,9 @@ std_string_c_str (StdString * self)
       }
       return resumed;
     },
+    forwardWithMods: function(mods, decisionId) {
+      return resumeWithMods(mods, decisionId, false);
+    },
     drop: function(decisionId) {
       var resumed = false;
       try {
@@ -14508,6 +14564,9 @@ std_string_c_str (StdString * self)
       } catch (e) {
         send("[!] Intercept off failed: " + e);
       }
+    },
+    interceptOffWithMods: function(mods, decisionId) {
+      return resumeWithMods(mods, decisionId, true);
     },
     intercepton: function() {
       blockEnabled = true;

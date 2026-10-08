@@ -212,19 +212,34 @@ class FridaSessionMessageTests(unittest.TestCase):
         session._script = SimpleNamespace(
             exports_sync=SimpleNamespace(
                 forward=lambda decision_id=None: calls.append(("forward", decision_id)) or True,
+                forward_with_mods=lambda mods, decision_id=None: calls.append(
+                    ("forward_with_mods", mods, decision_id)
+                ) or True,
                 drop=lambda decision_id=None: calls.append(("drop", decision_id)) or True,
                 stage_mod=lambda *args: calls.append(("stage_mod", args)) or True,
+                intercept_off_with_mods=lambda mods, decision_id=None: calls.append(
+                    ("intercept_off_with_mods", mods, decision_id)
+                ) or True,
             )
         )
 
         self.assertTrue(session.forward("decision-3"))
+        mods = [("extra_add", "count", "5", "int")]
+        self.assertTrue(session.forward_with_mods(mods, "decision-3"))
         self.assertTrue(session.drop("decision-3"))
         self.assertTrue(session.stage_mod("action", "", "android.intent.action.VIEW", "", "decision-3"))
+        self.assertTrue(session.intercept_off_with_mods(mods, "decision-3"))
 
         self.assertEqual(calls, [
             ("forward", "decision-3"),
+            ("forward_with_mods", [{
+                "type": "extra_add", "key": "count", "val": "5", "extraType": "int",
+            }], "decision-3"),
             ("drop", "decision-3"),
             ("stage_mod", ("action", "", "android.intent.action.VIEW", "", "decision-3")),
+            ("intercept_off_with_mods", [{
+                "type": "extra_add", "key": "count", "val": "5", "extraType": "int",
+            }], "decision-3"),
         ])
 
 

@@ -69,6 +69,10 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                             }, "long-key…": {
                                 "type": "java.lang.String", "value": "value",
                                 "editable": False, "keyTruncated": True,
+                            }, "short": {
+                                "type": "java.lang.Short", "value": "5",
+                            }, "nullable": {
+                                "type": "java.lang.String", "value": None,
                             }},
                         }
                     }
@@ -83,6 +87,14 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(app.query_one(f"#ef_xrm_{opaque_row}").disabled)
                     self.assertTrue(app.query_one(f"#ef_xv_{truncated_row}", Input).disabled)
                     self.assertTrue(app.query_one(f"#ef_xrm_{truncated_row}").disabled)
+                    self.assertEqual(app._collect_edit_mods(), [])
+                    self.assertIn(
+                        "truncated key",
+                        app._apply_command_mod_to_editor(
+                            ("extra_rem", "long-key…", "", "")
+                        ),
+                    )
+                    self.assertIn("long-key…", app._edit_display_info["extras"])
             finally:
                 os.chdir(previous_cwd)
 
@@ -200,22 +212,6 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                 os.chdir(previous_cwd)
 
     async def test_frida_failure_restores_the_populated_editor(self):
-        class RejectingSession:
-            connection_failed_cb = None
-            disconnected_cb = None
-
-            @staticmethod
-            def is_ready():
-                return True
-
-            @staticmethod
-            def stage_mod(*_args):
-                return False
-
-            @staticmethod
-            def cleanup():
-                return None
-
         with tempfile.TemporaryDirectory() as tmp:
             previous_cwd = os.getcwd()
             os.chdir(tmp)
@@ -226,18 +222,13 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                     app._current_intercepted_entry = {
                         "intent": {"action": "old", "categories": [], "extras": {}, "flags": 0}
                     }
-                    app._current_decision_id = "decision"
-                    app.frida_session = RejectingSession()
                     app.set_intercept_state(True)
                     app._enter_edit_mode()
                     app.query_one("#ef_action", Input).value = "new"
 
-                    app._forward_from_edit_mode()
-                    for _ in range(20):
-                        await pilot.pause()
-                        if not app._edit_forward_pending:
-                            break
-                    await app.workers.wait_for_complete()
+                    app._set_edit_forward_pending(True)
+                    app._restore_editor_after_forward_failure("Session not ready")
+                    await pilot.pause()
 
                     self.assertFalse(app._edit_forward_pending)
                     self.assertTrue(app._edit_mode)
@@ -246,6 +237,79 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         str(app.query_one("#btn_forward", Button).label),
                         "Apply & Forward",
+                    )
+            finally:
+                os.chdir(previous_cwd)
+
+    async def test_commands_and_visual_editor_share_one_draft_and_cancel_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                app = NoxenApp(project_args(os.path.join(tmp, "shared-draft.noxen")))
+                async with app.run_test(size=(120, 36)) as pilot:
+                    app.query_one("#main_tabs").active = "tab_intercept"
+                    original = {
+                        "action": "old.action", "data": "content://old", "flags": 1,
+                        "categories": ["old.category"],
+                        "extras": {
+                            "token": {"type": "java.lang.String", "value": "old"},
+                            "opaque": {
+                                "type": "com.example.Secret", "value": "(opaque object)",
+                                "editable": False,
+                            },
+                        },
+                    }
+                    app._current_intercepted_entry = {"intent": original}
+                    app._current_intercept_id = 7
+
+                    # A command entered before opening the editor must become visible.
+                    app._stage_current_mod("action", "", "command.action", "")
+                    app._stage_current_mod("extra_add", "token", "command", "string")
+                    app._enter_edit_mode()
+                    await pilot.pause()
+                    self.assertEqual(app.query_one("#ef_action", Input).value, "command.action")
+                    token_row = next(
+                        number for number, row in app._edit_extra_rows.items()
+                        if row["key"] == "token"
+                    )
+                    self.assertEqual(app.query_one(f"#ef_xv_{token_row}", Input).value, "command")
+                    self.assertEqual(app._staged_mods, [])
+
+                    # Every command updates the same on-screen draft immediately.
+                    for mod in (
+                        ("data", "", "content://new", ""),
+                        ("cat_rem", "", "old.category", ""),
+                        ("cat_add", "", "new.category", ""),
+                        ("flag_add", "", "0x10", ""),
+                        ("extra_rem", "token", "", ""),
+                        ("extra_add", "ids", "1,2,3", "int[]"),
+                    ):
+                        self.assertIsNone(app._apply_command_mod_to_editor(mod))
+                        await pilot.pause()
+
+                    self.assertEqual(app.query_one("#ef_data", Input).value, "content://new")
+                    self.assertEqual(app.query_one("#ef_flags", Input).value, "0x11")
+                    self.assertEqual(
+                        [app.query_one(f"#ef_cv_{n}", Input).value for n in app._edit_cat_rows],
+                        ["new.category"],
+                    )
+                    self.assertEqual(
+                        {row["key"] for row in app._edit_extra_rows.values()},
+                        {"opaque", "ids"},
+                    )
+
+                    # Cancel discards command and visual changes, not just form edits.
+                    app.query_one("#ef_action", Input).value = "visual.action"
+                    app._exit_edit_mode()
+                    app._enter_edit_mode()
+                    await pilot.pause()
+                    self.assertEqual(app.query_one("#ef_action", Input).value, "old.action")
+                    self.assertEqual(app.query_one("#ef_data", Input).value, "content://old")
+                    self.assertEqual(app.query_one("#ef_flags", Input).value, "0x1")
+                    self.assertEqual(
+                        {row["key"] for row in app._edit_extra_rows.values()},
+                        {"token", "opaque"},
                     )
             finally:
                 os.chdir(previous_cwd)
