@@ -1570,9 +1570,12 @@ class NoxenApp(App):
         self._session_device_id = ""
         self._session_api_level = None
         self._cleanup_system_server_session(async_cleanup=True)
-        self.set_intercept_state(False)
+        generation = self._connection_generation
 
         def _do():
+            if generation != self._connection_generation:
+                return
+            self.set_intercept_state(False)
             try:
                 self.query_one("#session_bar").remove_class("connecting")
                 self.query_one("#session_bar").remove_class("connected")
@@ -1584,9 +1587,9 @@ class NoxenApp(App):
                 self.query_one("#home_error", Label).update(message)
             except Exception:
                 pass
+            self._clear_intercept_output()
             self._clear_info_tab()
             self.notify(message, severity="error", timeout=6)
-            generation = self._connection_generation
             self.set_timer(3, lambda: self._clear_session_error_state(generation))
 
         try:
@@ -1602,9 +1605,12 @@ class NoxenApp(App):
         self._session_device_id = ""
         self._session_api_level = None
         self._cleanup_system_server_session(async_cleanup=True)
-        self.set_intercept_state(False)
+        generation = self._connection_generation
 
         def _do():
+            if generation != self._connection_generation:
+                return
+            self.set_intercept_state(False)
             try:
                 self.query_one("#session_bar").remove_class("connection-error")
                 self.query_one("#session_bar").remove_class("connecting")
@@ -1615,6 +1621,7 @@ class NoxenApp(App):
                 self.query_one("#home_disconnect", Button).disabled = True
             except Exception:
                 pass
+            self._clear_intercept_output()
             self._clear_info_tab()
         try:
             self.call_from_thread(_do)
@@ -1640,6 +1647,7 @@ class NoxenApp(App):
             self.query_one("#home_disconnect", Button).disabled = True
         except Exception:
             pass
+        self._clear_intercept_output()
         self._clear_info_tab()
 
     def _clear_session_error_state(self, generation: int | None = None) -> None:
