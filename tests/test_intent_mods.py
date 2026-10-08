@@ -69,7 +69,11 @@ class IntentModsTests(unittest.TestCase):
     def test_parse_flag_value(self):
         self.assertEqual(parse_flag_value("16"), 16)
         self.assertEqual(parse_flag_value("0x10"), 16)
+        self.assertEqual(parse_flag_value("-2147483648"), -2147483648)
+        self.assertEqual(parse_flag_value("0xFFFFFFFF"), 0xFFFFFFFF)
         self.assertIsNone(parse_flag_value("not-an-int"))
+        self.assertIsNone(parse_flag_value("-2147483649"))
+        self.assertIsNone(parse_flag_value("0x100000000"))
 
     def test_parse_intent_mod_command(self):
         self.assertEqual(
@@ -161,7 +165,7 @@ class IntentModsTests(unittest.TestCase):
         )
         self.assertEqual(
             parse_intent_mod_command(["+flag", "not-an-int"]),
-            (None, "[red]Flag must be an integer[/red]"),
+            (None, "[red]Flag must be a 32-bit integer or bit mask[/red]"),
         )
         self.assertEqual(
             parse_intent_mod_command(["+x"]),

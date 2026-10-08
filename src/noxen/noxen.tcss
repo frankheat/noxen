@@ -30,7 +30,8 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 #intercept_header #intercept_toggle,
 #intercept_header #btn_forward,
 #intercept_header #btn_drop,
-#intercept_header #btn_edit {
+#intercept_header #btn_edit,
+#intercept_header #btn_cancel_edit {
     height: 3;
     margin: 0 1 0 0;
     border: round $foreground-muted;
@@ -42,10 +43,12 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 #intercept_header #btn_forward:focus,
 #intercept_header #btn_drop:focus,
 #intercept_header #btn_edit:focus,
+#intercept_header #btn_cancel_edit:focus,
 #intercept_header #intercept_toggle:hover,
 #intercept_header #btn_forward:hover,
 #intercept_header #btn_drop:hover,
-#intercept_header #btn_edit:hover {
+#intercept_header #btn_edit:hover,
+#intercept_header #btn_cancel_edit:hover {
     border: round $foreground-muted;
     background: $boost;
     background-tint: $surface 0%;
@@ -71,6 +74,10 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     background: $boost;
     color: $secondary;
 }
+#intercept_header #btn_forward.apply-forward {
+    width: 21;
+    min-width: 21;
+}
 #intercept_header #btn_drop.drop-ready,
 #intercept_header #btn_drop.drop-ready:focus,
 #intercept_header #btn_drop.drop-ready:hover {
@@ -84,6 +91,18 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     border: round $secondary;
     background: $boost;
     color: $secondary-lighten-2;
+}
+#intercept_header #btn_cancel_edit {
+    display: none;
+    border: round $foreground-muted;
+    background: $panel;
+    color: $foreground;
+}
+#intercept_header #btn_cancel_edit:focus,
+#intercept_header #btn_cancel_edit:hover {
+    border: round $accent;
+    background: $boost;
+    color: $accent;
 }
 #intercept_header #btn_forward:disabled,
 #intercept_header #btn_drop:disabled,
@@ -571,12 +590,25 @@ Switch.-on > .switch--slider {
     padding: 1 2;
     overflow-y: auto;
 }
+#ef_mode_label {
+    height: 1;
+    margin-bottom: 1;
+    color: $secondary;
+    text-style: bold;
+}
 .ef_row { height: 1; align: left middle; margin-bottom: 1; }
 .ef_label { width: 12; content-align: left middle; }
-.ef_section { text-style: bold; color: $warning; margin: 1 0; }
+.ef_section_header { height: 3; align: left middle; }
+.ef_section { width: auto; text-style: bold; color: $warning; }
+.ef_section_spacer { width: 1fr; }
 .ef_x_row { height: 1; align: left middle; margin-bottom: 1; }
 .ef_x_key_label { width: 18; }
 .ef_x_type_label { width: 25; color: $foreground-muted; }
+.ef_x_columns { height: 1; color: $foreground-muted; text-style: bold; }
+.ef_x_key_header { width: 18; }
+.ef_x_type_header { width: 25; }
+.ef_x_value_header { width: 1fr; padding-left: 2; }
+.ef_x_remove_header { width: 3; }
 .ef_x_key_input { width: 18; padding: 0; }
 .ef_x_type_select { width: 25; height: 1; }
 .ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1; }

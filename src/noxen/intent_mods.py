@@ -303,9 +303,12 @@ def apply_mods_to_entry(entry: dict, mods: list[IntentMod]) -> None:
 
 def parse_flag_value(value: str) -> int | None:
     try:
-        return int(str(value), 0)
+        parsed = int(str(value), 0)
     except (TypeError, ValueError):
         return None
+    # Intent flags are a Java int. Accept its signed range and the equivalent
+    # unsigned bit-mask notation commonly used for Android flags.
+    return parsed if -(1 << 31) <= parsed <= (1 << 32) - 1 else None
 
 
 def _single_value_mod(parts: list[str], mod_type: str, usage: str) -> IntentModParseResult:
@@ -318,7 +321,7 @@ def _flag_mod(parts: list[str], mod_type: str, usage: str) -> IntentModParseResu
     if len(parts) < 2:
         return None, usage
     if parse_flag_value(parts[1]) is None:
-        return None, "[red]Flag must be an integer[/red]"
+        return None, "[red]Flag must be a 32-bit integer or bit mask[/red]"
     return (mod_type, "", parts[1], ""), None
 
 

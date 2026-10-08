@@ -121,6 +121,13 @@ INTERCEPT_ACTION_BUTTON_CLASSES = (
 )
 
 
+class _EditValidationError(ValueError):
+    def __init__(self, message: str, selector: str, title: str = "Invalid extra"):
+        super().__init__(message)
+        self.selector = selector
+        self.title = title
+
+
 def markup_renderable(markup: str, dark: bool = True) -> Text:
     """Render a builder's markup string without Rich emoji-shortcode substitution.
 
@@ -246,6 +253,10 @@ class NoxenApp(App):
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
         Binding("ctrl+r", "info_refresh", "Refresh", show=True, priority=True),
         Binding("ctrl+t", "info_toggle_rail", "Panel", show=True, priority=True),
+        Binding("ctrl+f", "forward_current", "Forward", show=True),
+        Binding("ctrl+f", "apply_edit", "Apply & Forward", show=True),
+        Binding("ctrl+d", "drop_current", "Drop", show=True, priority=True),
+        Binding("escape", "cancel_edit", "Cancel edit", show=True),
     ]
 
     def __init__(self, cli_args):
@@ -278,7 +289,9 @@ class NoxenApp(App):
         self._current_intercept_id: int | None = None
         self._current_decision_id: str | None = None
         self._current_intercepted_entry: dict | None = None
+        self._intent_blocked = False
         self._edit_mode = False
+        self._edit_forward_pending = False
         self._edit_extra_counter = 0
         self._edit_extra_rows: dict = {}
         self._edit_removed_keys: set = set()
@@ -459,16 +472,34 @@ class NoxenApp(App):
         self.query_one("#intercept_output").display = False
         ef = self.query_one("#edit_form")
         ef.display = True
+        ef.disabled = False
         ef.scroll_home(animate=False)
-        self.query_one("#btn_edit").disabled = True
         self._edit_mode = True
+        self._edit_forward_pending = False
+        forward_button = self.query_one("#btn_forward", Button)
+        forward_button.label = "Apply & Forward"
+        forward_button.add_class("apply-forward")
+        self.query_one("#btn_cancel_edit", Button).display = True
+        edit_button = self.query_one("#btn_edit", Button)
+        edit_button.display = False
+        self.refresh_bindings()
 
     def _exit_edit_mode(self):
         if not self._edit_mode:
             return
         self.query_one("#intercept_output").display = True
-        self.query_one("#edit_form").display = False
+        edit_form = self.query_one("#edit_form")
+        edit_form.display = False
+        edit_form.disabled = False
         self._edit_mode = False
+        self._edit_forward_pending = False
+        forward_button = self.query_one("#btn_forward", Button)
+        forward_button.label = "Forward"
+        forward_button.remove_class("apply-forward")
+        self.query_one("#btn_cancel_edit", Button).display = False
+        self.query_one("#btn_cancel_edit", Button).disabled = False
+        self.query_one("#btn_edit", Button).display = True
+        self.refresh_bindings()
         try:
             still_intercepted = "intercepted" in self.query_one("#intercept_input_bar").classes
             self.query_one("#btn_edit").disabled = not still_intercepted
@@ -477,6 +508,24 @@ class NoxenApp(App):
                 self.query_one("#btn_drop", Button).disabled = False
         except Exception:
             pass
+
+    def _set_edit_forward_pending(self, pending: bool) -> None:
+        self._edit_forward_pending = pending
+        if not self._edit_mode:
+            return
+        forward = self.query_one("#btn_forward", Button)
+        forward.label = "Applying…" if pending else "Apply & Forward"
+        forward.disabled = pending
+        self.query_one("#btn_drop", Button).disabled = pending
+        self.query_one("#btn_cancel_edit", Button).disabled = pending
+        self.query_one("#edit_form").disabled = pending
+        self.refresh_bindings()
+
+    def _restore_editor_after_forward_failure(self, message: str) -> None:
+        if not self._edit_mode:
+            return
+        self._set_edit_forward_pending(False)
+        self.notify(message, title="Apply & Forward failed", severity="error")
 
     def _add_edit_category_row(self, value: str, is_new: bool):
         self._edit_cat_counter += 1
@@ -569,7 +618,10 @@ class NoxenApp(App):
                 if new_val != orig_val:
                     error = validate_extra_value(row_info["type"], new_val)
                     if error:
-                        raise ValueError(f"{row_info['key']}: {error}")
+                        raise _EditValidationError(
+                            f"{row_info['key']}: {error}",
+                            f"#ef_xv_{n}",
+                        )
                     mods.append(("extra_rem", row_info["key"], "", ""))
                     mods.append(("extra_add", row_info["key"], new_val, row_info["type"]))
             except ValueError:
@@ -577,6 +629,11 @@ class NoxenApp(App):
             except Exception:
                 pass
 
+        active_keys = {
+            row_info["key"]
+            for row_info in self._edit_extra_rows.values()
+            if not row_info["is_new"] and row_info["key"] not in self._edit_removed_keys
+        }
         for n, row_info in self._edit_extra_rows.items():
             if not row_info["is_new"]:
                 continue
@@ -584,23 +641,41 @@ class NoxenApp(App):
                 key = self.query_one(f"#ef_xk_{n}", Input).value.strip()
                 type_val = str(self.query_one(f"#ef_xt_{n}", Select).value)
                 val = self.query_one(f"#ef_xv_{n}", Input).value
-                if key:
-                    error = validate_extra_value(type_val, val)
-                    if error:
-                        raise ValueError(f"{key}: {error}")
-                    mods.append(("extra_add", key, val, type_val))
-            except ValueError:
+                if not key:
+                    if val:
+                        raise _EditValidationError(
+                            "Extra key is required",
+                            f"#ef_xk_{n}",
+                        )
+                    continue
+                if key in active_keys:
+                    raise _EditValidationError(
+                        f"Duplicate extra key: {key}",
+                        f"#ef_xk_{n}",
+                    )
+                active_keys.add(key)
+                error = validate_extra_value(type_val, val)
+                if error:
+                    raise _EditValidationError(
+                        f"{key}: {error}",
+                        f"#ef_xv_{n}",
+                    )
+                mods.append(("extra_add", key, val, type_val))
+            except _EditValidationError:
                 raise
             except Exception:
                 pass
 
         old_flags = parse_flag_value(info.get("flags") or 0) or 0
-        try:
-            new_flags_str = self.query_one("#ef_flags", Input).value.strip()
-            new_flags = parse_flag_value(new_flags_str) if new_flags_str else 0
-        except Exception:
-            new_flags = old_flags
-        if new_flags is not None and new_flags != old_flags:
+        new_flags_str = self.query_one("#ef_flags", Input).value.strip()
+        new_flags = parse_flag_value(new_flags_str) if new_flags_str else 0
+        if new_flags is None:
+            raise _EditValidationError(
+                "Flags must be a 32-bit integer or bit mask, for example 0x10000000",
+                "#ef_flags",
+                title="Invalid flags",
+            )
+        if new_flags != old_flags:
             if old_flags:
                 mods.append(("flag_rem", "", str(old_flags), ""))
             if new_flags:
@@ -609,22 +684,29 @@ class NoxenApp(App):
         return mods
 
     def _forward_from_edit_mode(self):
-        """Main-thread helper: collect mods, exit edit mode, then forward."""
-        if not self._edit_mode:
+        """Validate the form and keep it open until Frida confirms forwarding."""
+        if not self._edit_mode or self._edit_forward_pending:
             return
         try:
             mods = self._collect_edit_mods()
-        except ValueError as error:
-            self.notify(str(error), title="Invalid extra", severity="error")
+        except _EditValidationError as error:
+            self.notify(str(error), title=error.title, severity="error")
+            try:
+                self.query_one(error.selector).focus()
+            except Exception:
+                pass
             return
-        self._exit_edit_mode()
+        self._set_edit_forward_pending(True)
         self._apply_mods_and_forward_worker(mods)
 
     @work(thread=True)
     def _apply_mods_and_forward_worker(self, mods: list):
         try:
             if not self.frida_session or not self.frida_session.is_ready():
-                self.write_cmd("[red]Session not ready[/red]")
+                self.call_from_thread(
+                    self._restore_editor_after_forward_failure,
+                    "Session not ready",
+                )
                 return
             decision_id = self._current_decision_id
             intent_id = self._current_intercept_id
@@ -632,15 +714,24 @@ class NoxenApp(App):
             all_mods = list(self._staged_mods) + list(mods)
             for mod_type, key, val, extra_type in mods:
                 if not self.frida_session.stage_mod(mod_type, key, val, extra_type, decision_id):
-                    self.write_cmd("[red]No matching intent blocked to modify[/red]")
+                    self.call_from_thread(
+                        self._restore_editor_after_forward_failure,
+                        "No matching intent is blocked to modify",
+                    )
                     return
             if not self.frida_session.forward(decision_id):
-                self.write_cmd("[red]No matching intent blocked to forward[/red]")
+                self.call_from_thread(
+                    self._restore_editor_after_forward_failure,
+                    "No matching intent is blocked to forward",
+                )
                 return
             self.set_intercept_state(False)
             self._finalize_forward(intent_id, resolved, all_mods)
         except Exception as e:
-            self.write_cmd(f"[red]Modify & forward failed: {e}[/red]")
+            self.call_from_thread(
+                self._restore_editor_after_forward_failure,
+                f"Modify and forward failed: {e}",
+            )
 
     def _stage_current_mod(self, mod_type: str, key: str, val: str, extra_type: str = "") -> None:
         if self._current_intercepted_entry is None or self._current_intercept_id is None:
@@ -714,6 +805,9 @@ class NoxenApp(App):
             self.process_command_worker("drop")
         elif event.button.id == "btn_edit":
             self._enter_edit_mode()
+            return
+        elif event.button.id == "btn_cancel_edit":
+            self._exit_edit_mode()
             return
         elif event.button.id == "ef_add_extra":
             self._add_edit_extra_row("", None, "", is_new=True)
@@ -969,6 +1063,7 @@ class NoxenApp(App):
                     Button("Forward", id="btn_forward", variant="default", disabled=True),
                     Button("Drop", id="btn_drop", variant="default", disabled=True),
                     Button("✎", id="btn_edit", disabled=True),
+                    Button("Cancel edit", id="btn_cancel_edit"),
                     Label("", id="intercept_header_spacer"),
                     Button("Filters", id="btn_intercept_filters"),
                     Button("Stack", id="btn_intercept_stack"),
@@ -976,25 +1071,33 @@ class NoxenApp(App):
                 )
                 yield RichLog(id="intercept_output", markup=True, highlight=False, auto_scroll=False)
                 with VerticalScroll(id="edit_form"):
+                    yield Label("EDITING CAPTURED INTENT", id="ef_mode_label")
                     with Horizontal(classes="ef_row"):
                         yield Label("Action", classes="ef_label")
                         yield Input(id="ef_action", placeholder="e.g. android.intent.action.VIEW")
                     with Horizontal(classes="ef_row"):
                         yield Label("Data URI", classes="ef_label")
                         yield Input(id="ef_data", placeholder="e.g. https://example.com")
-                    yield Rule()
-                    yield Label("Categories", classes="ef_section")
-                    yield Vertical(id="ef_categories")
-                    yield Button("+ category", id="ef_add_cat")
-                    yield Rule()
-                    yield Label("Extras", classes="ef_section")
-                    yield Vertical(id="ef_extras")
-                    yield Button("+ extra", id="ef_add_extra")
-                    yield Rule()
-                    yield Label("Flags", classes="ef_section")
                     with Horizontal(classes="ef_row"):
-                        yield Label("Value", classes="ef_label")
+                        yield Label("Flags", classes="ef_label")
                         yield Input(id="ef_flags", placeholder="e.g. 0x10000000")
+                    yield Rule()
+                    with Horizontal(classes="ef_section_header"):
+                        yield Label("Categories", classes="ef_section")
+                        yield Label("", classes="ef_section_spacer")
+                        yield Button("+ Add", id="ef_add_cat")
+                    yield Vertical(id="ef_categories")
+                    yield Rule()
+                    with Horizontal(classes="ef_section_header"):
+                        yield Label("Extras", classes="ef_section")
+                        yield Label("", classes="ef_section_spacer")
+                        yield Button("+ Add", id="ef_add_extra")
+                    with Horizontal(classes="ef_x_columns"):
+                        yield Label("Key", classes="ef_x_key_header")
+                        yield Label("Type", classes="ef_x_type_header")
+                        yield Label("Value", classes="ef_x_value_header")
+                        yield Label("", classes="ef_x_remove_header")
+                    yield Vertical(id="ef_extras")
                 yield RichLog(id="intercept_cmd_output", markup=True, highlight=False)
                 yield OptionList(id="intercept_cmd_suggestions")
                 yield Vertical(
@@ -1103,6 +1206,7 @@ class NoxenApp(App):
             "btn_forward",
             "btn_drop",
             "btn_edit",
+            "btn_cancel_edit",
             "btn_intercept_filters",
             "btn_intercept_stack",
             "btn_history_filters",
@@ -2012,6 +2116,8 @@ class NoxenApp(App):
 
 
     def set_intercept_state(self, is_intercepted):
+        self._intent_blocked = bool(is_intercepted)
+
         def _do_update():
             try:
                 bar = self.query_one("#intercept_input_bar")
@@ -2035,6 +2141,7 @@ class NoxenApp(App):
                 edit.disabled = not is_intercepted
                 if not is_intercepted and self._edit_mode:
                     self._exit_edit_mode()
+                self.refresh_bindings()
             except Exception:
                 pass
             try:
@@ -2066,6 +2173,17 @@ class NoxenApp(App):
         self.write_log(log_success("History cleared", "history"), notify=True)
 
     def check_action(self, action: str, parameters) -> bool | None:
+        intercept_blocked = (
+            self._active_tab == "tab_intercept"
+            and self._intent_blocked
+            and not self.screen.is_modal
+        )
+        if action == "forward_current":
+            return intercept_blocked and not self._edit_mode
+        if action == "drop_current":
+            return intercept_blocked and not self._edit_forward_pending
+        if action in ("apply_edit", "cancel_edit"):
+            return intercept_blocked and self._edit_mode and not self._edit_forward_pending
         if action in ("info_refresh", "info_toggle_rail"):
             return self._active_tab == "tab_info"
         if action == "clear_log":
@@ -2206,12 +2324,19 @@ class NoxenApp(App):
         elif self._active_tab == "tab_history":
             self._toggle_history_command_bar()
 
-    def on_key(self, event):
-        if event.key == "ctrl+enter" and self._edit_mode:
-            self._forward_from_edit_mode()
-            event.stop()
-            return
+    def action_apply_edit(self):
+        self._forward_from_edit_mode()
 
+    def action_forward_current(self):
+        self.process_command_worker("forward")
+
+    def action_drop_current(self):
+        self.process_command_worker("drop")
+
+    def action_cancel_edit(self):
+        self._exit_edit_mode()
+
+    def on_key(self, event):
         focused = self.focused
         if not focused:
             return
