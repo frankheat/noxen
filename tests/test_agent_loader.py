@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -5,12 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from noxen.agent_loader import (
+    HookConfigError,
     PASSTHROUGH_AGENT,
     PASSTHROUGH_SYSTEM_SERVER_AGENT,
     load_agent_script,
     load_hook_config,
     load_json_hooks,
     load_system_server_script,
+    validate_hook_config,
 )
 
 
@@ -31,16 +34,18 @@ class AgentLoaderTests(unittest.TestCase):
             os.makedirs("config")
             default = os.path.join(tmp, "config", "hooks.json")
             with open(default, "w") as f:
-                f.write('[{"clazz": "Default", "method": "run", "args": []}]')
+                f.write('[{"clazz": "Default", "method": "run", "args": ["android.content.Intent"]}]')
             custom = os.path.join(tmp, "custom.json")
             with open(custom, "w") as f:
-                f.write('[{"clazz": "Custom", "method": "run", "args": []}]')
+                f.write('[{"clazz": "Custom", "method": "run", "args": ["android.content.Intent"]}]')
 
             with patch("noxen.agent_loader.DEFAULT_HOOKS_FILE", default):
                 result = load_hook_config(custom)
 
             self.assertEqual([hook["clazz"] for hook in result.hooks], ["Default", "Custom"])
             self.assertEqual(result.messages, [])
+            self.assertEqual(result.sources, ("default hook[0]", "custom hook[0]"))
+            self.assertEqual(result.custom_count, 1)
 
     def test_load_hook_config_reports_invalid_custom_json(self):
         with self._temp_cwd():
@@ -52,10 +57,82 @@ class AgentLoaderTests(unittest.TestCase):
                 f.write("{bad-json")
 
             with patch("noxen.agent_loader.DEFAULT_HOOKS_FILE", default):
-                result = load_hook_config("bad.json")
+                with self.assertRaises(HookConfigError) as raised:
+                    load_hook_config("bad.json")
 
-            self.assertEqual(result.hooks, [])
-            self.assertIn("Invalid JSON in bad.json", result.messages[0])
+            self.assertIn("invalid JSON at line 1", str(raised.exception))
+
+    def test_validate_hook_config_rejects_non_array_root(self):
+        with self.assertRaises(HookConfigError) as raised:
+            validate_hook_config({"clazz": "Example"}, "custom")
+
+        self.assertEqual(raised.exception.details, ("top-level value must be a JSON array",))
+
+    def test_validate_hook_config_reports_precise_field_errors(self):
+        with self.assertRaises(HookConfigError) as raised:
+            validate_hook_config([
+                None,
+                {"clazz": "", "method": 7, "args": ["android.content.Intent", ""], "minApi": True},
+            ], "custom")
+
+        self.assertIn("hook[0] must be an object", raised.exception.details)
+        self.assertIn("hook[1].clazz must be a non-empty string", raised.exception.details)
+        self.assertIn("hook[1].method must be a non-empty string", raised.exception.details)
+        self.assertIn("hook[1].args[1] must be a non-empty string", raised.exception.details)
+        self.assertIn("hook[1].minApi must be a positive integer", raised.exception.details)
+
+    def test_validate_hook_config_rejects_unsupported_non_intent_hook(self):
+        with self.assertRaises(HookConfigError) as raised:
+            validate_hook_config([
+                {"clazz": "Example", "method": "run", "args": ["int"]},
+            ], "custom")
+
+        self.assertIn("args must contain android.content.Intent", str(raised.exception))
+
+    def test_validate_hook_config_normalizes_values_and_warns_about_unknown_fields(self):
+        hooks, warnings = validate_hook_config([
+            {
+                "clazz": " Example ",
+                "method": " onNewIntent ",
+                "args": [" android.content.Intent "],
+                "note": "ignored",
+            },
+        ], "custom")
+
+        self.assertEqual(hooks, [{
+            "clazz": "Example",
+            "method": "onNewIntent",
+            "args": ["android.content.Intent"],
+        }])
+        self.assertEqual(warnings, ["hook[0]: ignored unknown field(s): note"])
+
+    def test_load_hook_config_deduplicates_custom_hooks(self):
+        hook = {"clazz": "Example", "method": "onNewIntent", "args": ["android.content.Intent"]}
+        with self._temp_cwd() as tmp:
+            os.makedirs("config")
+            default = os.path.join(tmp, "config", "hooks.json")
+            Path(default).write_text(json.dumps([hook]), encoding="utf-8")
+            custom = os.path.join(tmp, "custom.json")
+            Path(custom).write_text(json.dumps([hook, hook]), encoding="utf-8")
+
+            with patch("noxen.agent_loader.DEFAULT_HOOKS_FILE", default):
+                result = load_hook_config(custom)
+
+        self.assertEqual(result.hooks, [hook])
+        self.assertEqual(result.custom_count, 0)
+        self.assertEqual(len(result.messages), 2)
+        self.assertTrue(all("Duplicate custom hook" in message for message in result.messages))
+
+    def test_load_hook_config_rejects_directory_path(self):
+        with self._temp_cwd() as tmp:
+            os.makedirs("config")
+            default = os.path.join(tmp, "config", "hooks.json")
+            Path(default).write_text("[]", encoding="utf-8")
+            with patch("noxen.agent_loader.DEFAULT_HOOKS_FILE", default):
+                with self.assertRaises(HookConfigError) as raised:
+                    load_hook_config(tmp)
+
+        self.assertIn("path is a directory", str(raised.exception))
 
     def test_load_agent_script_prefers_bundle_and_appends_extra(self):
         with self._temp_cwd():
@@ -145,7 +222,10 @@ class AgentLoaderTests(unittest.TestCase):
             source = root / "source" / "config" / "hooks.json"
             packaged = root / "runtime" / "config" / "hooks.json"
             packaged.parent.mkdir(parents=True)
-            packaged.write_text('[{"clazz": "Packaged", "method": "run", "args": []}]', encoding="utf-8")
+            packaged.write_text(
+                '[{"clazz": "Packaged", "method": "run", "args": ["android.content.Intent"]}]',
+                encoding="utf-8",
+            )
 
             with patch("noxen.agent_loader.SOURCE_DEFAULT_HOOKS_FILE", source):
                 with patch("noxen.agent_loader.DEFAULT_HOOKS_FILE", source):

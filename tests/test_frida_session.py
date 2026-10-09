@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from noxen.agent_loader import HooksLoadResult
+from noxen.agent_loader import HookConfigError, HooksLoadResult
 from noxen.filters import FilterManager
 from noxen.frida_session import FridaSession, SessionConfig
 
@@ -65,6 +65,33 @@ class FridaSessionMessageTests(unittest.TestCase):
         self.assertEqual(starts, [{"noxenEvent": "hold_start", "holdId": "h1"}])
         self.assertEqual(ends, [{"noxenEvent": "hold_end", "holdId": "h1"}])
         self.assertEqual(history, [])
+
+    def test_async_hook_report_is_logged_outside_history(self):
+        logs = []
+        history = []
+        session = FridaSession(
+            SessionConfig(attach_pid=1),
+            FilterManager(),
+            log_cb=logs.append,
+            intercept_cb=lambda _state: None,
+            get_stack=lambda: (False, 0),
+            history_cb=lambda payload, counter: history.append((payload, counter)),
+        )
+        session._hooks_result = HooksLoadResult(
+            hooks=[{}], messages=[], sources=("custom hook[0]",), custom_count=1,
+        )
+
+        session.on_message({
+            "type": "send",
+            "payload": {
+                "noxenEvent": "hook_report",
+                "report": {"installed": 1, "installedIndices": [0], "skipped": [], "failed": []},
+            },
+        }, None)
+
+        self.assertEqual(history, [])
+        self.assertEqual(session._history_counter, 0)
+        self.assertIn("Hooks: 1 installed, 0 skipped, 0 failed", logs[-1])
 
     def test_regular_payload_still_reaches_history(self):
         history = []
@@ -244,6 +271,61 @@ class FridaSessionMessageTests(unittest.TestCase):
 
 
 class FridaSessionLifecycleTests(unittest.TestCase):
+    def test_hook_config_failure_is_reported_instead_of_killing_connect_thread(self):
+        error = HookConfigError("custom", ["top-level value must be a JSON array"])
+        failures = []
+        logs = []
+        session = FridaSession(
+            SessionConfig(attach_name="Example"),
+            FilterManager(),
+            log_cb=logs.append,
+            intercept_cb=lambda _state: None,
+            get_stack=lambda: (False, 0),
+        )
+        session.connection_failed_cb = lambda stage, exc: failures.append((stage, exc))
+
+        with patch("noxen.frida_session.load_hook_config", side_effect=error):
+            session.connect("device-1")
+            session._connect_thread.join(timeout=2)
+
+        self.assertEqual(failures, [("configuration", error)])
+        self.assertIn("Connection failed", logs[-1])
+
+    def test_hook_registration_report_identifies_sources_and_failures(self):
+        logs = []
+        session = FridaSession(
+            SessionConfig(attach_pid=1),
+            FilterManager(),
+            log_cb=logs.append,
+            intercept_cb=lambda _state: None,
+            get_stack=lambda: (False, 0),
+        )
+        hooks = HooksLoadResult(
+            hooks=[{}, {}, {}],
+            messages=[],
+            sources=("default hook[0]", "custom hook[0]", "custom hook[1]"),
+            custom_count=2,
+        )
+        warnings = []
+        session.hook_warning_cb = warnings.append
+
+        session._log_hook_report({
+            "installed": 1,
+            "installedIndices": [0],
+            "skipped": [{"index": 1, "reason": "requires API 34, device API 31"}],
+            "failed": [{
+                "index": 2,
+                "signature": "dev.example.Receiver.onReceive(android.content.Intent)",
+                "error": "overload not found",
+            }],
+        }, hooks)
+
+        self.assertIn("Skipped custom hook[0]", logs[0])
+        self.assertIn("Failed custom hook[1]", logs[1])
+        self.assertIn("Hooks: 1 installed, 1 skipped, 1 failed", logs[2])
+        self.assertIn("No custom hooks were installed", logs[3])
+        self.assertEqual(warnings, ["No custom hooks were installed. See Log for details."])
+
     def test_connection_failure_reports_stage_and_exception(self):
         class ServerNotRunningError(Exception):
             pass

@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import datetime
 from importlib.metadata import version as pkg_version, PackageNotFoundError
+from pathlib import Path
 
 from textual import events
 from textual import work
@@ -53,6 +54,7 @@ from noxen.app_info import (
     sort_components,
     sort_permissions,
 )
+from noxen.agent_loader import HookConfigError, load_hook_config
 from noxen.db import ProjectDB
 from noxen.exporting import (
     history_entries_label,
@@ -75,7 +77,7 @@ from noxen.intent_mods import (
     parse_intent_mod_command,
     validate_extra_value,
 )
-from noxen.logging_ui import is_debug_log, log_debug, log_info, log_success, log_warning
+from noxen.logging_ui import is_debug_log, log_debug, log_error, log_info, log_success, log_warning
 from noxen.modals import (
     ColumnSelectModal,
     FileBrowserModal,
@@ -1253,10 +1255,26 @@ class NoxenApp(App):
     def _set_path_input(self, widget_id: str, path: str | None) -> None:
         if path:
             try:
+                if widget_id == "home_hooks_path":
+                    path = str(Path(path).expanduser().resolve())
                 self.query_one(f"#{widget_id}", Input).value = path
+                if widget_id == "home_hooks_path":
+                    try:
+                        load_hook_config(path)
+                    except HookConfigError as error:
+                        self._show_hook_config_error(error)
+                        return
+                    self.query_one("#home_error", Label).update("")
                 self._save_home_path(widget_id, path)
             except Exception:
                 pass
+
+    def _show_hook_config_error(self, error: HookConfigError) -> None:
+        message = f"Hook config: {error.details[0]}"
+        self.query_one("#home_error", Label).update(message)
+        for detail in error.details:
+            self.write_log(log_error(f"{error.label}: {detail}", "loader"))
+        self.notify(message, severity="error", timeout=6)
 
     def _save_home_path(self, widget_id: str, path: str) -> None:
         if widget_id == "home_hooks_path":
@@ -1283,6 +1301,18 @@ class NoxenApp(App):
 
         self.query_one("#home_error", Label).update("")
 
+        hooks_path_raw = self.query_one("#home_hooks_path", Input).value.strip()
+        script_path_raw = self.query_one("#home_script_path", Input).value.strip()
+        if hooks_path_raw:
+            hooks_path_raw = str(Path(hooks_path_raw).expanduser().resolve())
+            self.query_one("#home_hooks_path", Input).value = hooks_path_raw
+        hooks_path = hooks_path_raw or None
+        try:
+            validated_hooks = load_hook_config(hooks_path)
+        except HookConfigError as error:
+            self._show_hook_config_error(error)
+            return
+
         if self.frida_session:
             self.frida_session.cleanup()
             self.frida_session = None
@@ -1290,16 +1320,14 @@ class NoxenApp(App):
         self._startup_messages.clear()
         self.set_intercept_state(False)
 
-        hooks_path_raw = self.query_one("#home_hooks_path", Input).value.strip()
-        script_path_raw = self.query_one("#home_script_path", Input).value.strip()
         self._save_home_paths(hooks_path_raw, script_path_raw)
-        hooks_path = hooks_path_raw or None
         script_path = script_path_raw or None
         self._init_session(SessionConfig(
             spawn_package=target if mode == "f" else None,
             attach_name=target if mode == "n" else None,
             attach_pid=int(target) if mode == "p" else None,
             custom_hooks=hooks_path,
+            validated_hooks=validated_hooks,
             extra_script=script_path,
         ))
         for msg in self._startup_messages:
@@ -1353,12 +1381,28 @@ class NoxenApp(App):
 
         session = self.frida_session
         session.api_level_cb = lambda sdk_int, session=session: self._on_api_level(sdk_int, session)
+        session.hook_warning_cb = (
+            lambda message, session=session: self._on_hook_warning(message, session)
+        )
         session.connected_cb = lambda session=session: self._on_connected(session)
         session.connection_failed_cb = (
             lambda stage, error, session=session: self._on_connection_failed(stage, error, session)
         )
         session.disconnected_cb = lambda session=session: self._on_disconnected(session)
         session.connect(device_id)
+
+    def _on_hook_warning(self, message: str, session=None) -> None:
+        if session is not None and session is not self.frida_session:
+            return
+
+        def _do():
+            if session is None or session is self.frida_session:
+                self.notify(message, severity="warning", timeout=6)
+
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            self.call_from_thread(_do)
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "info_comp_exposed":
@@ -1557,6 +1601,8 @@ class NoxenApp(App):
             return "Connection failed. The selected device did not respond in time."
         if error_name in ("TransportError", "ProtocolError"):
             return "Connection failed. Communication with the selected device was lost."
+        if stage == "configuration":
+            return "Connection failed. The hook configuration is invalid."
         if stage in ("agent", "hooks", "resume"):
             return "Connection failed. The target was reached, but the noxen agent could not start."
         return "Connection failed. See Log for technical details."

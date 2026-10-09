@@ -14435,6 +14435,9 @@ std_string_c_str (StdString * self)
     const method = targetWrapper[methodName].overload.apply(targetWrapper[methodName], overloadArgs);
     const returnType = returnTypeName(method);
     const isPendingIntent = className === "android.app.PendingIntent";
+    if (methodName === "getIntent" && returnType !== "android.content.Intent") {
+      throw new Error("getIntent return type is " + (returnType || "unknown") + ", expected android.content.Intent");
+    }
     let broadcastPermIndex = -1;
     if (methodName === "sendBroadcast" || methodName === "sendOrderedBroadcast") {
       broadcastPermIndex = overloadArgs.indexOf("java.lang.String");
@@ -14479,29 +14482,52 @@ std_string_c_str (StdString * self)
   }
   rpc.exports = {
     proxy: function(hookConfig) {
-      Java.perform(function() {
-        send("[*] Initializing app hooks");
-        ObjectJava = Java.use("java.lang.Object");
-        UriJava = Java.use("android.net.Uri");
-        if (lock === null) lock = ObjectJava.$new();
-        var sdkInt = Java.use("android.os.Build$VERSION").SDK_INT.value;
-        hookConfig.forEach(function(h) {
-          if (h.minApi && sdkInt < h.minApi) {
-            var sig = h.method + "(" + h.args.map(function(a) {
-              return a.split(".").pop();
-            }).join(", ") + ")";
-            send("[~] Skipping " + h.clazz + "." + sig + " (requires API " + h.minApi + ", device API " + sdkInt + ")");
-            return;
-          }
+      var report = { installed: 0, installedIndices: [], skipped: [], failed: [] };
+      try {
+        Java.perform(function() {
           try {
-            var targetClass = Java.use(h.clazz);
-            createHook(targetClass, h.clazz, h.method, h.args);
+            send("[*] Initializing app hooks");
+            ObjectJava = Java.use("java.lang.Object");
+            UriJava = Java.use("android.net.Uri");
+            if (lock === null) lock = ObjectJava.$new();
+            var sdkInt = Java.use("android.os.Build$VERSION").SDK_INT.value;
+            hookConfig.forEach(function(h, index) {
+              var signature = "unknown signature";
+              try {
+                if (!h || typeof h.clazz !== "string" || typeof h.method !== "string" || !Array.isArray(h.args)) {
+                  throw new Error("invalid hook definition received by agent");
+                }
+                signature = h.clazz + "." + h.method + "(" + h.args.join(", ") + ")";
+                if (h.minApi && sdkInt < h.minApi) {
+                  report.skipped.push({
+                    index,
+                    signature,
+                    reason: "requires API " + h.minApi + ", device API " + sdkInt
+                  });
+                  return;
+                }
+                var targetClass = Java.use(h.clazz);
+                createHook(targetClass, h.clazz, h.method, h.args);
+                report.installed += 1;
+                report.installedIndices.push(index);
+              } catch (e) {
+                report.failed.push({
+                  index,
+                  signature,
+                  error: String(e)
+                });
+              }
+            });
           } catch (e) {
-            send("[!] Error registering hook " + h.clazz + ": " + e);
+            report.fatal = String(e);
           }
+          send({ noxenEvent: "hook_report", report });
         });
-        send("[+] App hooks initialized");
-      });
+      } catch (e) {
+        report.fatal = String(e);
+        send({ noxenEvent: "hook_report", report });
+      }
+      return { pending: true };
     },
     forward: function(decisionId) {
       var resumed = false;

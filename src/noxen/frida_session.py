@@ -1,7 +1,7 @@
 import threading
 from dataclasses import dataclass
 
-from noxen.agent_loader import load_agent_script, load_hook_config
+from noxen.agent_loader import HooksLoadResult, load_agent_script, load_hook_config
 from noxen.filters import FilterManager
 from noxen.logging_ui import log_debug, log_error, log_info, log_success, log_warning
 from noxen.rendering import payload_to_filter_context, render_intercept_block
@@ -13,6 +13,7 @@ class SessionConfig:
     attach_name: str | None = None
     attach_pid: int | None = None
     custom_hooks: str | None = None
+    validated_hooks: HooksLoadResult | None = None
     extra_script: str | None = None
 
     def target_label(self) -> str:
@@ -52,6 +53,7 @@ class FridaSession:
         self.hold_start_cb = hold_start_cb
         self.hold_end_cb = hold_end_cb
         self.api_level_cb = None
+        self.hook_warning_cb = None
         self.connected_cb = None
         self.connection_failed_cb = None
         self.disconnected_cb = None
@@ -60,6 +62,7 @@ class FridaSession:
         self._session = None
         self._device_id = None
         self._connect_thread = None
+        self._hooks_result = None
         self._lock = threading.Lock()
         self._generation = 0
         self._blocking_enabled = True
@@ -79,13 +82,14 @@ class FridaSession:
             self._connect_thread.start()
 
     def _start_session(self, generation, device_id):
-        hooks_result = load_hook_config(self._config.custom_hooks)
-        hooks_data = hooks_result.hooks
-        for message in hooks_result.messages:
-            self.log_cb(message)
-
-        stage = "device"
+        stage = "configuration"
         try:
+            hooks_result = self._config.validated_hooks or load_hook_config(self._config.custom_hooks)
+            hooks_data = hooks_result.hooks
+            for message in hooks_result.messages:
+                self.log_cb(message)
+
+            stage = "device"
             import frida
             if self._is_stale(generation):
                 return
@@ -175,7 +179,10 @@ class FridaSession:
                 return
 
             stage = "hooks"
-            script.exports_sync.proxy(hooks_data)
+            self._hooks_result = hooks_result
+            hook_report = script.exports_sync.proxy(hooks_data)
+            if isinstance(hook_report, dict) and not hook_report.get("pending"):
+                self._log_hook_report(hook_report, hooks_result)
             if self._is_stale(generation):
                 close_local(script)
                 return
@@ -211,6 +218,85 @@ class FridaSession:
             self._report_connection_failure(
                 generation, stage, e, f"Failed to start session: {e}"
             )
+
+    def _log_hook_report(self, report, hooks_result: HooksLoadResult) -> None:
+        if not isinstance(report, dict):
+            self.log_cb(log_warning("Hook registration report unavailable", "hooks"))
+            return
+
+        fatal = report.get("fatal")
+        if fatal:
+            self.log_cb(log_error(f"Hook initialization failed: {fatal}", "hooks"))
+            if self.hook_warning_cb:
+                try:
+                    self.hook_warning_cb("Hook initialization failed. See Log for details.")
+                except Exception as callback_error:
+                    self.log_cb(log_warning(
+                        f"Hook warning callback failed: {callback_error}", "hooks"
+                    ))
+            return
+
+        installed = int(report.get("installed") or 0)
+        installed_indices = report.get("installedIndices")
+        if not isinstance(installed_indices, list):
+            installed_indices = []
+        skipped = report.get("skipped") if isinstance(report.get("skipped"), list) else []
+        failed = report.get("failed") if isinstance(report.get("failed"), list) else []
+
+        def source_for(item) -> str:
+            index = item.get("index") if isinstance(item, dict) else None
+            if isinstance(index, int) and 0 <= index < len(hooks_result.sources):
+                return hooks_result.sources[index]
+            return f"hook[{index}]" if isinstance(index, int) else "hook"
+
+        for item in skipped:
+            if not isinstance(item, dict):
+                continue
+            reason = item.get("reason") or "not supported on this API level"
+            signature = item.get("signature") or "unknown signature"
+            self.log_cb(log_warning(
+                f"Skipped {source_for(item)} ({signature}): {reason}", "hooks"
+            ))
+
+        for item in failed:
+            if not isinstance(item, dict):
+                continue
+            signature = item.get("signature") or "unknown signature"
+            error = item.get("error") or "registration failed"
+            self.log_cb(log_error(
+                f"Failed {source_for(item)} ({signature}): {error}", "hooks"
+            ))
+
+        summary = f"Hooks: {installed} installed, {len(skipped)} skipped, {len(failed)} failed"
+        if failed:
+            self.log_cb(log_warning(summary, "hooks"))
+        else:
+            self.log_cb(log_success(summary, "hooks"))
+
+        no_custom_installed = False
+        if hooks_result.custom_count:
+            custom_installed = sum(
+                1 for index in installed_indices
+                if isinstance(index, int)
+                and 0 <= index < len(hooks_result.sources)
+                and hooks_result.sources[index].startswith("custom ")
+            )
+            if custom_installed == 0:
+                no_custom_installed = True
+                self.log_cb(log_warning("No custom hooks were installed", "hooks"))
+
+        if self.hook_warning_cb and (failed or no_custom_installed):
+            if no_custom_installed:
+                warning = "No custom hooks were installed. See Log for details."
+            else:
+                count = len(failed)
+                warning = f"Hook setup incomplete: {count} hook{'s' if count != 1 else ''} failed. See Log."
+            try:
+                self.hook_warning_cb(warning)
+            except Exception as callback_error:
+                self.log_cb(log_warning(
+                    f"Hook warning callback failed: {callback_error}", "hooks"
+                ))
 
     def _report_connection_failure(self, generation, stage, error, log_message) -> None:
         """Log and report a failure to establish the current session."""
@@ -285,6 +371,10 @@ class FridaSession:
             payload = message["payload"]
             if isinstance(payload, dict):
                 event_name = payload.get("noxenEvent")
+                if event_name == "hook_report":
+                    if self._hooks_result is not None:
+                        self._log_hook_report(payload.get("report"), self._hooks_result)
+                    return
                 if event_name == "hold_start":
                     if self.hold_start_cb:
                         self.hold_start_cb(payload)

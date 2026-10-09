@@ -5,7 +5,7 @@ import threading
 import unittest
 from types import SimpleNamespace
 
-from textual.widgets import Button, Label, Select
+from textual.widgets import Button, Input, Label, Select
 
 from noxen.app import NoxenApp
 from noxen.logging_ui import log_error
@@ -77,6 +77,50 @@ class _DelayedSuccessfulSession:
 
 
 class ConnectionFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_hook_config_blocks_connect_without_cleaning_current_session(self):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                hook_path = os.path.join(tmp, "invalid-hooks.json")
+                with open(hook_path, "w", encoding="utf-8") as file:
+                    file.write('{"clazz": "Example"}')
+                args = SimpleNamespace(
+                    project=None,
+                    new_project=os.path.join(tmp, "invalid-config.noxen"),
+                    skip_device_scan=True,
+                )
+                app = NoxenApp(args)
+                cleaned = []
+                current_session = SimpleNamespace(cleanup=lambda: cleaned.append(True))
+
+                async with app.run_test(size=(120, 40)) as pilot:
+                    app.notify = lambda *_args, **_kwargs: None
+                    app._populate_target_apps = lambda: None
+                    app._home_devices = [SimpleNamespace(id="device-1")]
+                    app.frida_session = current_session
+
+                    device = app.query_one("#home_device", Select)
+                    device.set_options([("Android", "device-1")])
+                    device.value = "device-1"
+                    target = app.query_one("#home_target_select", Select)
+                    target.set_options([("Example", "dev.example")])
+                    target.value = "dev.example"
+                    app.query_one("#home_hooks_path", Input).value = hook_path
+                    await pilot.pause()
+
+                    app._try_connect()
+                    await pilot.pause()
+
+                    self.assertIs(app.frida_session, current_session)
+                    self.assertEqual(cleaned, [])
+                    self.assertIn("top-level value must be a JSON array", str(
+                        app.query_one("#home_error", Label).render()
+                    ))
+                    self.assertFalse(app.query_one("#home_btn", Button).disabled)
+            finally:
+                os.chdir(cwd)
+
     async def test_failed_connection_stays_home_and_shows_feedback(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:
