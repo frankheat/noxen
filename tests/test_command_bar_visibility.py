@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+from textual.widgets import Input
+
 from noxen.app import NoxenApp
 from noxen.settings import load_settings, settings_file_path
 
@@ -114,6 +116,72 @@ class CommandBarVisibilityTests(unittest.IsolatedAsyncioTestCase):
                     os.environ.pop("XDG_CONFIG_HOME", None)
                 else:
                     os.environ["XDG_CONFIG_HOME"] = previous_xdg
+
+    async def test_history_search_value_updates_and_clears_visual_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                app = NoxenApp(project_args_without_device_scan(os.path.join(tmp, "search.noxen")))
+                async with app.run_test(size=(100, 32)) as pilot:
+                    app.query_one("#main_tabs").active = "tab_history"
+                    await pilot.pause()
+                    search = app.query_one("#history_search", Input)
+
+                    app._set_history_search("payment  token")
+                    await pilot.pause()
+
+                    self.assertEqual(search.value, "payment  token")
+                    self.assertEqual(app._history_search_text, "payment  token")
+
+                    app._set_history_search("")
+                    await pilot.pause()
+
+                    self.assertEqual(search.value, "")
+                    self.assertEqual(app._history_search_text, "")
+            finally:
+                os.chdir(previous_cwd)
+
+
+class HistorySearchCommandDispatchTests(unittest.TestCase):
+    def test_search_command_updates_visual_state_and_is_history_only(self):
+        updates = []
+        messages = []
+        fake = SimpleNamespace(
+            _active_tab="tab_history",
+            _set_history_search=updates.append,
+            call_from_thread=lambda callback, *args: callback(*args),
+        )
+
+        NoxenApp._handle_slash_command(
+            fake,
+            "/search",
+            ["/search", "payment", "token"],
+            write_fn=messages.append,
+            raw_command="/search payment  token",
+        )
+        NoxenApp._handle_slash_command(
+            fake,
+            "/search",
+            ["/search"],
+            write_fn=messages.append,
+            raw_command="/search",
+        )
+
+        self.assertEqual(updates, ["payment  token", ""])
+        self.assertEqual(messages, [])
+
+        fake._active_tab = "tab_intercept"
+        NoxenApp._handle_slash_command(
+            fake,
+            "/search",
+            ["/search", "ignored"],
+            write_fn=messages.append,
+            raw_command="/search ignored",
+        )
+        self.assertEqual(updates, ["payment  token", ""])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Unknown command", messages[0])
 
 
 if __name__ == "__main__":

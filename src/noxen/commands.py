@@ -74,6 +74,7 @@ HELP_MENU_HISTORY = {
         ("/intercept status", "Show interception state"),
     ],
     "History Commands": [
+        ("/search <text>", "Search History; omit text to clear"),
         ("/stack on", "Enable stack trace in history detail"),
         ("/stack off", "Disable stack trace in history detail"),
         ("/stack <number>", "Set number of stack frames to show"),
@@ -147,6 +148,11 @@ class ParsedSaveCommand:
 @dataclass(frozen=True)
 class ParsedClearCommand:
     target: str
+
+
+@dataclass(frozen=True)
+class ParsedSearchCommand:
+    query: str
 
 
 @dataclass(frozen=True)
@@ -239,6 +245,15 @@ def parse_clear_command(parts: list[str]) -> ParsedClearCommand | None:
     if args == ["history"]:
         return ParsedClearCommand(target="history")
     return None
+
+
+def parse_search_command(text: str) -> ParsedSearchCommand | None:
+    command = parse_command(text)
+    if command is None or command.base != "/search":
+        return None
+    stripped = text.strip()
+    query = stripped[len(command.parts[0]):].strip()
+    return ParsedSearchCommand(query)
 
 
 def build_completions(menu):

@@ -38,6 +38,7 @@ from noxen.commands import (
     parse_intent_command,
     parse_intercept_command,
     parse_save_command,
+    parse_search_command,
     parse_stack_command,
     parse_theme_command,
     resolve_submitted_command,
@@ -2595,7 +2596,7 @@ class NoxenApp(App):
             self.write_log(text)
         self._write_rich("history_cmd_output", text)
 
-    def _handle_slash_command(self, cmd_base: str, parts: list, write_fn=None):
+    def _handle_slash_command(self, cmd_base: str, parts: list, write_fn=None, raw_command=None):
         if write_fn is None:
             write_fn = self.write_cmd
 
@@ -2651,6 +2652,13 @@ class NoxenApp(App):
             else:
                 write_fn("[red]Usage: /clear history[/red]")
 
+        elif cmd_base == "/search" and self._active_tab == "tab_history":
+            parsed = parse_search_command(raw_command or " ".join(parts))
+            if parsed is None:
+                write_fn("[red]Usage: /search <text> | /search[/red]")
+                return
+            self.call_from_thread(self._set_history_search, parsed.query)
+
         elif cmd_base == "/stack":
             self._handle_stack_command(parts, write_fn)
 
@@ -2669,7 +2677,12 @@ class NoxenApp(App):
         if parsed is None:
             return
         if parsed.base.startswith("/"):
-            self._handle_slash_command(parsed.base, parsed.parts, write_fn=self._write_history_command)
+            self._handle_slash_command(
+                parsed.base,
+                parsed.parts,
+                write_fn=self._write_history_command,
+                raw_command=parsed.raw,
+            )
         else:
             self._write_history_command("[red]History commands must start with '/' (Try '/help')[/red]", log=False)
 
@@ -2707,6 +2720,9 @@ class NoxenApp(App):
             self.show_stack = current_show
             self.stack_depth = current_depth
             self.call_from_thread(self._refresh_intercept_display)
+
+    def _set_history_search(self, query: str) -> None:
+        self.query_one("#history_search", Input).value = query
 
     def _active_filter_manager(self):
         if self._active_tab == "tab_history":
@@ -2831,7 +2847,7 @@ class NoxenApp(App):
 
         try:
             if cmd_base.startswith("/"):
-                self._handle_slash_command(cmd_base, parts)
+                self._handle_slash_command(cmd_base, parts, raw_command=parsed.raw)
                 return
 
             if parse_intent_command(cmd) is None:

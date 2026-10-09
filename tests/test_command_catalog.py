@@ -15,6 +15,7 @@ from noxen.commands import (
     parse_intent_command,
     parse_intercept_command,
     parse_save_command,
+    parse_search_command,
     parse_stack_command,
     parse_theme_command,
     resolve_submitted_command,
@@ -29,6 +30,11 @@ class CommandCatalogTests(unittest.TestCase):
         self.assertTrue(all(command.startswith("/") for command in commands))
         self.assertIn("/filter add ignore <rule>", commands)
         self.assertIn("/stack <number>", commands)
+        self.assertIn("/search <text>", commands)
+        self.assertNotIn(
+            "/search <text>",
+            [template for template, _desc in INTERCEPT_COMPLETIONS],
+        )
 
     def test_intercept_keeps_bare_commands_intent_scoped(self):
         commands = [template for template, _desc in INTERCEPT_COMPLETIONS]
@@ -132,6 +138,14 @@ class CommandCatalogTests(unittest.TestCase):
         self.assertEqual(parsed.target, "history")
         self.assertIsNone(parse_clear_command(["/clear"]))
         self.assertIsNone(parse_clear_command(["/clear", "log"]))
+
+    def test_parse_search_command_preserves_query_text_and_clears_without_it(self):
+        self.assertEqual(
+            parse_search_command("  /SeArCh   payment  token  ").query,
+            "payment  token",
+        )
+        self.assertEqual(parse_search_command("/search").query, "")
+        self.assertIsNone(parse_search_command("/filter list"))
 
     def test_resolve_submitted_command_runs_without_suggestion(self):
         submitted = resolve_submitted_command("  /theme  ", None)
