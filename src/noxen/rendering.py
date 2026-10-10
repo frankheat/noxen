@@ -216,7 +216,7 @@ def history_search_text(entry: dict) -> str:
                         break
                     visit(item, depth + 1)
         elif kind == "intent":
-            for field in ("action", "data", "component", "package", "flags"):
+            for field in ("action", "data", "mimeType", "component", "package", "flags"):
                 add(node.get(field))
             categories = node.get("categories")
             if isinstance(categories, list):
@@ -254,6 +254,7 @@ def history_search_text(entry: dict) -> str:
         info.get("action"),
         info.get("component"),
         info.get("data"),
+        info.get("mimeType"),
         info.get("flags"),
     ):
         add(value)
@@ -469,6 +470,10 @@ def _payload_lines(info: dict, attack_surface: dict) -> list[str]:
             lines.append(_row("Enforced Perm", enforced))
     lines.append(_row("Action", _markup(info.get("action")) if info.get("action") else "None"))
     lines.append(_row("Data (URI)", _markup(info.get("data")) if info.get("data") else "None"))
+    # New captures always carry this key, including a null value. Older captures omit
+    # it, so do not imply that a MIME type was inspected when it was not recorded.
+    if "mimeType" in info:
+        lines.append(_row("MIME Type", _markup(info.get("mimeType")) if info.get("mimeType") else "None"))
     if info.get("package"):
         lines.append(_row("Package", _markup(info.get("package"))))
     lines.append(_row("Flags", _format_intent_flags(info.get("flags") or 0)))
@@ -535,8 +540,10 @@ def _intent_extra_children(node: dict) -> list[tuple[str | None, dict]]:
     children: list[tuple[str | None, dict]] = [
         ("Action", {"kind": "field", "value": node.get("action") or "None"}),
         ("Data (URI)", {"kind": "field", "value": node.get("data") or "None"}),
-        ("Component", {"kind": "field", "value": node.get("component") or "None"}),
     ]
+    if "mimeType" in node:
+        children.append(("MIME Type", {"kind": "field", "value": node.get("mimeType") or "None"}))
+    children.append(("Component", {"kind": "field", "value": node.get("component") or "None"}))
     if node.get("package"):
         children.append(("Package", {"kind": "field", "value": node.get("package")}))
     children.append(("Flags", {"kind": "field", "markup": _format_intent_flags(node.get("flags") or 0)}))
@@ -771,6 +778,12 @@ def _changes_lines(original: dict, info: dict) -> list[str]:
     if orig_data != mod_data:
         has_changes = True
         out.append(_row("Data (URI)", f"[dim]{_markup(orig_data or '(none)')}[/dim] → {_markup(mod_data or '(none)')}"))
+
+    orig_mime = original.get("mimeType") or ""
+    mod_mime = info.get("mimeType") or ""
+    if orig_mime != mod_mime:
+        has_changes = True
+        out.append(_row("MIME Type", f"[dim]{_markup(orig_mime or '(none)')}[/dim] → {_markup(mod_mime or '(none)')}"))
 
     orig_categories = list(original.get("categories") or [])
     mod_categories = list(info.get("categories") or [])

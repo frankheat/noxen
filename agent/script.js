@@ -410,6 +410,10 @@ function serializeIntentNode(value, typeName, context, depth) {
     var data = intent.getDataString();
     return data === null ? null : boundedExtraText(data).value;
   });
+  readNestedIntent(intentValue, node, "mimeType", function(intent) {
+    var mimeType = intent.getType();
+    return mimeType === null ? null : boundedExtraText(mimeType).value;
+  });
   readNestedIntent(intentValue, node, "package", function(intent) {
     var packageName = intent.getPackage();
     return packageName === null ? null : boundedExtraText(packageName).value;
@@ -576,6 +580,10 @@ function dumpIntent(intent) {
   } catch (e) { infoIntent.component = null; }
   try { infoIntent.action = intent.getAction() || null; } catch (e) { infoIntent.action = null; }
   try { infoIntent.data = intent.getDataString() || null; } catch (e) { infoIntent.data = null; }
+  try {
+    var mimeType = intent.getType();
+    infoIntent.mimeType = mimeType === null ? null : boundedExtraText(mimeType).value;
+  } catch (e) { infoIntent.mimeType = null; }
   // Package set with setPackage(): limits an implicit intent to that app (null = any app).
   try { infoIntent.package = intent.getPackage() || null; } catch (e) { infoIntent.package = null; }
   try { infoIntent.flags = intent.getFlags(); } catch (e) { infoIntent.flags = 0; }
@@ -640,13 +648,34 @@ function applyModifications(intent) {
   if (!intent || modQueue.length === 0) return;
 
   try {
+    // Android's setData() clears the MIME type and setType() clears the data URI.
+    // Resolve both final values first, then update them atomically so changing one
+    // field preserves the other.
+    var dataOrMimeChanged = false;
+    var finalData = null;
+    var finalMimeType = null;
+    for (var index = 0; index < modQueue.length; index++) {
+      var queued = modQueue[index];
+      if (queued.type !== "data" && queued.type !== "mime") continue;
+      if (!dataOrMimeChanged) {
+        finalData = intent.getData();
+        finalMimeType = intent.getType();
+        dataOrMimeChanged = true;
+      }
+      if (queued.type === "data") {
+        if (!UriJava && queued.val !== "") throw new Error("android.net.Uri is unavailable");
+        finalData = queued.val === "" ? null : UriJava.parse(queued.val);
+      } else {
+        finalMimeType = queued.val === "" ? null : queued.val;
+      }
+    }
+    if (dataOrMimeChanged) intent.setDataAndType(finalData, finalMimeType);
+
     modQueue.forEach(function(mod) {
       if (mod.type === "action") {
         intent.setAction(mod.val === "" ? null : mod.val);
-      } 
-      else if (mod.type === "data") {
-        if (UriJava) intent.setData(mod.val === "" ? null : UriJava.parse(mod.val));
       }
+      else if (mod.type === "data" || mod.type === "mime") { /* applied together above */ }
       else if (mod.type === "cat_add") {
         intent.addCategory(mod.val);
       }
@@ -957,7 +986,7 @@ function normalizeRpcMods(mods) {
   if (!Array.isArray(mods)) throw new Error("modifications must be an array");
 
   var supported = {
-    action: true, data: true,
+    action: true, data: true, mime: true,
     cat_add: true, cat_rem: true,
     flag_add: true, flag_rem: true,
     extra_add: true, extra_rem: true

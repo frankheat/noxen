@@ -13842,6 +13842,10 @@ std_string_c_str (StdString * self)
       var data = intent.getDataString();
       return data === null ? null : boundedExtraText(data).value;
     });
+    readNestedIntent(intentValue, node, "mimeType", function(intent) {
+      var mimeType = intent.getType();
+      return mimeType === null ? null : boundedExtraText(mimeType).value;
+    });
     readNestedIntent(intentValue, node, "package", function(intent) {
       var packageName = intent.getPackage();
       return packageName === null ? null : boundedExtraText(packageName).value;
@@ -14020,6 +14024,12 @@ std_string_c_str (StdString * self)
       infoIntent.data = null;
     }
     try {
+      var mimeType = intent.getType();
+      infoIntent.mimeType = mimeType === null ? null : boundedExtraText(mimeType).value;
+    } catch (e) {
+      infoIntent.mimeType = null;
+    }
+    try {
       infoIntent.package = intent.getPackage() || null;
     } catch (e) {
       infoIntent.package = null;
@@ -14088,11 +14098,29 @@ std_string_c_str (StdString * self)
   function applyModifications(intent) {
     if (!intent || modQueue.length === 0) return;
     try {
+      var dataOrMimeChanged = false;
+      var finalData = null;
+      var finalMimeType = null;
+      for (var index = 0; index < modQueue.length; index++) {
+        var queued = modQueue[index];
+        if (queued.type !== "data" && queued.type !== "mime") continue;
+        if (!dataOrMimeChanged) {
+          finalData = intent.getData();
+          finalMimeType = intent.getType();
+          dataOrMimeChanged = true;
+        }
+        if (queued.type === "data") {
+          if (!UriJava && queued.val !== "") throw new Error("android.net.Uri is unavailable");
+          finalData = queued.val === "" ? null : UriJava.parse(queued.val);
+        } else {
+          finalMimeType = queued.val === "" ? null : queued.val;
+        }
+      }
+      if (dataOrMimeChanged) intent.setDataAndType(finalData, finalMimeType);
       modQueue.forEach(function(mod) {
         if (mod.type === "action") {
           intent.setAction(mod.val === "" ? null : mod.val);
-        } else if (mod.type === "data") {
-          if (UriJava) intent.setData(mod.val === "" ? null : UriJava.parse(mod.val));
+        } else if (mod.type === "data" || mod.type === "mime") {
         } else if (mod.type === "cat_add") {
           intent.addCategory(mod.val);
         } else if (mod.type === "cat_rem") {
@@ -14367,6 +14395,7 @@ std_string_c_str (StdString * self)
     var supported = {
       action: true,
       data: true,
+      mime: true,
       cat_add: true,
       cat_rem: true,
       flag_add: true,

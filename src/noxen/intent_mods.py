@@ -240,6 +240,14 @@ def parse_intent_mod_command(parts: list[str]) -> IntentModParseResult:
         return _single_value_mod(parts, "action", "[red]Usage: action <val>[/red]")
     if command == "data":
         return _single_value_mod(parts, "data", "[red]Usage: data <uri>[/red]")
+    if command == "mime":
+        if len(parts) == 2 and parts[1].lower() == "clear":
+            return ("mime", "", "", ""), None
+        return _single_value_mod(
+            parts,
+            "mime",
+            "[red]Usage: mime <type> | mime clear[/red]",
+        )
     if command == "+cat":
         return _single_value_mod(parts, "cat_add", "[red]Usage: +cat <val>[/red]")
     if command == "-cat":
@@ -279,6 +287,8 @@ def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
             info["action"] = value or None
         elif mod_type == "data":
             info["data"] = value or None
+        elif mod_type == "mime":
+            info["mimeType"] = value or None
         elif mod_type == "cat_add":
             if value and value not in info["categories"]:
                 info["categories"].append(value)
@@ -312,11 +322,11 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
     after = draft or {}
     mods: list[IntentMod] = []
 
-    for field in ("action", "data"):
+    for field, mod_type in (("action", "action"), ("data", "data"), ("mimeType", "mime")):
         old_value = before.get(field) or ""
         new_value = after.get(field) or ""
         if new_value != old_value:
-            mods.append((field, "", str(new_value), ""))
+            mods.append((mod_type, "", str(new_value), ""))
 
     old_categories = list(before.get("categories") or [])
     new_categories = list(after.get("categories") or [])

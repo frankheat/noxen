@@ -21,6 +21,7 @@ class IntentModsTests(unittest.TestCase):
             "intent": {
                 "action": "old.action",
                 "data": "content://old",
+                "mimeType": "text/plain",
                 "flags": 1,
                 "categories": ["old.category"],
                 "extras": {
@@ -33,6 +34,7 @@ class IntentModsTests(unittest.TestCase):
         apply_mods_to_entry(entry, [
             ("action", "", "new.action", ""),
             ("data", "", "content://new", ""),
+            ("mime", "", "application/pdf", ""),
             ("cat_rem", "", "old.category", ""),
             ("cat_add", "", "new.category", ""),
             ("flag_add", "", "0x10", ""),
@@ -44,6 +46,7 @@ class IntentModsTests(unittest.TestCase):
         self.assertEqual(entry["original_intent"]["action"], "old.action")
         self.assertEqual(entry["intent"]["action"], "new.action")
         self.assertEqual(entry["intent"]["data"], "content://new")
+        self.assertEqual(entry["intent"]["mimeType"], "application/pdf")
         self.assertEqual(entry["intent"]["flags"], 17)
         self.assertEqual(entry["intent"]["categories"], ["new.category"])
         self.assertNotIn("remove_me", entry["intent"]["extras"])
@@ -67,6 +70,7 @@ class IntentModsTests(unittest.TestCase):
         original = {
             "action": "old.action",
             "data": None,
+            "mimeType": "text/plain",
             "flags": -1,
             "categories": ["old.category", "keep.category"],
             "extras": {
@@ -81,6 +85,7 @@ class IntentModsTests(unittest.TestCase):
         draft = apply_mods_to_intent(original, [
             ("action", "", "new.action", ""),
             ("data", "", "content://items/1", ""),
+            ("mime", "", "application/json", ""),
             ("cat_rem", "", "old.category", ""),
             ("cat_add", "", "new.category", ""),
             ("flag_rem", "", "0x80000000", ""),
@@ -94,8 +99,38 @@ class IntentModsTests(unittest.TestCase):
         self.assertEqual(original["extras"]["change"]["value"], "old")
         replayed = apply_mods_to_intent(original, diff_intents(original, draft))
         self.assertEqual(replayed, draft)
+        self.assertEqual(replayed["mimeType"], "application/json")
         self.assertEqual(replayed["extras"]["keep"]["type"], "java.lang.Short")
         self.assertEqual(replayed["extras"]["opaque"], original["extras"]["opaque"])
+
+    def test_data_and_mime_modifications_preserve_each_other(self):
+        original = {
+            "data": "content://items/1",
+            "mimeType": "text/plain",
+            "categories": [],
+            "extras": {},
+            "flags": 0,
+        }
+
+        changed_data = apply_mods_to_intent(
+            original,
+            [("data", "", "content://items/2", "")],
+        )
+        changed_mime = apply_mods_to_intent(
+            original,
+            [("mime", "", "application/pdf", "")],
+        )
+
+        self.assertEqual(changed_data["mimeType"], "text/plain")
+        self.assertEqual(changed_mime["data"], "content://items/1")
+        self.assertEqual(
+            diff_intents(original, changed_data),
+            [("data", "", "content://items/2", "")],
+        )
+        self.assertEqual(
+            diff_intents(original, changed_mime),
+            [("mime", "", "application/pdf", "")],
+        )
 
     def test_diff_treats_signed_and_unsigned_flags_as_the_same_mask(self):
         self.assertEqual(
@@ -135,6 +170,14 @@ class IntentModsTests(unittest.TestCase):
         self.assertEqual(
             parse_intent_mod_command(["action", "android.intent.action.VIEW"]),
             (("action", "", "android.intent.action.VIEW", ""), None),
+        )
+        self.assertEqual(
+            parse_intent_mod_command(["mime", "application/pdf"]),
+            (("mime", "", "application/pdf", ""), None),
+        )
+        self.assertEqual(
+            parse_intent_mod_command(["mime", "clear"]),
+            (("mime", "", "", ""), None),
         )
         self.assertEqual(
             parse_intent_mod_command(["+x", "string", "token", "hello", "world"]),
@@ -215,6 +258,10 @@ class IntentModsTests(unittest.TestCase):
         self.assertIsNone(entry["intent"]["extras"]["optional"]["value"])
 
     def test_parse_intent_mod_command_reports_usage_errors(self):
+        self.assertEqual(
+            parse_intent_mod_command(["mime"]),
+            (None, "[red]Usage: mime <type> | mime clear[/red]"),
+        )
         self.assertEqual(
             parse_intent_mod_command(["+flag"]),
             (None, "[red]Usage: +flag <int>[/red]"),

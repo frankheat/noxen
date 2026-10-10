@@ -13,6 +13,8 @@ HELP_MENU = {
     "Intent Modifications": [
         ("action <val>", "Set Intent Action"),
         ("data <uri>", "Set Intent Data URI"),
+        ("mime <type>", "Set Intent MIME type"),
+        ("mime clear", "Clear Intent MIME type"),
         ("+cat <val>", "Add Category"),
         ("-cat <val>", "Remove Category"),
         ("+flag <int>", "Add Flag"),
@@ -101,7 +103,7 @@ SUGGESTION_TEMPLATE_WIDTH = 32
 
 INTENT_COMMAND_BASES = frozenset({
     "forward", "f", "drop", "d",
-    "action", "data",
+    "action", "data", "mime",
     "+cat", "-cat", "+flag", "-flag", "+x", "-x",
 })
 

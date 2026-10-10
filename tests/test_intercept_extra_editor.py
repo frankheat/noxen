@@ -250,7 +250,8 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                 async with app.run_test(size=(120, 36)) as pilot:
                     app.query_one("#main_tabs").active = "tab_intercept"
                     original = {
-                        "action": "old.action", "data": "content://old", "flags": 1,
+                        "action": "old.action", "data": "content://old",
+                        "mimeType": "text/plain", "flags": 1,
                         "categories": ["old.category"],
                         "extras": {
                             "token": {"type": "java.lang.String", "value": "old"},
@@ -279,6 +280,7 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                     # Every command updates the same on-screen draft immediately.
                     for mod in (
                         ("data", "", "content://new", ""),
+                        ("mime", "", "application/pdf", ""),
                         ("cat_rem", "", "old.category", ""),
                         ("cat_add", "", "new.category", ""),
                         ("flag_add", "", "0x10", ""),
@@ -289,6 +291,7 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                         await pilot.pause()
 
                     self.assertEqual(app.query_one("#ef_data", Input).value, "content://new")
+                    self.assertEqual(app.query_one("#ef_mime", Input).value, "application/pdf")
                     self.assertEqual(app.query_one("#ef_flags", Input).value, "0x11")
                     self.assertEqual(
                         [app.query_one(f"#ef_cv_{n}", Input).value for n in app._edit_cat_rows],
@@ -306,6 +309,7 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     self.assertEqual(app.query_one("#ef_action", Input).value, "old.action")
                     self.assertEqual(app.query_one("#ef_data", Input).value, "content://old")
+                    self.assertEqual(app.query_one("#ef_mime", Input).value, "text/plain")
                     self.assertEqual(app.query_one("#ef_flags", Input).value, "0x1")
                     self.assertEqual(
                         {row["key"] for row in app._edit_extra_rows.values()},

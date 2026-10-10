@@ -11,7 +11,13 @@ _MIGRATED_INTENT_COLUMNS = {
     "outcome": "TEXT",
     "original_intent": "TEXT",
     "attack_surface": "TEXT",
+    "mime_type": "TEXT",
 }
+
+
+def _stored_mime_type(info: dict):
+    """Distinguish an uncaptured field (NULL) from a captured absent type (empty)."""
+    return (info.get("mimeType") or "") if "mimeType" in info else None
 
 
 class ProjectDB:
@@ -106,6 +112,7 @@ class ProjectDB:
                 action               TEXT,
                 component            TEXT,
                 data                 TEXT,
+                mime_type            TEXT,
                 flags                INTEGER,
                 categories           TEXT,
                 extras               TEXT,
@@ -135,19 +142,24 @@ class ProjectDB:
         entries = []
         for row in rows:
             row_id = row["id"]
+            intent = {
+                "action": row["action"],
+                "component": row["component"],
+                "data": row["data"],
+                "flags": int(raw_flags) if (raw_flags := row["flags"]) else None,
+                "categories": self._load_json_field(row_id, "categories", row["categories"], [], list),
+                "extras": self._load_json_field(row_id, "extras", row["extras"], {}, dict),
+            }
+            # NULL identifies captures made before MIME type recording. An empty string
+            # records a new capture whose Intent had no MIME type.
+            if row["mime_type"] is not None:
+                intent["mimeType"] = row["mime_type"] or None
             entries.append({
                 "id": row_id,
                 "timestamp": row["timestamp"],
                 "class": row["class"],
                 "method": row["method"],
-                "intent": {
-                    "action": row["action"],
-                    "component": row["component"],
-                    "data": row["data"],
-                    "flags": int(raw_flags) if (raw_flags := row["flags"]) else None,
-                    "categories": self._load_json_field(row_id, "categories", row["categories"], [], list),
-                    "extras": self._load_json_field(row_id, "extras", row["extras"], {}, dict),
-                },
+                "intent": intent,
                 "stackTrace": self._load_json_field(row_id, "stack_trace", row["stack_trace"], [], list),
                 "pendingIntentFlags": row["pending_intent_flags"],
                 "outcome": row["outcome"],
@@ -197,9 +209,9 @@ class ProjectDB:
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO intents
-                   (timestamp, class, method, action, component, data, flags,
+                   (timestamp, class, method, action, component, data, mime_type, flags,
                     categories, extras, stack_trace, pending_intent_flags, attack_surface)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     entry.get("timestamp"),
                     entry.get("class"),
@@ -207,6 +219,7 @@ class ProjectDB:
                     info.get("action"),
                     info.get("component"),
                     info.get("data"),
+                    _stored_mime_type(info),
                     info.get("flags") or None,
                     json.dumps(info.get("categories") or []),
                     json.dumps(info.get("extras") or {}),
@@ -296,11 +309,12 @@ class ProjectDB:
         with self._lock:
             self._conn.execute(
                 """UPDATE intents SET
-                   action=?, data=?, flags=?, categories=?, extras=?, original_intent=?
+                   action=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?
                    WHERE id=?""",
                 (
                     modified_info.get("action"),
                     modified_info.get("data"),
+                    _stored_mime_type(modified_info),
                     modified_info.get("flags") or None,
                     json.dumps(modified_info.get("categories") or []),
                     json.dumps(modified_info.get("extras") or {}),

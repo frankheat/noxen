@@ -253,6 +253,31 @@ class ProjectDBTests(unittest.TestCase):
 
             self.assertIn("outcome", columns)
             self.assertIn("original_intent", columns)
+            self.assertIn("mime_type", columns)
+
+    def test_mime_type_roundtrip_distinguishes_absent_null_and_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "project.noxen")
+            db = ProjectDB(path)
+            db.create("project")
+            for mime_type in ("image/*", None):
+                db.save_intent({
+                    "timestamp": "2026-10-10T08:00:00+00:00",
+                    "intent": {"mimeType": mime_type},
+                })
+            db.save_intent({
+                "timestamp": "2026-10-10T08:00:00+00:00",
+                "intent": {},
+            })
+            db.close()
+
+            reopened = ProjectDB(path)
+            entries = reopened.open_existing()
+            reopened.close()
+
+            self.assertEqual(entries[0]["intent"]["mimeType"], "image/*")
+            self.assertIsNone(entries[1]["intent"]["mimeType"])
+            self.assertNotIn("mimeType", entries[2]["intent"])
 
     def test_filter_lists_roundtrip_through_project_info(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -398,6 +423,7 @@ class ProjectDBTests(unittest.TestCase):
                 "intent": {
                     "action": "old.action",
                     "data": "old:data",
+                    "mimeType": "text/plain",
                     "flags": 1,
                     "categories": [],
                     "extras": {},
@@ -405,8 +431,15 @@ class ProjectDBTests(unittest.TestCase):
             })
             db.update_modified_intent(
                 intent_id,
-                {"action": "old.action", "data": "old:data", "flags": 1},
-                {"action": "new.action", "data": "new:data", "flags": 17, "categories": [], "extras": {}},
+                {
+                    "action": "old.action", "data": "old:data",
+                    "mimeType": "text/plain", "flags": 1,
+                },
+                {
+                    "action": "new.action", "data": "new:data",
+                    "mimeType": "application/pdf", "flags": 17,
+                    "categories": [], "extras": {},
+                },
             )
             db.close()
 
@@ -415,6 +448,7 @@ class ProjectDBTests(unittest.TestCase):
             reopened.close()
 
             self.assertEqual(entries[0]["intent"]["flags"], 17)
+            self.assertEqual(entries[0]["intent"]["mimeType"], "application/pdf")
             self.assertEqual(entries[0]["original_intent"]["flags"], 1)
 
 

@@ -130,6 +130,7 @@ class RenderingTests(unittest.TestCase):
                 "action": "android.intent.action.VIEW",
                 "component": "com.example/.Target",
                 "data": "https://example.test",
+                "mimeType": "application/vnd.example.secure+json",
                 "flags": 123,
                 "categories": ["android.intent.category.DEFAULT"],
                 "extras": {"token": {"type": "string", "value": "secret-value"}},
@@ -138,6 +139,7 @@ class RenderingTests(unittest.TestCase):
 
         self.assertTrue(history_search_matches(entry, "mainactivity"))
         self.assertTrue(history_search_matches(entry, "default"))
+        self.assertTrue(history_search_matches(entry, "vnd.example.secure"))
         self.assertTrue(history_search_matches(entry, "token"))
         self.assertTrue(history_search_matches(entry, "secret-value"))
         self.assertFalse(history_search_matches(entry, "missing"))
@@ -175,6 +177,7 @@ class RenderingTests(unittest.TestCase):
                                         "type": "android.content.Intent",
                                         "action": "com.example.NESTED",
                                         "data": "content://example/item/5",
+                                        "mimeType": "application/x-nested-payload",
                                         "component": "com.example/.NestedActivity",
                                         "package": "com.example",
                                         "flags": 16,
@@ -220,6 +223,7 @@ class RenderingTests(unittest.TestCase):
             "deep-value",
             "com.example.nested",
             "content://example/item/5",
+            "x-nested-payload",
             "nestedactivity",
             "com.example.category",
             "com.example.account",
@@ -442,6 +446,7 @@ class RenderingTests(unittest.TestCase):
                 "action": "new.action",
                 "component": "com.example/.Target",
                 "data": "https://new.example",
+                "mimeType": "application/pdf",
                 "flags": 0x10000000,
                 "categories": ["new.category"],
                 "extras": {
@@ -452,6 +457,7 @@ class RenderingTests(unittest.TestCase):
             "original_intent": {
                 "action": "old.action",
                 "data": "https://old.example",
+                "mimeType": "text/plain",
                 "categories": ["old.category"],
                 "extras": {
                     "changed": {"type": "string", "value": "old"},
@@ -467,6 +473,7 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("| MODIFIED", plain(rendered))
         self.assertIn("old.action", rendered)
         self.assertIn("new.action", rendered)
+        self.assertIn("  MIME Type     : text/plain → application/pdf", plain(rendered))
         self.assertIn("old.category", rendered)
         self.assertIn("new.category", rendered)
         self.assertIn("changed", rendered)
@@ -487,6 +494,7 @@ class RenderingTests(unittest.TestCase):
                 "action": "action[/system/lib64]",
                 "component": "component[abc]",
                 "data": "content://x/[/system_ext/lib64]",
+                "mimeType": "application/[bad]",
                 "categories": ["category[/system/lib64]"],
                 "extras": {"key[/bad]": {"type": "string", "value": "value[/system/lib64]"}},
             },
@@ -548,6 +556,25 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("                  ├─ Exported            : true", plain(rendered))
         self.assertIn("                  └─ Required Permission : com.x.PERM (normal)", plain(rendered))
         self.assertIn("  Enforced Perm : com.x.PERM (normal)", plain(rendered))
+
+    def test_render_intent_detail_shows_mime_type_for_new_captures(self):
+        entry = {
+            "id": 8,
+            "timestamp": "2026-04-27T12:34:56+00:00",
+            "class": "com.example.MainActivity",
+            "method": "startActivity",
+            "intent": {"action": "android.intent.action.VIEW", "mimeType": "image/*"},
+            "attackSurface": {"intentExplicit": False, "targetType": "activity"},
+            "stackTrace": [],
+        }
+
+        self.assertIn("  MIME Type     : image/*", plain(render_intent_detail(entry)))
+
+        entry["intent"]["mimeType"] = None
+        self.assertIn("  MIME Type     : None", plain(render_intent_detail(entry)))
+
+        del entry["intent"]["mimeType"]
+        self.assertNotIn("MIME Type", plain(render_intent_detail(entry)))
 
     def test_render_intent_detail_target_states(self):
         base = {
@@ -660,7 +687,7 @@ class RenderingTests(unittest.TestCase):
                                 {"key": "next", "value": {
                                     "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
                                     "action": "com.example.OPEN", "component": "com.example/.DetailActivity",
-                                    "data": None, "flags": 1, "categories": [],
+                                    "data": None, "mimeType": "text/plain", "flags": 1, "categories": [],
                                     "extras": {
                                         "kind": "bundle", "type": "android.os.Bundle", "displayType": "Bundle",
                                         "count": 1, "items": [{"key": "account", "value": {
@@ -686,6 +713,7 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("├─ user_id [int] : 42", visible)
         self.assertIn("└─ next [Intent]", visible)
         self.assertIn("Action        : com.example.OPEN", visible)
+        self.assertIn("MIME Type     : text/plain", visible)
         self.assertIn("account [com.example.Account]", visible)
         self.assertIn("opaque object", visible)
         self.assertIn("2 additional extras omitted", visible)

@@ -42,6 +42,8 @@ class CommandCatalogTests(unittest.TestCase):
 
         self.assertIn("forward", bare_commands)
         self.assertIn("drop", bare_commands)
+        self.assertIn("mime <type>", bare_commands)
+        self.assertIn("mime clear", bare_commands)
         self.assertIn("+x [type] <key> <value>", bare_commands)
         self.assertNotIn("stack on", bare_commands)
         self.assertNotIn("filters", bare_commands)
@@ -69,6 +71,7 @@ class CommandCatalogTests(unittest.TestCase):
     def test_intent_command_bases_exclude_app_commands(self):
         self.assertIn("forward", INTENT_COMMAND_BASES)
         self.assertIn("+x", INTENT_COMMAND_BASES)
+        self.assertIn("mime", INTENT_COMMAND_BASES)
         self.assertNotIn("stack", INTENT_COMMAND_BASES)
         self.assertNotIn("filter", INTENT_COMMAND_BASES)
         self.assertNotIn("off", INTENT_COMMAND_BASES)
@@ -82,6 +85,7 @@ class CommandCatalogTests(unittest.TestCase):
 
     def test_parse_intent_command_accepts_only_intent_commands(self):
         self.assertEqual(parse_intent_command("+x string token value").base, "+x")
+        self.assertEqual(parse_intent_command("mime application/pdf").base, "mime")
         self.assertIsNone(parse_intent_command("stack on"))
         self.assertIsNone(parse_intent_command("/stack on"))
 

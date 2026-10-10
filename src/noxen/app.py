@@ -464,6 +464,7 @@ class NoxenApp(App):
 
         self.query_one("#ef_action", Input).value = info.get("action", "") or ""
         self.query_one("#ef_data", Input).value = info.get("data", "") or ""
+        self.query_one("#ef_mime", Input).value = info.get("mimeType", "") or ""
 
         self.query_one("#ef_categories").remove_children()
         self._edit_cat_rows = {}
@@ -641,6 +642,7 @@ class NoxenApp(App):
         draft = apply_mods_to_intent(original, [])
         draft["action"] = self.query_one("#ef_action", Input).value or None
         draft["data"] = self.query_one("#ef_data", Input).value or None
+        draft["mimeType"] = self.query_one("#ef_mime", Input).value or None
 
         categories = []
         for n in self._edit_cat_rows:
@@ -1104,6 +1106,9 @@ class NoxenApp(App):
                     with Horizontal(classes="ef_row"):
                         yield Label("Data URI", classes="ef_label")
                         yield Input(id="ef_data", placeholder="e.g. https://example.com")
+                    with Horizontal(classes="ef_row"):
+                        yield Label("MIME Type", classes="ef_label")
+                        yield Input(id="ef_mime", placeholder="e.g. application/pdf")
                     with Horizontal(classes="ef_row"):
                         yield Label("Flags", classes="ef_label")
                         yield Input(id="ef_flags", placeholder="e.g. 0x10000000")
