@@ -12,12 +12,18 @@ _MIGRATED_INTENT_COLUMNS = {
     "original_intent": "TEXT",
     "attack_surface": "TEXT",
     "mime_type": "TEXT",
+    "selector": "TEXT",
 }
 
 
 def _stored_mime_type(info: dict):
     """Distinguish an uncaptured field (NULL) from a captured absent type (empty)."""
     return (info.get("mimeType") or "") if "mimeType" in info else None
+
+
+def _stored_selector(info: dict):
+    """Distinguish legacy captures from a captured absent/present selector."""
+    return json.dumps(info.get("selector")) if "selector" in info else None
 
 
 class ProjectDB:
@@ -113,6 +119,7 @@ class ProjectDB:
                 component            TEXT,
                 data                 TEXT,
                 mime_type            TEXT,
+                selector             TEXT,
                 flags                INTEGER,
                 categories           TEXT,
                 extras               TEXT,
@@ -154,6 +161,16 @@ class ProjectDB:
             # records a new capture whose Intent had no MIME type.
             if row["mime_type"] is not None:
                 intent["mimeType"] = row["mime_type"] or None
+            # SQL NULL means the capture predates selector recording. JSON null means
+            # the selector was inspected and absent; an object is the captured tree.
+            if row["selector"] is not None:
+                intent["selector"] = self._load_json_field(
+                    row_id,
+                    "selector",
+                    row["selector"],
+                    None,
+                    (dict, type(None)),
+                )
             entries.append({
                 "id": row_id,
                 "timestamp": row["timestamp"],
@@ -180,7 +197,14 @@ class ProjectDB:
             })
         return entries
 
-    def _load_json_field(self, row_id: int, field: str, raw_value, default, expected_type: type):
+    def _load_json_field(
+        self,
+        row_id: int,
+        field: str,
+        raw_value,
+        default,
+        expected_type: type | tuple[type, ...],
+    ):
         if raw_value in (None, ""):
             return copy.deepcopy(default)
         try:
@@ -209,9 +233,9 @@ class ProjectDB:
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO intents
-                   (timestamp, class, method, action, component, data, mime_type, flags,
+                   (timestamp, class, method, action, component, data, mime_type, selector, flags,
                     categories, extras, stack_trace, pending_intent_flags, attack_surface)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     entry.get("timestamp"),
                     entry.get("class"),
@@ -220,6 +244,7 @@ class ProjectDB:
                     info.get("component"),
                     info.get("data"),
                     _stored_mime_type(info),
+                    _stored_selector(info),
                     info.get("flags") or None,
                     json.dumps(info.get("categories") or []),
                     json.dumps(info.get("extras") or {}),

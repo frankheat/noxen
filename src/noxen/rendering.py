@@ -224,6 +224,7 @@ def history_search_text(entry: dict) -> str:
                     add(category)
             if node.get("categoriesTruncated"):
                 add("additional categories omitted")
+            visit(node.get("selector"), depth + 1)
             visit(node.get("extras"), depth + 1)
             errors = node.get("errors")
             if isinstance(errors, list):
@@ -285,6 +286,11 @@ def history_search_text(entry: dict) -> str:
         if isinstance(omitted, int) and omitted > 0:
             add("additional extras omitted")
         add(metadata.get("error"))
+
+    selector = info.get("selector")
+    if isinstance(selector, dict):
+        add("selector")
+        visit(selector)
 
     return "\0".join(terms)
 
@@ -443,27 +449,40 @@ def _hook_caller_lines(class_name, method, attack_surface: dict) -> list[str]:
     return lines
 
 
-def _intent_type(info: dict, attack_surface: dict) -> str:
-    """EXPLICIT, or IMPLICIT qualified by who can receive it.
+def _intent_routing(info: dict, attack_surface: dict) -> str:
+    """Describe the effective Android routing source and scope.
 
-    An implicit intent limited with setPackage() reaches only that app; without it, any
-    app with a matching filter. Captures made before noxen recorded the package have no
-    `package` key, so they stay unqualified rather than guessed.
+    A base component takes precedence over a selector. Otherwise Android uses the
+    selector, when present, to choose a handler. Older captures lack `routingSource`,
+    so retain their previous unqualified representation rather than inventing data.
     """
+    source = attack_surface.get("routingSource")
+    has_selector = isinstance(info.get("selector"), dict)
     if attack_surface.get("intentExplicit"):
+        if source == "selector":
+            return "EXPLICIT [dim](selector)[/dim]"
+        if source == "base" and has_selector:
+            return "EXPLICIT [dim](base component)[/dim]"
         return "EXPLICIT"
-    if "package" not in info:
+
+    if source == "selector":
+        if attack_surface.get("routingPackage"):
+            return "IMPLICIT [dim](selector, package-scoped)[/dim]"
+        return "IMPLICIT [dim](selector, any app)[/dim]"
+
+    if "package" not in info and "routingPackage" not in attack_surface:
         return "IMPLICIT"
-    if info.get("package"):
+    package_name = attack_surface.get("routingPackage") if source else info.get("package")
+    if package_name:
         return "IMPLICIT [dim](package-scoped)[/dim]"
     return "IMPLICIT [dim](any app)[/dim]"
 
 
 def _payload_lines(info: dict, attack_surface: dict) -> list[str]:
     lines = []
-    # Type + Target only apply to sending methods.
+    # Routing + Target only apply to sending methods.
     if "intentExplicit" in attack_surface:
-        lines.append(_row("Type", _intent_type(info, attack_surface)))
+        lines.append(_row("Routing", _intent_routing(info, attack_surface)))
         lines += _target_lines(attack_surface)
         enforced = _format_permission(attack_surface.get("broadcastPermission"))
         if enforced:
@@ -551,6 +570,9 @@ def _intent_extra_children(node: dict) -> list[tuple[str | None, dict]]:
         children.append(("Category", {"kind": "field", "value": category}))
     if node.get("categoriesTruncated"):
         children.append((None, {"kind": "status", "value": "additional categories omitted"}))
+    selector = node.get("selector")
+    if isinstance(selector, dict):
+        children.append(("Selector", selector))
     extras = node.get("extras")
     if isinstance(extras, dict):
         children.append(("Extras", extras))
@@ -706,6 +728,61 @@ def _extras_lines(extras: dict, metadata: dict | None = None) -> list[str]:
     return lines
 
 
+def _selector_role(role: str | None) -> str | None:
+    return {
+        "active": "ACTIVE",
+        "ignored": "IGNORED [dim](base component takes precedence)[/dim]",
+        "redundant": "REDUNDANT [dim](same component as base)[/dim]",
+    }.get(role)
+
+
+def _selector_lines(selector: dict | None, role: str | None) -> list[str]:
+    """Render a top-level selector separately from the delivered base payload."""
+    if not isinstance(selector, dict):
+        return []
+
+    lines = [_section("SELECTOR")]
+    role_text = _selector_role(role)
+    if role_text:
+        lines.append(_row("Routing role", role_text))
+
+    if selector.get("kind") != "intent":
+        context = {"lines": 0, "active": set()}
+        _render_extra_node(lines, None, selector, "  ", True, context, 0)
+        return lines
+
+    lines.append(_row("Component", _markup(selector.get("component")) if selector.get("component") else "None"))
+    lines.append(_row("Action", _markup(selector.get("action")) if selector.get("action") else "None"))
+    lines.append(_row("Data (URI)", _markup(selector.get("data")) if selector.get("data") else "None"))
+    if "mimeType" in selector:
+        lines.append(_row("MIME Type", _markup(selector.get("mimeType")) if selector.get("mimeType") else "None"))
+    if selector.get("package"):
+        lines.append(_row("Package", _markup(selector.get("package"))))
+    lines.append(_row("Flags", _format_intent_flags(selector.get("flags") or 0)))
+    for category in selector.get("categories") or []:
+        lines.append(_row("Category", _markup(category)))
+    if selector.get("categoriesTruncated"):
+        lines.append("  [dim]additional categories omitted[/dim]")
+
+    roots: list[tuple[str | None, dict]] = []
+    nested_selector = selector.get("selector")
+    if isinstance(nested_selector, dict):
+        roots.append(("Selector", nested_selector))
+    extras = selector.get("extras")
+    if isinstance(extras, dict):
+        roots.append(("Extras", extras))
+    for error in selector.get("errors") or []:
+        roots.append((None, {"kind": "status", "value": error}))
+
+    context = {"lines": 0, "active": set()}
+    for index, (label, node) in enumerate(roots):
+        _render_extra_node(lines, label, node, "  ", index == len(roots) - 1, context, 0)
+        if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
+            lines.append("  [dim]… selector rendering limit reached[/dim]")
+            break
+    return lines
+
+
 def _stack_lines(trace: list, stack_depth: int, show_empty: bool = False) -> list[str]:
     if not trace:
         return ["", _section("STACK TRACE"), "  [dim]No stack trace captured.[/dim]"] if show_empty else []
@@ -724,6 +801,9 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     out.append("")
     out.append(_section("CAPTURED INTENT PAYLOAD"))
     out += _payload_lines(info, attack_surface)
+    selector = _selector_lines(info.get("selector"), attack_surface.get("selectorRoutingRole"))
+    if selector:
+        out += [""] + selector
     pending = _format_pending_flags(pending_flags_raw)
     if pending is not None:
         out += ["", _section("PENDING INTENT"), _row("Flags", pending)]

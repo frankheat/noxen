@@ -254,6 +254,7 @@ class ProjectDBTests(unittest.TestCase):
             self.assertIn("outcome", columns)
             self.assertIn("original_intent", columns)
             self.assertIn("mime_type", columns)
+            self.assertIn("selector", columns)
 
     def test_mime_type_roundtrip_distinguishes_absent_null_and_value(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -278,6 +279,28 @@ class ProjectDBTests(unittest.TestCase):
             self.assertEqual(entries[0]["intent"]["mimeType"], "image/*")
             self.assertIsNone(entries[1]["intent"]["mimeType"])
             self.assertNotIn("mimeType", entries[2]["intent"])
+
+    def test_selector_roundtrip_distinguishes_legacy_absent_null_and_tree(self):
+        selector = {
+            "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
+            "component": "com.example/.Target", "action": "com.example.SELECT",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "project.noxen")
+            db = ProjectDB(path)
+            db.create("project")
+            db.save_intent({"timestamp": "2026-10-10T08:00:00+00:00", "intent": {"selector": selector}})
+            db.save_intent({"timestamp": "2026-10-10T08:00:00+00:00", "intent": {"selector": None}})
+            db.save_intent({"timestamp": "2026-10-10T08:00:00+00:00", "intent": {}})
+            db.close()
+
+            reopened = ProjectDB(path)
+            entries = reopened.open_existing()
+            reopened.close()
+
+            self.assertEqual(entries[0]["intent"]["selector"], selector)
+            self.assertIsNone(entries[1]["intent"]["selector"])
+            self.assertNotIn("selector", entries[2]["intent"])
 
     def test_filter_lists_roundtrip_through_project_info(self):
         with tempfile.TemporaryDirectory() as tmp:

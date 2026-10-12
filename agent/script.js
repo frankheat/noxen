@@ -430,6 +430,10 @@ function serializeIntentNode(value, typeName, context, depth) {
     if (iterator.hasNext()) node.categoriesTruncated = true;
     return categories;
   });
+  readNestedIntent(intentValue, node, "selector", function(intent) {
+    var selector = intent.getSelector();
+    return selector === null ? null : serializeExtraNode(selector, context, depth + 1);
+  });
   readNestedIntent(intentValue, node, "extras", function(intent) {
     var extras = intent.getExtras();
     return extras === null ? null : serializeExtraNode(extras, context, depth + 1);
@@ -587,6 +591,21 @@ function dumpIntent(intent) {
   // Package set with setPackage(): limits an implicit intent to that app (null = any app).
   try { infoIntent.package = intent.getPackage() || null; } catch (e) { infoIntent.package = null; }
   try { infoIntent.flags = intent.getFlags(); } catch (e) { infoIntent.flags = 0; }
+
+  // A selector is a second Intent used for routing when the base Intent has no
+  // explicit component. Keep it structured and separate from the base payload:
+  // merging the two would hide which fields Android actually used.
+  try {
+    var selector = intent.getSelector();
+    infoIntent.selector = selector === null
+      ? null
+      : serializeExtraNode(selector, createExtraSerializationContext(), 0);
+  } catch (e) {
+    infoIntent.selector = {
+      kind: "error", type: "android.content.Intent",
+      reason: "selector could not be read (" + extraErrorKind(e) + ")"
+    };
+  }
 
   var catList = [];
   try {
@@ -835,10 +854,56 @@ function fillTargetFromInfo(result, info, pm) {
   result.targetPermission = describePermission(pm, effectiveComponentPermission(info));
 }
 
+function componentIdentity(component) {
+  if (component === null) return null;
+  return String(component.getPackageName()) + "/" + String(component.getClassName());
+}
+
+// Match Android's resolver precedence. A base component wins. The selector is
+// consulted only when the base Intent has no component; it is not a fallback if
+// that explicit base component cannot be resolved.
+function describeIntentRouting(intent) {
+  var baseComponent = null;
+  var selector = null;
+  try { baseComponent = intent.getComponent(); } catch (e) {}
+  try { selector = intent.getSelector(); } catch (e) {}
+  var routingIntent = intent;
+  var routingComponent = baseComponent;
+  var source = "base";
+  var selectorRole = null;
+
+  if (baseComponent !== null) {
+    if (selector !== null) {
+      selectorRole = "ignored";
+      try {
+        var selectorComponent = selector.getComponent();
+        if (selectorComponent !== null && componentIdentity(selectorComponent) === componentIdentity(baseComponent)) {
+          selectorRole = "redundant";
+        }
+      } catch (e) {}
+    }
+  } else if (selector !== null) {
+    routingIntent = selector;
+    source = "selector";
+    selectorRole = "active";
+    try { routingComponent = selector.getComponent(); } catch (e) { routingComponent = null; }
+  }
+
+  var packageName = null;
+  try { packageName = routingIntent.getPackage() || null; } catch (e) {}
+  return {
+    intent: routingIntent,
+    component: routingComponent,
+    packageName: packageName,
+    source: source,
+    selectorRole: selectorRole
+  };
+}
+
 // Populate target fields on `result`: the resolved component, its exported flag and
 // required permission, plus flags for implicit resolution / unreadable / multi-receiver.
-function resolveSendTarget(pm, targetType, intent, result) {
-  var cn = intent.getComponent();
+function resolveSendTarget(pm, targetType, intent, routing, result) {
+  var cn = routing.component;
   if (cn !== null) {
     result.targetComponent = cn.getPackageName() + "/" + cn.getClassName();
     try {
@@ -897,7 +962,11 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
       result.callerExported = info.exported.value;
       result.callerPermission = describePermission(pm, effectiveComponentPermission(info));
     } else if (intent !== null) {
-      result.intentExplicit = intent.getComponent() !== null;
+      var routing = describeIntentRouting(intent);
+      result.routingSource = routing.source;
+      if (routing.selectorRole !== null) result.selectorRoutingRole = routing.selectorRole;
+      result.intentExplicit = routing.component !== null;
+      result.routingPackage = routing.packageName;
       var targetType = SENDING_TARGET_TYPE[methodName];
       if (targetType) result.targetType = targetType;
       // 'this' is the Context for ContextWrapper sends; the Context is the first
@@ -905,7 +974,7 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
       var sendContext = (self && self.getPackageManager) ? self : firstArg;
       var sendPm = getPackageManagerSafe(sendContext);
       if (sendPm && targetType) {
-        resolveSendTarget(sendPm, targetType, intent, result);
+        resolveSendTarget(sendPm, targetType, intent, routing, result);
         if (sendPermission) result.broadcastPermission = describePermission(sendPm, sendPermission);
       }
     }

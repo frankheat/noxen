@@ -13864,6 +13864,10 @@ std_string_c_str (StdString * self)
       if (iterator.hasNext()) node.categoriesTruncated = true;
       return categories;
     });
+    readNestedIntent(intentValue, node, "selector", function(intent) {
+      var selector = intent.getSelector();
+      return selector === null ? null : serializeExtraNode(selector, context, depth + 1);
+    });
     readNestedIntent(intentValue, node, "extras", function(intent) {
       var extras = intent.getExtras();
       return extras === null ? null : serializeExtraNode(extras, context, depth + 1);
@@ -14038,6 +14042,16 @@ std_string_c_str (StdString * self)
       infoIntent.flags = intent.getFlags();
     } catch (e) {
       infoIntent.flags = 0;
+    }
+    try {
+      var selector = intent.getSelector();
+      infoIntent.selector = selector === null ? null : serializeExtraNode(selector, createExtraSerializationContext(), 0);
+    } catch (e) {
+      infoIntent.selector = {
+        kind: "error",
+        type: "android.content.Intent",
+        reason: "selector could not be read (" + extraErrorKind(e) + ")"
+      };
     }
     var catList = [];
     try {
@@ -14264,8 +14278,61 @@ std_string_c_str (StdString * self)
     result.targetExported = info.exported.value;
     result.targetPermission = describePermission(pm, effectiveComponentPermission(info));
   }
-  function resolveSendTarget(pm, targetType, intent, result) {
-    var cn = intent.getComponent();
+  function componentIdentity(component) {
+    if (component === null) return null;
+    return String(component.getPackageName()) + "/" + String(component.getClassName());
+  }
+  function describeIntentRouting(intent) {
+    var baseComponent = null;
+    var selector = null;
+    try {
+      baseComponent = intent.getComponent();
+    } catch (e) {
+    }
+    try {
+      selector = intent.getSelector();
+    } catch (e) {
+    }
+    var routingIntent = intent;
+    var routingComponent = baseComponent;
+    var source = "base";
+    var selectorRole = null;
+    if (baseComponent !== null) {
+      if (selector !== null) {
+        selectorRole = "ignored";
+        try {
+          var selectorComponent = selector.getComponent();
+          if (selectorComponent !== null && componentIdentity(selectorComponent) === componentIdentity(baseComponent)) {
+            selectorRole = "redundant";
+          }
+        } catch (e) {
+        }
+      }
+    } else if (selector !== null) {
+      routingIntent = selector;
+      source = "selector";
+      selectorRole = "active";
+      try {
+        routingComponent = selector.getComponent();
+      } catch (e) {
+        routingComponent = null;
+      }
+    }
+    var packageName = null;
+    try {
+      packageName = routingIntent.getPackage() || null;
+    } catch (e) {
+    }
+    return {
+      intent: routingIntent,
+      component: routingComponent,
+      packageName,
+      source,
+      selectorRole
+    };
+  }
+  function resolveSendTarget(pm, targetType, intent, routing, result) {
+    var cn = routing.component;
     if (cn !== null) {
       result.targetComponent = cn.getPackageName() + "/" + cn.getClassName();
       try {
@@ -14320,13 +14387,17 @@ std_string_c_str (StdString * self)
         result.callerExported = info.exported.value;
         result.callerPermission = describePermission(pm, effectiveComponentPermission(info));
       } else if (intent !== null) {
-        result.intentExplicit = intent.getComponent() !== null;
+        var routing = describeIntentRouting(intent);
+        result.routingSource = routing.source;
+        if (routing.selectorRole !== null) result.selectorRoutingRole = routing.selectorRole;
+        result.intentExplicit = routing.component !== null;
+        result.routingPackage = routing.packageName;
         var targetType = SENDING_TARGET_TYPE[methodName];
         if (targetType) result.targetType = targetType;
         var sendContext = self && self.getPackageManager ? self : firstArg;
         var sendPm = getPackageManagerSafe(sendContext);
         if (sendPm && targetType) {
-          resolveSendTarget(sendPm, targetType, intent, result);
+          resolveSendTarget(sendPm, targetType, intent, routing, result);
           if (sendPermission) result.broadcastPermission = describePermission(sendPm, sendPermission);
         }
       }

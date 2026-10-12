@@ -551,7 +551,7 @@ class RenderingTests(unittest.TestCase):
         rendered = render_intent_detail(entry, show_stack=False, stack_depth=1)
 
         Text.from_markup(rendered)
-        self.assertIn("  Type          : EXPLICIT", plain(rendered))
+        self.assertIn("  Routing       : EXPLICIT", plain(rendered))
         self.assertIn("  Target        : com.example/.Receiver2", plain(rendered))
         self.assertIn("                  ├─ Exported            : true", plain(rendered))
         self.assertIn("                  └─ Required Permission : com.x.PERM (normal)", plain(rendered))
@@ -609,12 +609,12 @@ class RenderingTests(unittest.TestCase):
         scoped = dict(base, intent={"action": "com.example.PING", "package": "com.example"})
         legacy = dict(base, intent={"action": "com.example.PING"})  # captured before the package was recorded
 
-        self.assertIn("  Type          : IMPLICIT (any app)", plain(render_intent_detail(open_to_all)))
+        self.assertIn("  Routing       : IMPLICIT (any app)", plain(render_intent_detail(open_to_all)))
         self.assertNotIn("Package", plain(render_intent_detail(open_to_all)))
-        self.assertIn("  Type          : IMPLICIT (package-scoped)", plain(render_intent_detail(scoped)))
+        self.assertIn("  Routing       : IMPLICIT (package-scoped)", plain(render_intent_detail(scoped)))
         self.assertIn("  Package       : com.example", plain(render_intent_detail(scoped)))
         legacy_text = plain(render_intent_detail(legacy))
-        self.assertIn("  Type          : IMPLICIT\n", legacy_text)  # no guess for old captures
+        self.assertIn("  Routing       : IMPLICIT\n", legacy_text)  # no guess for old captures
 
     def test_explicit_intent_type_is_unqualified(self):
         entry = {
@@ -623,7 +623,109 @@ class RenderingTests(unittest.TestCase):
             "intent": {"component": "com.example/.A", "package": None},
             "attackSurface": {"intentExplicit": True, "targetComponent": "com.example/.A", "targetType": "activity"},
         }
-        self.assertIn("  Type          : EXPLICIT\n", plain(render_intent_detail(entry)))
+        self.assertIn("  Routing       : EXPLICIT\n", plain(render_intent_detail(entry)))
+
+    def test_selector_controls_routing_when_base_has_no_component(self):
+        selector = {
+            "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
+            "component": "com.example/.SelectorActivity", "action": "com.example.SELECT",
+            "data": "content://selector/1", "mimeType": "application/selector",
+            "package": None, "flags": 0, "categories": [], "extras": None,
+        }
+        entry = {
+            "id": 1, "timestamp": "2026-10-10T08:00:00+00:00",
+            "class": "com.example.MainActivity", "method": "startActivity", "stackTrace": [],
+            "intent": {
+                "component": None, "action": "com.example.BASE", "package": None,
+                "selector": selector,
+            },
+            "attackSurface": {
+                "intentExplicit": True, "routingSource": "selector",
+                "selectorRoutingRole": "active", "routingPackage": None,
+                "targetComponent": "com.example/.SelectorActivity", "targetType": "activity",
+            },
+        }
+
+        visible = plain(render_intent_detail(entry))
+
+        self.assertIn("  Routing       : EXPLICIT (selector)", visible)
+        self.assertIn("  Target        : com.example/.SelectorActivity", visible)
+        self.assertNotIn("SelectorActivity (resolved)", visible)
+        self.assertIn("[SELECTOR]", visible)
+        self.assertIn("  Routing role  : ACTIVE", visible)
+        self.assertIn("  Action        : com.example.SELECT", visible)
+        self.assertIn("  MIME Type     : application/selector", visible)
+
+        selector["component"] = None
+        selector["package"] = "com.example"
+        entry["attackSurface"].update({
+            "intentExplicit": False,
+            "routingPackage": "com.example",
+            "targetComponent": None,
+        })
+        self.assertIn(
+            "  Routing       : IMPLICIT (selector, package-scoped)",
+            plain(render_intent_detail(entry)),
+        )
+
+        selector["package"] = None
+        entry["attackSurface"]["routingPackage"] = None
+        self.assertIn(
+            "  Routing       : IMPLICIT (selector, any app)",
+            plain(render_intent_detail(entry)),
+        )
+
+    def test_base_component_takes_precedence_over_different_selector(self):
+        selector = {
+            "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
+            "component": "com.example/.ActivityB", "action": None, "data": None,
+            "mimeType": None, "package": None, "flags": 0, "categories": [], "extras": None,
+        }
+        entry = {
+            "id": 2, "timestamp": "2026-10-10T08:00:00+00:00",
+            "class": "com.example.MainActivity", "method": "startActivity", "stackTrace": [],
+            "intent": {"component": "com.example/.ActivityA", "selector": selector},
+            "attackSurface": {
+                "intentExplicit": True, "routingSource": "base",
+                "selectorRoutingRole": "ignored", "routingPackage": None,
+                "targetComponent": "com.example/.ActivityA", "targetType": "activity",
+            },
+        }
+
+        visible = plain(render_intent_detail(entry))
+
+        self.assertIn("  Routing       : EXPLICIT (base component)", visible)
+        self.assertIn("  Target        : com.example/.ActivityA", visible)
+        self.assertIn("  Routing role  : IGNORED (base component takes precedence)", visible)
+        self.assertIn("  Component     : com.example/.ActivityB", visible)
+
+        entry["attackSurface"]["selectorRoutingRole"] = "redundant"
+        self.assertIn(
+            "  Routing role  : REDUNDANT (same component as base)",
+            plain(render_intent_detail(entry)),
+        )
+
+    def test_history_search_includes_recursive_selector_fields(self):
+        entry = {
+            "intent": {
+                "selector": {
+                    "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
+                    "action": "com.example.SELECT", "component": "com.example/.SelectorActivity",
+                    "data": None, "mimeType": None, "package": None, "flags": 0,
+                    "categories": [], "extras": None,
+                    "selector": {
+                        "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
+                        "action": "com.example.NESTED", "component": None, "data": None,
+                        "mimeType": "application/nested-selector", "package": None,
+                        "flags": 0, "categories": [], "extras": None,
+                    },
+                },
+            },
+        }
+
+        self.assertTrue(history_search_matches(entry, "selectoractivity"))
+        self.assertTrue(history_search_matches(entry, "com.example.nested"))
+        self.assertTrue(history_search_matches(entry, "application/nested-selector"))
 
     def test_broadcast_without_manifest_receiver_is_not_called_unresolved(self):
         base = {
