@@ -215,6 +215,19 @@ def history_search_text(entry: dict) -> str:
                     if state["full"] or state["nodes"] >= _HISTORY_SEARCH_MAX_NODES:
                         break
                     visit(item, depth + 1)
+        elif kind == "clipdata":
+            add(node.get("label"))
+            for mime_type in node.get("mimeTypes") or []:
+                add(mime_type)
+            for item in node.get("items") or []:
+                visit(item, depth + 1)
+            add(node.get("descriptionError"))
+        elif kind == "clipitem":
+            for field in ("text", "html", "uri"):
+                add(node.get(field))
+            visit(node.get("intent"), depth + 1)
+            for error in node.get("errors") or []:
+                add(error)
         elif kind == "intent":
             for field in ("action", "data", "mimeType", "component", "package", "flags"):
                 add(node.get(field))
@@ -225,6 +238,7 @@ def history_search_text(entry: dict) -> str:
             if node.get("categoriesTruncated"):
                 add("additional categories omitted")
             visit(node.get("selector"), depth + 1)
+            visit(node.get("clipData"), depth + 1)
             visit(node.get("extras"), depth + 1)
             errors = node.get("errors")
             if isinstance(errors, list):
@@ -291,6 +305,11 @@ def history_search_text(entry: dict) -> str:
     if isinstance(selector, dict):
         add("selector")
         visit(selector)
+
+    clip_data = info.get("clipData")
+    if isinstance(clip_data, dict):
+        add("clipdata")
+        visit(clip_data)
 
     return "\0".join(terms)
 
@@ -573,6 +592,9 @@ def _intent_extra_children(node: dict) -> list[tuple[str | None, dict]]:
     selector = node.get("selector")
     if isinstance(selector, dict):
         children.append(("Selector", selector))
+    clip_data = node.get("clipData")
+    if isinstance(clip_data, dict):
+        children.append(("ClipData", clip_data))
     extras = node.get("extras")
     if isinstance(extras, dict):
         children.append(("Extras", extras))
@@ -597,6 +619,26 @@ def _extra_node_children(node: dict) -> list[tuple[str | None, dict]]:
                 children.append((f"[{index}]", item))
     elif kind == "intent":
         children.extend(_intent_extra_children(node))
+    elif kind == "clipdata":
+        if node.get("label") is not None:
+            children.append(("Label", {"kind": "field", "value": node["label"]}))
+        for mime_type in node.get("mimeTypes") or []:
+            children.append(("MIME Type", {"kind": "field", "value": mime_type}))
+        if node.get("mimeTypesOmitted"):
+            children.append((None, {"kind": "status", "value": "additional MIME types omitted"}))
+        if node.get("descriptionError"):
+            children.append((None, {"kind": "status", "value": node["descriptionError"]}))
+        for index, item in enumerate(node.get("items") or []):
+            if isinstance(item, dict):
+                children.append((f"Item {index}", item))
+    elif kind == "clipitem":
+        for field, label in (("text", "Text"), ("html", "HTML"), ("uri", "URI")):
+            if node.get(field) is not None:
+                children.append((label, {"kind": "field", "value": node[field]}))
+        if isinstance(node.get("intent"), dict):
+            children.append(("Intent", node["intent"]))
+        for error in node.get("errors") or []:
+            children.append((None, {"kind": "status", "value": error}))
     elif kind == "opaque":
         children.append((None, {"kind": "status", "value": "opaque object"}))
 
@@ -628,13 +670,13 @@ def _extra_node_header(label: str | None, node: dict) -> str:
             shown = f'"{shown}"'
         suffix = " [dim](truncated)[/dim]" if node.get("truncated") else ""
         return f"{typed_label} : {shown}{suffix}"
-    if kind in {"bundle", "array", "list"}:
+    if kind in {"bundle", "array", "list", "clipdata"}:
         count = node.get("count")
         if count is not None:
             noun = "item" if count == 1 else "items"
             return f"{typed_label} [dim]({_markup(count)} {noun})[/dim]"
         return typed_label
-    if kind == "intent":
+    if kind in {"intent", "clipitem"}:
         return typed_label
     if kind == "reference":
         return f"{typed_label} : [dim]reference to #{_markup(node.get('referenceId'))}[/dim]"
@@ -728,6 +770,71 @@ def _extras_lines(extras: dict, metadata: dict | None = None) -> list[str]:
     return lines
 
 
+def _clip_data_has_uri(clip_data: dict) -> bool:
+    """Check captured ClipData items and nested Intent data, without following extras."""
+    pending = [(clip_data, 0)]
+    seen: set[int] = set()
+    while pending and len(seen) < _EXTRA_RENDER_MAX_LINES:
+        node, depth = pending.pop()
+        if not isinstance(node, dict) or depth > _EXTRA_RENDER_MAX_DEPTH or id(node) in seen:
+            continue
+        seen.add(id(node))
+        kind = node.get("kind")
+        if kind == "clipdata":
+            items = node.get("items")
+            if isinstance(items, list):
+                pending.extend((item, depth + 1) for item in items[:_EXTRA_RENDER_MAX_LINES])
+        elif kind == "clipitem":
+            if isinstance(node.get("uri"), str) and node["uri"]:
+                return True
+            pending.append((node.get("intent"), depth + 1))
+        elif kind == "intent":
+            if isinstance(node.get("data"), str) and node["data"]:
+                return True
+            pending.append((node.get("clipData"), depth + 1))
+    return False
+
+
+def _clip_data_lines(clip_data: dict | None, intent_flags) -> list[str]:
+    if not isinstance(clip_data, dict):
+        return []
+    lines = [_section("CLIP DATA")]
+    if clip_data.get("kind") == "clipdata" and isinstance(clip_data.get("count"), int):
+        count = clip_data["count"]
+        lines[0] += f" ({count} {'item' if count == 1 else 'items'})"
+    if _clip_data_has_uri(clip_data):
+        flags = _parse_flag_int(intent_flags)
+        if flags is None:
+            grant_flags = "unavailable"
+        else:
+            grant_flags = " | ".join(
+                name for mask, name in (
+                    (0x01, "READ"),
+                    (0x02, "WRITE"),
+                    (0x40, "PERSISTABLE"),
+                    (0x80, "PREFIX"),
+                ) if flags & mask
+            ) or "none"
+        lines.append(_row("Grant flags", f"{grant_flags} [dim](outer Intent)[/dim]"))
+    context = {"lines": 0, "active": set()}
+    if clip_data.get("kind") == "clipdata":
+        roots = []
+        for label, node in _extra_node_children(clip_data):
+            if node.get("kind") == "field":
+                lines.append(_row(label or "", _extra_display_text(node.get("value"))))
+            else:
+                roots.append((label, node))
+        for index, (label, node) in enumerate(roots):
+            _render_extra_node(lines, label, node, "  ", index == len(roots) - 1, context, 0)
+            if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
+                break
+    else:
+        _render_extra_node(lines, None, clip_data, "  ", True, context, 0)
+    if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
+        lines.append("  [dim]… ClipData rendering limit reached[/dim]")
+    return lines
+
+
 def _selector_role(role: str | None) -> str | None:
     return {
         "active": "ACTIVE",
@@ -768,6 +875,9 @@ def _selector_lines(selector: dict | None, role: str | None) -> list[str]:
     nested_selector = selector.get("selector")
     if isinstance(nested_selector, dict):
         roots.append(("Selector", nested_selector))
+    clip_data = selector.get("clipData")
+    if isinstance(clip_data, dict):
+        roots.append(("ClipData", clip_data))
     extras = selector.get("extras")
     if isinstance(extras, dict):
         roots.append(("Extras", extras))
@@ -804,6 +914,9 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     selector = _selector_lines(info.get("selector"), attack_surface.get("selectorRoutingRole"))
     if selector:
         out += [""] + selector
+    clip_data = _clip_data_lines(info.get("clipData"), info.get("flags"))
+    if clip_data:
+        out += [""] + clip_data
     pending = _format_pending_flags(pending_flags_raw)
     if pending is not None:
         out += ["", _section("PENDING INTENT"), _row("Flags", pending)]

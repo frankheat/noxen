@@ -727,6 +727,69 @@ class RenderingTests(unittest.TestCase):
         self.assertTrue(history_search_matches(entry, "com.example.nested"))
         self.assertTrue(history_search_matches(entry, "application/nested-selector"))
 
+    def test_clip_data_renders_and_searches_nested_intent(self):
+        clip = {
+            "kind": "clipdata", "type": "android.content.ClipData", "displayType": "ClipData",
+            "label": "documents", "mimeTypes": ["text/html"], "count": 2,
+            "items": [
+                {"kind": "clipitem", "displayType": "Item", "uri": "content://example/private/report"},
+                {"kind": "clipitem", "displayType": "Item", "text": "hello [world]",
+                 "html": "<b>hello</b>",
+                 "intent": {"kind": "intent", "displayType": "Intent", "action": "example.NESTED",
+                            "flags": 2,
+                            "clipData": {"kind": "clipdata", "displayType": "ClipData",
+                                         "label": "inner clip", "mimeTypes": ["text/plain"],
+                                         "count": 1, "items": [{"kind": "clipitem", "text": "inner text"}]}}},
+            ],
+        }
+        entry = {"id": 1, "timestamp": "2026-10-13T08:00:00+00:00", "class": "Main",
+                 "method": "startActivity", "intent": {"flags": 1, "clipData": clip}}
+        detail = plain(render_intent_detail(entry))
+        self.assertIn("[CLIP DATA] (2 items)", detail)
+        self.assertNotIn("└─ [ClipData]", detail)
+        self.assertIn("  Label         : documents", detail)
+        self.assertIn("  MIME Type     : text/html", detail)
+        self.assertIn("  ├─ Item 0 [Item]", detail)
+        self.assertIn("Grant flags   : READ (outer Intent)", detail)
+        self.assertIn("Grant flags   : READ (outer Intent)", plain(render_intercept_block(
+            {"className": "Main", "methodName": "startActivity", "infoIntent": entry["intent"]},
+            1, False, 10,
+        )))
+        for value in ("documents", "text/html", "content://example/private/report",
+                      "hello [world]", "example.NESTED", "inner clip", "inner text"):
+            self.assertIn(value, detail)
+            self.assertTrue(history_search_matches(entry, value))
+        self.assertIn("FLAG_GRANT_READ_URI_PERMISSION", detail)
+        for flags, expected in ((0, "none"), (0xC3, "READ | WRITE | PERSISTABLE | PREFIX"),
+                                ("invalid", "unavailable")):
+            updated = {**entry, "intent": {**entry["intent"], "flags": flags}}
+            self.assertIn(f"Grant flags   : {expected} (outer Intent)", plain(render_intent_detail(updated)))
+        self.assertNotIn("[CLIP DATA]", plain(render_intent_detail({**entry, "intent": {}})))
+
+    def test_clip_data_grant_flags_only_appear_with_captured_uri(self):
+        inner = {"kind": "clipdata", "count": 1, "items": [
+            {"kind": "clipitem", "text": "inner text"},
+        ]}
+        nested = {"kind": "intent", "data": None, "flags": 2, "clipData": inner}
+        clip = {"kind": "clipdata", "count": 1, "items": [
+            {"kind": "clipitem", "text": "visible text", "intent": nested},
+        ]}
+        entry = {"id": 1, "timestamp": "2026-10-13T08:00:00+00:00", "class": "Main",
+                 "method": "startActivity", "intent": {"flags": 1, "clipData": clip}}
+
+        self.assertIn("[CLIP DATA]", plain(render_intent_detail(entry)))
+        self.assertNotIn("Grant flags", plain(render_intent_detail(entry)))
+        self.assertNotIn("Grant flags", plain(render_intercept_block(
+            {"className": "Main", "methodName": "startActivity", "infoIntent": entry["intent"]},
+            1, False, 10,
+        )))
+
+        inner["items"][0]["uri"] = "content://example/nested"
+        self.assertIn("Grant flags   : READ (outer Intent)", plain(render_intent_detail(entry)))
+        del inner["items"][0]["uri"]
+        nested["data"] = "content://example/intent-data"
+        self.assertIn("Grant flags   : READ (outer Intent)", plain(render_intent_detail(entry)))
+
     def test_broadcast_without_manifest_receiver_is_not_called_unresolved(self):
         base = {
             "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",

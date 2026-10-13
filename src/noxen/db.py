@@ -13,6 +13,7 @@ _MIGRATED_INTENT_COLUMNS = {
     "attack_surface": "TEXT",
     "mime_type": "TEXT",
     "selector": "TEXT",
+    "clip_data": "TEXT",
 }
 
 
@@ -24,6 +25,11 @@ def _stored_mime_type(info: dict):
 def _stored_selector(info: dict):
     """Distinguish legacy captures from a captured absent/present selector."""
     return json.dumps(info.get("selector")) if "selector" in info else None
+
+
+def _stored_clip_data(info: dict):
+    """Preserve the distinction between old captures and an absent ClipData."""
+    return json.dumps(info.get("clipData")) if "clipData" in info else None
 
 
 class ProjectDB:
@@ -120,6 +126,7 @@ class ProjectDB:
                 data                 TEXT,
                 mime_type            TEXT,
                 selector             TEXT,
+                clip_data            TEXT,
                 flags                INTEGER,
                 categories           TEXT,
                 extras               TEXT,
@@ -170,6 +177,10 @@ class ProjectDB:
                     row["selector"],
                     None,
                     (dict, type(None)),
+                )
+            if row["clip_data"] is not None:
+                intent["clipData"] = self._load_json_field(
+                    row_id, "clip_data", row["clip_data"], None, (dict, type(None))
                 )
             entries.append({
                 "id": row_id,
@@ -233,9 +244,9 @@ class ProjectDB:
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO intents
-                   (timestamp, class, method, action, component, data, mime_type, selector, flags,
+                   (timestamp, class, method, action, component, data, mime_type, selector, clip_data, flags,
                     categories, extras, stack_trace, pending_intent_flags, attack_surface)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     entry.get("timestamp"),
                     entry.get("class"),
@@ -245,6 +256,7 @@ class ProjectDB:
                     info.get("data"),
                     _stored_mime_type(info),
                     _stored_selector(info),
+                    _stored_clip_data(info),
                     info.get("flags") or None,
                     json.dumps(info.get("categories") or []),
                     json.dumps(info.get("extras") or {}),

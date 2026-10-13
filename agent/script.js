@@ -434,10 +434,73 @@ function serializeIntentNode(value, typeName, context, depth) {
     var selector = intent.getSelector();
     return selector === null ? null : serializeExtraNode(selector, context, depth + 1);
   });
+  readNestedIntent(intentValue, node, "clipData", function(intent) {
+    var clip = intent.getClipData();
+    return clip === null ? null : serializeExtraNode(clip, context, depth + 1);
+  });
   readNestedIntent(intentValue, node, "extras", function(intent) {
     var extras = intent.getExtras();
     return extras === null ? null : serializeExtraNode(extras, context, depth + 1);
   });
+  return node;
+}
+
+function serializeClipDataNode(value, typeName, context, depth) {
+  var registered = registerExtraContainer(value, typeName, context);
+  if (registered.reference) return registered.reference;
+  var node = {
+    kind: "clipdata", type: typeName, displayType: "ClipData",
+    referenceId: registered.referenceId, count: 0, mimeTypes: [], items: []
+  };
+  try {
+    var description = value.getDescription();
+    if (description !== null) {
+      var label = description.getLabel();
+      if (label !== null) node.label = boundedExtraText(label).value;
+      var mimeCount = Number(description.getMimeTypeCount());
+      for (var m = 0; m < Math.min(mimeCount, EXTRA_MAX_CONTAINER_ITEMS); m++) {
+        node.mimeTypes.push(boundedExtraText(description.getMimeType(m)).value);
+      }
+      if (mimeCount > node.mimeTypes.length) node.mimeTypesOmitted = mimeCount - node.mimeTypes.length;
+    }
+  } catch (error) {
+    node.descriptionError = "description could not be read (" + extraErrorKind(error) + ")";
+  }
+  try {
+    node.count = Number(value.getItemCount());
+    var captured = Math.min(node.count, EXTRA_MAX_CONTAINER_ITEMS);
+    for (var i = 0; i < captured; i++) {
+      if (context.nodes >= EXTRA_MAX_TOTAL_NODES) break;
+      var itemLimit = reserveExtraNode(context, "android.content.ClipData$Item", depth + 1);
+      if (itemLimit) break;
+      var itemNode = { kind: "clipitem", type: "android.content.ClipData$Item", displayType: "Item" };
+      node.items.push(itemNode);
+      try {
+        var item = value.getItemAt(i);
+        readNestedIntent(item, itemNode, "text", function(value) {
+          var text = value.getText();
+          return text === null ? null : boundedExtraText(text).value;
+        });
+        readNestedIntent(item, itemNode, "html", function(value) {
+          var html = value.getHtmlText();
+          return html === null ? null : boundedExtraText(html).value;
+        });
+        readNestedIntent(item, itemNode, "uri", function(value) {
+          var uri = value.getUri();
+          return uri === null ? null : boundedExtraText(uri).value;
+        });
+        readNestedIntent(item, itemNode, "intent", function(value) {
+          var nested = value.getIntent();
+          return nested === null ? null : serializeExtraNode(nested, context, depth + 2);
+        });
+      } catch (error) {
+        itemNode.error = "item could not be read (" + extraErrorKind(error) + ")";
+      }
+    }
+    if (node.count > node.items.length) node.omitted = node.count - node.items.length;
+  } catch (error) {
+    node.error = "ClipData could not be read (" + extraErrorKind(error) + ")";
+  }
   return node;
 }
 
@@ -457,6 +520,9 @@ function serializeExtraNode(value, context, depth) {
     }
     if (typeName === "android.content.Intent") {
       return serializeIntentNode(value, typeName, context, depth);
+    }
+    if (typeName === "android.content.ClipData") {
+      return serializeClipDataNode(value, typeName, context, depth);
     }
     if (typeName && typeName[0] === "[") {
       return serializeExtraArray(value, typeName, context, depth);
@@ -591,6 +657,18 @@ function dumpIntent(intent) {
   // Package set with setPackage(): limits an implicit intent to that app (null = any app).
   try { infoIntent.package = intent.getPackage() || null; } catch (e) { infoIntent.package = null; }
   try { infoIntent.flags = intent.getFlags(); } catch (e) { infoIntent.flags = 0; }
+
+  try {
+    var clip = intent.getClipData();
+    infoIntent.clipData = clip === null
+      ? null
+      : serializeExtraNode(clip, createExtraSerializationContext(), 0);
+  } catch (e) {
+    infoIntent.clipData = {
+      kind: "error", type: "android.content.ClipData",
+      reason: "ClipData could not be read (" + extraErrorKind(e) + ")"
+    };
+  }
 
   // A selector is a second Intent used for routing when the base Intent has no
   // explicit component. Keep it structured and separate from the base payload:

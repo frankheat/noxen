@@ -255,6 +255,7 @@ class ProjectDBTests(unittest.TestCase):
             self.assertIn("original_intent", columns)
             self.assertIn("mime_type", columns)
             self.assertIn("selector", columns)
+            self.assertIn("clip_data", columns)
 
     def test_mime_type_roundtrip_distinguishes_absent_null_and_value(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -301,6 +302,24 @@ class ProjectDBTests(unittest.TestCase):
             self.assertEqual(entries[0]["intent"]["selector"], selector)
             self.assertIsNone(entries[1]["intent"]["selector"])
             self.assertNotIn("selector", entries[2]["intent"])
+
+    def test_clip_data_roundtrip_distinguishes_legacy_absent_null_and_tree(self):
+        clip = {"kind": "clipdata", "label": "documents", "count": 1,
+                "items": [{"kind": "clipitem", "uri": "content://example/document"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            db = ProjectDB(os.path.join(tmp, "project.noxen"))
+            db.create("project")
+            for info in ({"clipData": clip}, {"clipData": None}, {}):
+                db.save_intent({"timestamp": "2026-10-13T08:00:00+00:00", "intent": info})
+            db.close()
+
+            reopened = ProjectDB(os.path.join(tmp, "project.noxen"))
+            entries = reopened.open_existing()
+            reopened.close()
+
+            self.assertEqual(entries[0]["intent"]["clipData"], clip)
+            self.assertIsNone(entries[1]["intent"]["clipData"])
+            self.assertNotIn("clipData", entries[2]["intent"])
 
     def test_filter_lists_roundtrip_through_project_info(self):
         with tempfile.TemporaryDirectory() as tmp:
