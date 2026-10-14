@@ -1735,6 +1735,9 @@ class NoxenApp(App):
         self.query_one("#info_switcher", ContentSwitcher).current = view
         for button in self.query(".info-nav"):
             button.set_class(button.id == nav_id, "active")
+        self.refresh_bindings()
+        if view == "info_view_components" and self._app_info:
+            self.call_after_refresh(self._clamp_info_component_detail_to_available_space)
 
     def action_info_refresh(self) -> None:
         self._fetch_app_info_worker()
@@ -1777,6 +1780,7 @@ class NoxenApp(App):
             overview.scroll_home(animate=False)
             self._refresh_info_permissions()
             self._refresh_info_components()
+            self.refresh_bindings()
         except Exception:
             pass
 
@@ -1837,6 +1841,7 @@ class NoxenApp(App):
                 self.query_one(widget_id, DataTable).clear()
             for widget_id in ("#info_comp_detail", "#info_overview_log"):
                 self.query_one(widget_id, RichLog).clear()
+            self.refresh_bindings()
         except Exception:
             pass
 
@@ -2188,6 +2193,8 @@ class NoxenApp(App):
             self._focus_history_main_panel()
             if self._history_table_height is None:
                 self.call_after_refresh(self._init_panel_heights)
+        elif pane_id == "tab_info" and self.check_action("resize_panel_up", ()):
+            self.call_after_refresh(self._clamp_info_component_detail_to_available_space)
         elif pane_id == "tab_log":
             try:
                 self.query_one("#log_output", RichLog).focus()
@@ -2276,6 +2283,11 @@ class NoxenApp(App):
         if action in ("resize_panel_up", "resize_panel_down"):
             if self._active_tab == "tab_intercept":
                 return True if self._intercept_command_bar_visible else None
+            if self._active_tab == "tab_info":
+                return bool(
+                    self._app_info
+                    and self.query_one("#info_switcher", ContentSwitcher).current == "info_view_components"
+                )
             return self._active_tab == "tab_history"
         return True
 
@@ -2284,6 +2296,8 @@ class NoxenApp(App):
             self.call_after_refresh(self._clamp_history_table_to_available_space)
         if self._active_tab == "tab_intercept" and self._intercept_command_bar_visible:
             self.call_after_refresh(self._clamp_intercept_command_output_to_available_space)
+        if self._active_tab == "tab_info" and self.check_action("resize_panel_up", ()):
+            self.call_after_refresh(self._clamp_info_component_detail_to_available_space)
 
     def _widget_height(self, selector: str) -> int | None:
         try:
@@ -2332,6 +2346,24 @@ class NoxenApp(App):
             self._init_panel_heights()
             return
         self._set_history_table_height(self._history_table_height)
+
+    def _adjust_info_component_detail(self, delta: int) -> None:
+        detail = self.query_one("#info_comp_detail", RichLog)
+        table = self.query_one("#info_comp_table", DataTable)
+        # region includes the border used by CSS height; size does not.
+        # The table's content height must remain large enough to be usable.
+        detail_height = detail.region.height
+        table_height = table.size.height
+        if detail_height <= 0 or table_height <= 0:
+            return
+        minimum = MIN_PANEL_HEIGHT + (detail_height - detail.size.height)
+        maximum = detail_height + table_height - MIN_PANEL_HEIGHT
+        self._set_widget_height(
+            "#info_comp_detail", clamp_height(detail_height + delta, minimum, maximum)
+        )
+
+    def _clamp_info_component_detail_to_available_space(self) -> None:
+        self._adjust_info_component_detail(0)
 
     def _max_intercept_command_output_height(self) -> int:
         cmd_height = self._widget_height("#intercept_cmd_output")
@@ -2389,6 +2421,8 @@ class NoxenApp(App):
                 self._adjust_history_cmd_output_height(1)
             else:
                 self._adjust_history_split(-1)
+        elif self._active_tab == "tab_info" and self.check_action("resize_panel_up", ()):
+            self._adjust_info_component_detail(1)
 
     def action_resize_panel_down(self):
         if self._active_tab == "tab_intercept":
@@ -2400,6 +2434,8 @@ class NoxenApp(App):
                 self._adjust_history_cmd_output_height(-1)
             else:
                 self._adjust_history_split(1)
+        elif self._active_tab == "tab_info" and self.check_action("resize_panel_down", ()):
+            self._adjust_info_component_detail(-1)
 
     def action_toggle_command_bar(self):
         if self._active_tab == "tab_intercept":

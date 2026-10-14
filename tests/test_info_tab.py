@@ -49,6 +49,55 @@ class MarkupRenderableTests(unittest.TestCase):
 
 
 class InfoTabTests(unittest.IsolatedAsyncioTestCase):
+    async def test_component_detail_resize_only_in_components_view(self):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                app = NoxenApp(project_args(os.path.join(tmp, "p.noxen")))
+                async with app.run_test(size=(120, 40)) as pilot:
+                    app.query_one("TabbedContent").active = "tab_info"
+                    app._switch_info_view("info_nav_components")
+                    await pilot.pause()
+                    self.assertFalse(app.check_action("resize_panel_up", ()))
+
+                    app._apply_app_info(SNAPSHOT)
+                    await pilot.pause()
+                    detail = app.query_one("#info_comp_detail", RichLog)
+                    table = app.query_one("#info_comp_table", DataTable)
+                    initial_detail = detail.size.height
+                    initial_table = table.size.height
+                    self.assertTrue(app.check_action("resize_panel_up", ()))
+
+                    await pilot.press("alt+up")
+                    await pilot.pause()
+                    self.assertEqual(detail.size.height, initial_detail + 1)
+                    self.assertEqual(table.size.height, initial_table - 1)
+
+                    await pilot.press("alt+down")
+                    await pilot.pause()
+                    self.assertEqual(detail.size.height, initial_detail)
+                    self.assertEqual(table.size.height, initial_table)
+
+                    app._switch_info_view("info_nav_permissions")
+                    await pilot.pause()
+                    self.assertFalse(app.check_action("resize_panel_up", ()))
+                    await pilot.press("alt+up")
+                    await pilot.pause()
+                    app._switch_info_view("info_nav_components")
+                    await pilot.pause()
+                    self.assertEqual(detail.size.height, initial_detail)
+
+                    app._switch_info_view("info_nav_overview")
+                    await pilot.pause()
+                    self.assertFalse(app.check_action("resize_panel_down", ()))
+                    app._clear_info_tab()
+                    app._switch_info_view("info_nav_components")
+                    await pilot.pause()
+                    self.assertFalse(app.check_action("resize_panel_up", ()))
+            finally:
+                os.chdir(cwd)
+
     async def test_apply_app_info_populates_and_filters(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:
