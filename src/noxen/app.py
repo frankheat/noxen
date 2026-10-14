@@ -1402,6 +1402,7 @@ class NoxenApp(App):
         self._session_api_level = None
         self.query_one("#session_bar").remove_class("connection-error")
         self.query_one("#session_bar").remove_class("connected")
+        self.query_one("#session_bar").remove_class("hook-warning")
         self.query_one("#session_bar").add_class("connecting")
         self.query_one("#session_info", Label).update(f"Connecting to {target}  ·  {device_id}…")
         self.query_one("#home_btn", Button).label = "Connecting…"
@@ -1429,6 +1430,13 @@ class NoxenApp(App):
 
         def _do():
             if session is None or session is self.frida_session:
+                if self._connection_state == "connected":
+                    bar = self.query_one("#session_bar")
+                    bar.remove_class("connected")
+                    bar.add_class("hook-warning")
+                    self.query_one("#session_info", Label).update(
+                        f"{self._session_label()}  ·  Hook setup incomplete"
+                    )
                 self.notify(message, severity="warning", timeout=6)
 
         if threading.current_thread() is threading.main_thread():
@@ -1589,18 +1597,24 @@ class NoxenApp(App):
         except Exception:
             pass
 
+    def _session_label(self) -> str:
+        target = self._session_config.target_label()
+        api = f"  ·  API {self._session_api_level}" if self._session_api_level is not None else ""
+        count = getattr(self.frida_session, "hook_registration_count", None)
+        hooks = f"  ·  {count} hooks registered" if count is not None else ""
+        return f"{target}  ·  {self._session_device_id}{api}{hooks}"
+
     def _on_connected(self, session=None):
         if session is not None and session is not self.frida_session:
             return
         self._connection_state = "connected"
         def _do():
+            if (session is not None and session is not self.frida_session) or self._connection_state != "connected":
+                return
             try:
-                target = self._session_config.target_label()
-                api = f"  ·  API {self._session_api_level}" if self._session_api_level is not None else ""
-                self.query_one("#session_info", Label).update(
-                    f"{target}  ·  {self._session_device_id}{api}"
-                )
+                self.query_one("#session_info", Label).update(self._session_label())
                 self.query_one("#session_bar").remove_class("connection-error")
+                self.query_one("#session_bar").remove_class("hook-warning")
                 self.query_one("#session_bar").remove_class("connecting")
                 self.query_one("#session_bar").add_class("connected")
                 self.query_one("#home_btn", Button).label = "Connect"
@@ -1635,7 +1649,9 @@ class NoxenApp(App):
             return "Connection failed. Communication with the selected device was lost."
         if stage == "configuration":
             return "Connection failed. The hook configuration is invalid."
-        if stage in ("agent", "hooks", "resume"):
+        if stage == "hooks":
+            return "Connection failed. Hooks could not be confirmed. See Log for details."
+        if stage in ("agent", "resume"):
             return "Connection failed. The target was reached, but the noxen agent could not start."
         return "Connection failed. See Log for technical details."
 
@@ -1657,6 +1673,7 @@ class NoxenApp(App):
             try:
                 self.query_one("#session_bar").remove_class("connecting")
                 self.query_one("#session_bar").remove_class("connected")
+                self.query_one("#session_bar").remove_class("hook-warning")
                 self.query_one("#session_bar").add_class("connection-error")
                 self.query_one("#session_info", Label).update("Not connected")
                 self.query_one("#home_btn", Button).label = "Connect"
@@ -1693,6 +1710,7 @@ class NoxenApp(App):
                 self.query_one("#session_bar").remove_class("connection-error")
                 self.query_one("#session_bar").remove_class("connecting")
                 self.query_one("#session_bar").remove_class("connected")
+                self.query_one("#session_bar").remove_class("hook-warning")
                 self.query_one("#session_info", Label).update("Not connected")
                 self.query_one("#home_btn", Button).label = "Connect"
                 self.query_one("#home_btn", Button).disabled = False
@@ -1719,6 +1737,7 @@ class NoxenApp(App):
             self.query_one("#session_bar").remove_class("connection-error")
             self.query_one("#session_bar").remove_class("connecting")
             self.query_one("#session_bar").remove_class("connected")
+            self.query_one("#session_bar").remove_class("hook-warning")
             self.query_one("#session_info", Label).update("Not connected")
             self.query_one("#home_btn", Button).label = "Connect"
             self.query_one("#home_btn", Button).disabled = False

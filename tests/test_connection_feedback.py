@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from textual.widgets import Button, Input, Label, Select
 
 from noxen.app import NoxenApp
+from noxen.frida_session import SessionConfig
 from noxen.logging_ui import log_error
 
 
@@ -77,6 +78,40 @@ class _DelayedSuccessfulSession:
 
 
 class ConnectionFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_partial_hook_setup_stays_visibly_degraded(self):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                args = SimpleNamespace(
+                    project=None, new_project=os.path.join(tmp, "partial.noxen"),
+                    skip_device_scan=True,
+                )
+                app = NoxenApp(args)
+                async with app.run_test(size=(120, 40)) as pilot:
+                    notices = []
+                    app.notify = lambda message, **kwargs: notices.append((message, kwargs))
+                    session = SimpleNamespace(cleanup=lambda: None)
+                    app.frida_session = session
+                    app._session_config = SessionConfig(attach_name="dev.example")
+                    app._session_device_id = "device-1"
+                    app._session_api_level = 31
+                    app._connection_state = "connected"
+                    bar = app.query_one("#session_bar")
+                    bar.add_class("connected")
+
+                    app._on_hook_warning("Hook setup incomplete", session)
+                    await pilot.pause()
+
+                    self.assertTrue(bar.has_class("hook-warning"))
+                    self.assertFalse(bar.has_class("connected"))
+                    self.assertIn("Hook setup incomplete", str(
+                        app.query_one("#session_info", Label).render()
+                    ))
+                    self.assertEqual(notices[0][1]["severity"], "warning")
+            finally:
+                os.chdir(cwd)
+
     async def test_invalid_hook_config_blocks_connect_without_cleaning_current_session(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:

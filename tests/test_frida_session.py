@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from noxen.agent_loader import HookConfigError, HooksLoadResult
+from noxen.agent_loader import HookConfigError, HooksLoadResult, ScriptLoadResult
 from noxen.filters import FilterManager
 from noxen.frida_session import FridaSession, SessionConfig
 
@@ -329,6 +329,146 @@ class FridaSessionMessageTests(unittest.TestCase):
 
 
 class FridaSessionLifecycleTests(unittest.TestCase):
+    def _hook_setup(self, spawn=True):
+        script = _FakeHookScript()
+        native_session = _FakeHookNativeSession(script)
+        device = _FakeHookDevice(native_session)
+        logs, connected, failures, warnings = [], [], [], []
+        config = SessionConfig(
+            spawn_package="dev.example" if spawn else None,
+            attach_pid=None if spawn else 42,
+            validated_hooks=HooksLoadResult(
+                hooks=[{"clazz": "Example", "method": "run", "args": []}],
+                messages=[], sources=("custom hook[0]",), custom_count=1,
+            ),
+        )
+        session = FridaSession(
+            config, FilterManager(), log_cb=logs.append,
+            intercept_cb=lambda _state: None, get_stack=lambda: (False, 0),
+        )
+        session.connected_cb = lambda: connected.append(True)
+        session.connection_failed_cb = lambda stage, error: failures.append((stage, str(error)))
+        session.hook_warning_cb = warnings.append
+        return session, script, native_session, device, logs, connected, failures, warnings
+
+    def _run_hook_setup(self, setup, report=None, timeout=False):
+        session, script, _native, device, _logs, _connected, _failures, _warnings = setup
+        fake_frida = SimpleNamespace(get_device=lambda _id, timeout=5: device)
+        with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+            "noxen.frida_session.load_agent_script",
+            return_value=ScriptLoadResult("agent", []),
+        ), patch("noxen.frida_session.HOOK_REPORT_TIMEOUT", 0.03 if timeout else 1):
+            session.connect("device-1")
+            self.assertTrue(script.proxy_called.wait(1))
+            if report is not None:
+                script.emit_report(report)
+            session._connect_thread.join(2)
+        self.assertFalse(session._connect_thread.is_alive())
+
+    def test_connection_waits_for_hook_report_after_resume(self):
+        setup = self._hook_setup()
+        session, script, _native, device, _logs, connected, failures, _warnings = setup
+        fake_frida = SimpleNamespace(get_device=lambda _id, timeout=5: device)
+        with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+            "noxen.frida_session.load_agent_script",
+            return_value=ScriptLoadResult("agent", []),
+        ):
+            session.connect("device-1")
+            self.assertTrue(device.resumed.wait(1))
+            self.assertEqual(connected, [])
+            self.assertFalse(session.is_ready())
+            script.emit_report({"installed": 1, "installedIndices": [0], "skipped": [], "failed": []})
+            session._connect_thread.join(2)
+        self.assertEqual(connected, [True])
+        self.assertTrue(session.is_ready())
+        self.assertEqual(failures, [])
+
+    def test_attach_also_waits_for_hook_report(self):
+        setup = self._hook_setup(spawn=False)
+        self._run_hook_setup(setup, {
+            "installed": 1, "installedIndices": [0], "skipped": [], "failed": [],
+        })
+        self.assertEqual(setup[5], [True])
+        self.assertEqual(setup[6], [])
+        self.assertTrue(setup[0].is_ready())
+
+    def test_fatal_report_never_marks_session_connected(self):
+        setup = self._hook_setup()
+        self._run_hook_setup(setup, {"fatal": "Unable to find fields in java/lang/Thread"})
+        _session, _script, native, device, logs, connected, failures, _warnings = setup
+        self.assertEqual(connected, [])
+        self.assertEqual(failures[0][0], "hooks")
+        self.assertIn("Hook initialization failed", failures[0][1])
+        self.assertTrue(native.detached)
+        self.assertEqual(device.killed, [])
+        self.assertTrue(any("Unable to find fields" in line for line in logs))
+
+    def test_missing_report_times_out_without_green_state(self):
+        setup = self._hook_setup()
+        self._run_hook_setup(setup, timeout=True)
+        _session, _script, native, device, _logs, connected, failures, _warnings = setup
+        self.assertEqual(connected, [])
+        self.assertEqual(failures[0][0], "hooks")
+        self.assertIn("timed out", failures[0][1])
+        self.assertTrue(native.detached)
+        self.assertEqual(device.killed, [])
+
+    def test_zero_hooks_is_not_a_ready_session(self):
+        setup = self._hook_setup()
+        self._run_hook_setup(setup, {"installed": 0, "installedIndices": [], "skipped": [], "failed": []})
+        self.assertEqual(setup[5], [])
+        self.assertIn("No hooks were installed", setup[6][0][1])
+
+    def test_malformed_success_report_is_rejected(self):
+        setup = self._hook_setup()
+        self._run_hook_setup(setup, {
+            "installed": 1, "installedIndices": [], "skipped": [], "failed": [],
+        })
+        self.assertEqual(setup[5], [])
+        self.assertIn("Malformed hook registration report", setup[6][0][1])
+
+    def test_partial_report_connects_with_warning(self):
+        setup = self._hook_setup()
+        self._run_hook_setup(setup, {
+            "installed": 1, "installedIndices": [0], "skipped": [],
+            "failed": [{"index": 1, "signature": "Example.other()", "error": "not found"}],
+        })
+        self.assertEqual(setup[5], [True])
+        self.assertEqual(setup[6], [])
+        self.assertTrue(any("Hook setup incomplete" in warning for warning in setup[7]))
+
+    def test_detach_during_hook_setup_does_not_wait_for_timeout(self):
+        setup = self._hook_setup()
+        session, script, native, device, _logs, connected, failures, _warnings = setup
+        fake_frida = SimpleNamespace(get_device=lambda _id, timeout=5: device)
+        with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+            "noxen.frida_session.load_agent_script",
+            return_value=ScriptLoadResult("agent", []),
+        ):
+            session.connect("device-1")
+            self.assertTrue(device.resumed.wait(1))
+            native.callbacks["detached"]("process-terminated", None)
+            session._connect_thread.join(2)
+        self.assertEqual(connected, [])
+        self.assertEqual(failures[0][0], "hooks")
+
+    def test_cleanup_during_hook_setup_ignores_late_report(self):
+        setup = self._hook_setup()
+        session, script, _native, device, _logs, connected, failures, _warnings = setup
+        fake_frida = SimpleNamespace(get_device=lambda _id, timeout=5: device)
+        with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+            "noxen.frida_session.load_agent_script",
+            return_value=ScriptLoadResult("agent", []),
+        ):
+            session.connect("device-1")
+            self.assertTrue(device.resumed.wait(1))
+            session.cleanup()
+            script.emit_report({"installed": 1, "installedIndices": [0], "skipped": [], "failed": []})
+            session._connect_thread.join(2)
+        self.assertEqual(connected, [])
+        self.assertEqual(failures, [])
+        self.assertFalse(session.is_ready())
+
     def test_hook_config_failure_is_reported_instead_of_killing_connect_thread(self):
         error = HookConfigError("custom", ["top-level value must be a JSON array"])
         failures = []
@@ -497,6 +637,63 @@ class _FakeFridaSession:
 
     def detach(self):
         self.detached = True
+
+
+class _FakeHookScript:
+    def __init__(self):
+        self.callbacks = {}
+        self.proxy_called = threading.Event()
+        self.exports_sync = SimpleNamespace(
+            proxy=self._proxy,
+            get_sdk_int=lambda: 31,
+            interceptoff=lambda: None,
+        )
+
+    def _proxy(self, _hooks):
+        self.proxy_called.set()
+        return {"pending": True}
+
+    def on(self, name, callback):
+        self.callbacks[name] = callback
+
+    def load(self):
+        pass
+
+    def unload(self):
+        pass
+
+    def emit_report(self, report):
+        self.callbacks["message"]({
+            "type": "send", "payload": {"noxenEvent": "hook_report", "report": report},
+        }, None)
+
+
+class _FakeHookNativeSession(_FakeFridaSession):
+    def __init__(self, script):
+        super().__init__()
+        self.script = script
+
+    def create_script(self, _code):
+        return self.script
+
+
+class _FakeHookDevice:
+    def __init__(self, native_session):
+        self.native_session = native_session
+        self.resumed = threading.Event()
+        self.killed = []
+
+    def spawn(self, _packages):
+        return 42
+
+    def attach(self, _target):
+        return self.native_session
+
+    def resume(self, _pid):
+        self.resumed.set()
+
+    def kill(self, pid):
+        self.killed.append(pid)
 
 
 if __name__ == "__main__":

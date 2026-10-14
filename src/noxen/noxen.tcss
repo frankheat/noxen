@@ -138,6 +138,9 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 #session_bar.connected {
     background: $success;
 }
+#session_bar.hook-warning {
+    background: $warning;
+}
 #session_bar.connection-error {
     background: $error;
 }
@@ -147,6 +150,7 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 }
 #session_bar.connecting #session_info,
 #session_bar.connected #session_info,
+#session_bar.hook-warning #session_info,
 #session_bar.connection-error #session_info {
     color: $button-color-foreground;
 }

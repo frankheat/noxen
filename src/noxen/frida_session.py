@@ -8,6 +8,7 @@ from noxen.rendering import payload_to_filter_context, render_intercept_block
 
 
 MODIFICATION_CONFIRM_TIMEOUT = 5
+HOOK_REPORT_TIMEOUT = 30
 
 
 @dataclass
@@ -75,8 +76,12 @@ class FridaSession:
         self._device_id = None
         self._connect_thread = None
         self._hooks_result = None
+        self._hook_report_event = None
+        self._hook_report = None
+        self.hook_registration_count = None
         self._lock = threading.Lock()
         self._generation = 0
+        self._ready = False
         self._blocking_enabled = True
         self._intercept_counter = 0
         self._history_counter = 0
@@ -87,6 +92,8 @@ class FridaSession:
         with self._lock:
             self._device_id = device_id
             self._generation += 1
+            self._ready = False
+            self.hook_registration_count = None
             generation = self._generation
             self._connect_thread = threading.Thread(
                 target=self._start_session,
@@ -112,13 +119,14 @@ class FridaSession:
 
             pid = None
             should_resume = False
+            resumed = False
             session = None
             def close_local(script=None):
                 self._detach_stale_session(
                     session,
                     script,
                     device=device,
-                    spawned_pid=pid if should_resume else None,
+                    spawned_pid=pid if should_resume and not resumed else None,
                 )
 
             if self._config.spawn_package:
@@ -173,19 +181,25 @@ class FridaSession:
                 self.log_cb(message)
         except Exception as e:
             self._clear_if_current(generation, session=session)
-            close_local()
             self._report_connection_failure(
                 generation, "agent", e, f"Failed to load agent script: {e}"
             )
+            close_local()
             return
 
         stage = "agent"
         try:
             script = session.create_script(code)
-            script.on("message", self.on_message)
+            script.on("message", lambda message, data: self._on_script_message(
+                message, data, generation, script
+            ))
             if not self._keep_if_current(generation, session=session, script=script):
                 close_local(script)
                 return
+
+            with self._lock:
+                self._hook_report_event = threading.Event()
+                self._hook_report = None
 
             script.load()
             if self._is_stale(generation):
@@ -196,7 +210,7 @@ class FridaSession:
             self._hooks_result = hooks_result
             hook_report = script.exports_sync.proxy(hooks_data)
             if isinstance(hook_report, dict) and not hook_report.get("pending"):
-                self._log_hook_report(hook_report, hooks_result)
+                self._receive_hook_report(hook_report)
             if self._is_stale(generation):
                 close_local(script)
                 return
@@ -218,9 +232,54 @@ class FridaSession:
             stage = "resume"
             if should_resume:
                 device.resume(pid)
+                resumed = True
+
+            stage = "hooks"
+            report_event = self._hook_report_event
+            if not report_event.wait(HOOK_REPORT_TIMEOUT):
+                raise RuntimeError("Hook registration report timed out")
+            if self._is_stale(generation):
+                close_local(script)
+                return
+            with self._lock:
+                report = self._hook_report
+                self._hook_report_event = None
+                self._hook_report = None
+                still_attached = self._session is session and self._script is script
+            if not still_attached:
+                raise RuntimeError("Session detached before hook registration completed")
+            if not isinstance(report, dict):
+                raise RuntimeError("Hook registration report unavailable")
+            if report.get("fatal"):
+                self._log_hook_report(report, hooks_result)
+                raise RuntimeError(f"Hook initialization failed: {report['fatal']}")
+            installed = report.get("installed")
+            if isinstance(installed, bool) or not isinstance(installed, int) or installed < 1:
+                self._log_hook_report(report, hooks_result)
+                raise RuntimeError("No hooks were installed")
+            indices = report.get("installedIndices")
+            if (not isinstance(indices, list) or len(indices) != installed
+                    or any(isinstance(index, bool) or not isinstance(index, int)
+                           or index < 0 or index >= len(hooks_data) for index in indices)
+                    or len(set(indices)) != len(indices)
+                    or not isinstance(report.get("skipped"), list)
+                    or not isinstance(report.get("failed"), list)):
+                raise RuntimeError("Malformed hook registration report")
+
+            with self._lock:
+                if generation != self._generation or self._session is not session:
+                    close_after_lock = True
+                else:
+                    self._ready = True
+                    self.hook_registration_count = installed
+                    close_after_lock = False
+            if close_after_lock:
+                close_local(script)
+                return
 
             if not self._is_stale(generation) and self.connected_cb:
                 self.connected_cb()
+            self._log_hook_report(report, hooks_result)
 
 
         except Exception as e:
@@ -228,10 +287,10 @@ class FridaSession:
                 close_local(locals().get("script"))
                 return
             self._clear_if_current(generation, session=session, script=locals().get("script"))
-            close_local(locals().get("script"))
             self._report_connection_failure(
                 generation, stage, e, f"Failed to start session: {e}"
             )
+            close_local(locals().get("script"))
 
     def _log_hook_report(self, report, hooks_result: HooksLoadResult) -> None:
         if not isinstance(report, dict):
@@ -241,13 +300,6 @@ class FridaSession:
         fatal = report.get("fatal")
         if fatal:
             self.log_cb(log_error(f"Hook initialization failed: {fatal}", "hooks"))
-            if self.hook_warning_cb:
-                try:
-                    self.hook_warning_cb("Hook initialization failed. See Log for details.")
-                except Exception as callback_error:
-                    self.log_cb(log_warning(
-                        f"Hook warning callback failed: {callback_error}", "hooks"
-                    ))
             return
 
         installed = int(report.get("installed") or 0)
@@ -282,7 +334,7 @@ class FridaSession:
             ))
 
         summary = f"Hooks: {installed} installed, {len(skipped)} skipped, {len(failed)} failed"
-        if failed:
+        if failed or installed == 0:
             self.log_cb(log_warning(summary, "hooks"))
         else:
             self.log_cb(log_success(summary, "hooks"))
@@ -331,7 +383,12 @@ class FridaSession:
         with self._lock:
             self._script = None
             self._session = None
-        if self.disconnected_cb:
+            self._ready = False
+            self.hook_registration_count = None
+            initializing = self._hook_report_event is not None
+            if initializing:
+                self._hook_report_event.set()
+        if not initializing and self.disconnected_cb:
             self.disconnected_cb()
 
     def _is_stale(self, generation) -> bool:
@@ -356,6 +413,20 @@ class FridaSession:
                 self._session = None
             if script is not None and self._script is script:
                 self._script = None
+                self._ready = False
+                self.hook_registration_count = None
+
+    def _on_script_message(self, message, data, generation, script):
+        with self._lock:
+            if generation != self._generation or self._script is not script:
+                return
+        self.on_message(message, data)
+
+    def _receive_hook_report(self, report):
+        with self._lock:
+            if self._hook_report_event is not None and not self._hook_report_event.is_set():
+                self._hook_report = report
+                self._hook_report_event.set()
 
     @staticmethod
     def _detach_stale_session(session, script=None, device=None, spawned_pid=None) -> None:
@@ -386,7 +457,9 @@ class FridaSession:
             if isinstance(payload, dict):
                 event_name = payload.get("noxenEvent")
                 if event_name == "hook_report":
-                    if self._hooks_result is not None:
+                    if self._hook_report_event is not None:
+                        self._receive_hook_report(payload.get("report"))
+                    elif self._hooks_result is not None:
                         self._log_hook_report(payload.get("report"), self._hooks_result)
                     return
                 if event_name == "hold_start":
@@ -533,17 +606,21 @@ class FridaSession:
 
     def is_ready(self) -> bool:
         with self._lock:
-            return self._script is not None
+            return self._ready and self._script is not None
 
     def cleanup(self):
         with self._modification_lock:
             for event, _result in self._pending_modifications.values():
                 event.set()
         with self._lock:
+            if self._hook_report_event is not None:
+                self._hook_report_event.set()
             script = self._script
             session = self._session
             self._script = None
             self._session = None
+            self._ready = False
+            self.hook_registration_count = None
             self._generation += 1
 
         def perform_cleanup():
