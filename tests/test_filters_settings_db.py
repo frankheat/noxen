@@ -493,6 +493,25 @@ class ProjectDBTests(unittest.TestCase):
             self.assertEqual(entries[0]["intent"]["mimeType"], "application/pdf")
             self.assertEqual(entries[0]["original_intent"]["flags"], 1)
 
+    def test_modification_warning_survives_project_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "project.noxen")
+            db = ProjectDB(path)
+            db.create("project")
+            intent_id = db.save_intent({
+                "timestamp": "2026-10-14T08:00:00+00:00",
+                "intent": {"action": "old", "extras": {}, "categories": []},
+            })
+            db.update_modification_error(intent_id, "Result could not be verified")
+            db.update_outcome(intent_id, "forwarded")
+            db.close()
+
+            reopened = ProjectDB(path)
+            entries = reopened.open_existing()
+            reopened.close()
+            self.assertEqual(entries[0]["modification_error"], "Result could not be verified")
+            self.assertEqual(entries[0]["outcome"], "forwarded")
+
 
 if __name__ == "__main__":
     unittest.main()

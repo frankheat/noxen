@@ -70,8 +70,8 @@ from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
     JAVA_TYPE_TO_SIMPLE,
-    apply_mods_to_entry,
     apply_mods_to_intent,
+    confirmed_modification,
     diff_intents,
     java_type_display,
     parse_flag_value,
@@ -750,14 +750,15 @@ class NoxenApp(App):
             intent_id = self._current_intercept_id
             resolved = self._current_intercepted_entry
             all_mods = list(mods)
-            if not self.frida_session.forward_with_mods(all_mods, decision_id):
+            result = self.frida_session.forward_with_mods(all_mods, decision_id)
+            if not result:
                 self.call_from_thread(
                     self._restore_editor_after_forward_failure,
                     "No matching intent is blocked to forward",
                 )
                 return
             self.set_intercept_state(False)
-            self._finalize_forward(intent_id, resolved, all_mods)
+            self._finalize_forward(intent_id, resolved, all_mods, result)
         except Exception as e:
             self.call_from_thread(
                 self._restore_editor_after_forward_failure,
@@ -774,19 +775,44 @@ class NoxenApp(App):
             return
         self._staged_mods.append(mod)
 
-    def _finalize_forward(self, intent_id: int | None, resolved_entry: dict | None, mods: list) -> None:
+    def _finalize_forward(self, intent_id: int | None, resolved_entry: dict | None, mods: list, result=None) -> None:
         entry = resolved_entry
+        if entry is not None and not any(saved is entry for saved in self._all_intents):
+            entry = None
         if entry is None and intent_id is not None:
             entry = next((e for e in self._all_intents if e["id"] == intent_id), None)
+        if entry is None:
+            self._staged_mods.clear()
+            self.call_from_thread(lambda e=resolved_entry: self._clear_intercept_output(e))
+            return
 
-        if entry is not None and mods:
-            apply_mods_to_entry(entry, mods)
-            self._history_search_index[id(entry)] = history_search_text(entry)
+        error = None
+        changed = False
+        if mods:
+            report = getattr(result, "report", None)
+            before = copy.deepcopy(entry.get("intent") or {}) if entry else {}
+            actual, changed, error = confirmed_modification(before, report)
+            if actual is not None and entry is not None:
+                entry["intent"] = actual
+                if changed:
+                    entry["original_intent"] = before
+                    if self.db and intent_id:
+                        self.db.update_modified_intent(intent_id, before, actual)
+                self._history_search_index[id(entry)] = history_search_text(entry)
 
-        outcome = "modified_forwarded" if mods else "forwarded"
+        outcome = "modified_forwarded" if changed else "forwarded"
+        if entry is not None and error:
+            entry["modification_error"] = error
+        if error:
+            if self.db and intent_id:
+                self.db.update_modification_error(intent_id, error)
+            self.write_log(log_warning(error, "intercept"))
+            self.call_from_thread(lambda message=error: self.notify(
+                message, title="Intent modification warning", severity="warning", timeout=8
+            ))
         self._update_outcome(intent_id, outcome)
-        if mods and self.db and intent_id and entry and entry.get("original_intent") is not None:
-            self.db.update_modified_intent(intent_id, entry["original_intent"], entry["intent"])
+        if changed:
+            self.call_from_thread(self._refresh_modified_history_row)
         self._staged_mods.clear()
         self.call_from_thread(lambda e=resolved_entry: self._clear_intercept_output(e))
 
@@ -2054,6 +2080,19 @@ class NoxenApp(App):
         self._fill_table_rows(table, filtered)
         self._restore_cursor(table, filtered, saved_sel_id)
 
+    def _refresh_modified_history_row(self):
+        # The full rebuild already includes entries waiting in the append buffer.
+        # Leave nothing for the scheduled append pass to duplicate.
+        self._pending_append.clear()
+        try:
+            has_columns = bool(self.query_one("#history_table", DataTable).columns)
+        except Exception:
+            return
+        if has_columns:
+            self._refresh_rows_only()
+        else:
+            self._refresh_history_table()
+
     def _refresh_history_table(self):
         try:
             table = self.query_one("#history_table", DataTable)
@@ -2839,14 +2878,15 @@ class NoxenApp(App):
                     return
             else:
                 mods = list(self._staged_mods)
-            if not self.frida_session.intercept_off_with_mods(
+            result = self.frida_session.intercept_off_with_mods(
                 mods, self._current_decision_id
-            ):
+            )
+            if not result:
                 write_fn("[red]Could not disable interception for the active intent[/red]")
                 return
             self.set_intercept_state(False)
             self.update_intercept_button(False)
-            self._finalize_forward(intent_id, resolved, mods)
+            self._finalize_forward(intent_id, resolved, mods, result)
             write_fn("[yellow]Intercept OFF[/yellow]")
 
     def _refresh_history_detail(self):
@@ -2906,13 +2946,14 @@ class NoxenApp(App):
                 intent_id = self._current_intercept_id
                 resolved = self._current_intercepted_entry
                 mods = list(self._staged_mods)
-                if not self.frida_session.forward_with_mods(
+                result = self.frida_session.forward_with_mods(
                     mods, self._current_decision_id
-                ):
+                )
+                if not result:
                     self.write_cmd("[red]No matching intent blocked to forward[/red]")
                     return
                 self.set_intercept_state(False)
-                self._finalize_forward(intent_id, resolved, mods)
+                self._finalize_forward(intent_id, resolved, mods, result)
             elif cmd_base in ["drop", "d"]:
                 intent_id = self._current_intercept_id
                 resolved = self._current_intercepted_entry
@@ -2946,9 +2987,11 @@ class NoxenApp(App):
     def _update_outcome(self, intent_id: int | None, outcome: str) -> None:
         if intent_id is None:
             return
+        entry = None
         for e in self._all_intents:
             if e["id"] == intent_id:
                 e["outcome"] = outcome
+                entry = e
                 break
         self.db.update_outcome(intent_id, outcome)
 
@@ -2960,7 +3003,10 @@ class NoxenApp(App):
                     table.update_cell(
                         str(intent_id),
                         "outcome",
-                        history_outcome_cell(outcome, colors.success, colors.error),
+                        history_outcome_cell(
+                            outcome, colors.success, colors.error,
+                            entry.get("modification_error") if entry else None,
+                        ),
                     )
             except Exception:
                 pass

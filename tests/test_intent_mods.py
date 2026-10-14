@@ -4,6 +4,7 @@ from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
     apply_mods_to_entry,
+    confirmed_modification,
     apply_mods_to_intent,
     diff_intents,
     java_type_display,
@@ -282,6 +283,74 @@ class IntentModsTests(unittest.TestCase):
             parse_intent_mod_command(["+x", "null", "key", "value"]),
             (None, "[red]Usage: +x null <key>[/red]"),
         )
+
+
+class ConfirmedModificationTests(unittest.TestCase):
+    @staticmethod
+    def observed(**overrides):
+        return {
+            "action": "old", "data": None, "mimeType": None,
+            "flags": 0, "categories": [], "extras": {}, **overrides,
+        }
+
+    def test_complete_result_uses_observed_values_not_requested_values(self):
+        original = {"action": "old", "flags": None, "categories": [], "extras": {}}
+        actual, changed, warning = confirmed_modification(original, {
+            "ok": True, "infoIntent": self.observed(action="observed"),
+        })
+        self.assertEqual(actual["action"], "observed")
+        self.assertTrue(changed)
+        self.assertIsNone(warning)
+
+    def test_partial_result_keeps_only_observed_changes_and_warns(self):
+        original = {"action": "old", "extras": {}}
+        actual, changed, warning = confirmed_modification(original, {
+            "ok": False, "error": "NumberFormatException",
+            "infoIntent": self.observed(action="changed"),
+        })
+        self.assertEqual(actual["action"], "changed")
+        self.assertEqual(actual["extras"], {})
+        self.assertTrue(changed)
+        self.assertIn("NumberFormatException", warning)
+
+    def test_failed_modification_without_changes_is_not_marked_modified(self):
+        actual, changed, warning = confirmed_modification(
+            {"action": "old", "extras": {}},
+            {"ok": False, "error": "failed", "infoIntent": self.observed()},
+        )
+        self.assertFalse(changed)
+        self.assertIn("failed", warning)
+
+    def test_missing_confirmation_never_predicts_requested_changes(self):
+        self.assertEqual(confirmed_modification({"action": "old"}, None)[0], None)
+        self.assertIn("could not be verified", confirmed_modification({}, None)[2])
+
+    def test_incomplete_extras_preserve_original_snapshot_with_warning(self):
+        original = {"action": "old", "extras": {"secret": {"value": "kept"}}}
+        actual, changed, warning = confirmed_modification(original, {
+            "ok": True,
+            "infoIntent": self.observed(action="changed", extrasMeta={"omitted": 1}),
+        })
+        self.assertEqual(actual["extras"], original["extras"])
+        self.assertTrue(changed)
+        self.assertIn("could not be fully verified", warning)
+
+    def test_incomplete_result_cannot_replace_captured_intent(self):
+        actual, changed, warning = confirmed_modification(
+            {"action": "old"}, {"ok": True, "infoIntent": {"action": "changed"}},
+        )
+        self.assertIsNone(actual)
+        self.assertFalse(changed)
+        self.assertIn("could not be verified", warning)
+
+    def test_truncated_categories_are_not_claimed_as_complete(self):
+        actual, changed, warning = confirmed_modification(
+            {"action": "old", "categories": ["original"]},
+            {"ok": True, "infoIntent": self.observed(categories=["observed"], categoriesTruncated=True)},
+        )
+        self.assertEqual(actual["categories"], ["original"])
+        self.assertFalse(changed)
+        self.assertIn("categories", warning)
 
 
 if __name__ == "__main__":

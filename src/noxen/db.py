@@ -14,6 +14,7 @@ _MIGRATED_INTENT_COLUMNS = {
     "mime_type": "TEXT",
     "selector": "TEXT",
     "clip_data": "TEXT",
+    "modification_error": "TEXT",
 }
 
 
@@ -191,6 +192,7 @@ class ProjectDB:
                 "stackTrace": self._load_json_field(row_id, "stack_trace", row["stack_trace"], [], list),
                 "pendingIntentFlags": row["pending_intent_flags"],
                 "outcome": row["outcome"],
+                "modification_error": row["modification_error"],
                 "original_intent": self._load_json_field(
                     row_id,
                     "original_intent",
@@ -358,6 +360,15 @@ class ProjectDB:
                     json.dumps(original_info),
                     intent_id,
                 ),
+            )
+            self._conn.commit()
+
+    def update_modification_error(self, intent_id: int, error: str | None) -> None:
+        if self._conn is None or intent_id is None:
+            return
+        with self._lock:
+            self._conn.execute(
+                "UPDATE intents SET modification_error=? WHERE id=?", (error, intent_id)
             )
             self._conn.commit()
 

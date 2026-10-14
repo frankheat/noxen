@@ -274,6 +274,50 @@ def apply_mods_to_entry(entry: dict, mods: list[IntentMod]) -> None:
     entry["intent"] = apply_mods_to_intent(entry["original_intent"], mods)
 
 
+def confirmed_modification(original: dict, report: dict | None) -> tuple[dict | None, bool, str | None]:
+    """Return the agent-observed Intent, actual change flag, and any warning.
+
+    A missing result is never replaced by a prediction from the requested mods.
+    """
+    actual = report.get("infoIntent") if isinstance(report, dict) else None
+    required = {"action", "data", "mimeType", "flags", "categories", "extras"}
+    if not isinstance(actual, dict) or not required.issubset(actual):
+        return None, False, "Resulting Intent could not be verified; requested changes are not shown as applied"
+
+    actual = copy.deepcopy(actual)
+    extras_meta = actual.get("extrasMeta")
+    if not isinstance(extras_meta, dict):
+        extras_meta = {}
+    incomplete_extras = bool(extras_meta.get("error") or extras_meta.get("omitted"))
+    warning = None
+    if incomplete_extras:
+        actual["extras"] = copy.deepcopy(original.get("extras", {}))
+        warning = "Resulting extras could not be fully verified"
+    if actual.get("categoriesTruncated") or actual.get("categoriesReadError"):
+        actual["categories"] = copy.deepcopy(original.get("categories", []))
+        warning = "Resulting categories could not be fully verified" if warning is None else (
+            warning + "; resulting categories could not be fully verified"
+        )
+
+    def comparable(info: dict, field: str):
+        if field == "flags":
+            return info.get(field) or 0
+        if field == "categories":
+            return info.get(field) or []
+        if field == "extras":
+            return info.get(field) or {}
+        return info.get(field) or None
+
+    changed = any(
+        comparable(original, field) != comparable(actual, field)
+        for field in ("action", "data", "mimeType", "flags", "categories", "extras")
+    )
+    if not report.get("ok"):
+        detail = str(report.get("error") or "unknown agent error")
+        warning = f"Modification failed; Intent may be partially changed: {detail}"
+    return actual, changed, warning
+
+
 def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
     """Return an Intent snapshot with ordered modifications applied."""
     original_intent = copy.deepcopy(intent or {})

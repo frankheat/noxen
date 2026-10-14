@@ -236,23 +236,29 @@ class FridaSessionMessageTests(unittest.TestCase):
             intercept_cb=lambda _state: None,
             get_stack=lambda: (False, 0),
         )
+        def confirm(method, mods, decision_id):
+            calls.append((method, mods, decision_id))
+            session.on_message({"type": "send", "payload": {
+                "noxenEvent": "modification_result", "decisionId": decision_id,
+                "ok": True, "infoIntent": {"action": "confirmed"},
+            }}, None)
+            return True
+
         session._script = SimpleNamespace(
             exports_sync=SimpleNamespace(
                 forward=lambda decision_id=None: calls.append(("forward", decision_id)) or True,
-                forward_with_mods=lambda mods, decision_id=None: calls.append(
-                    ("forward_with_mods", mods, decision_id)
-                ) or True,
+                forward_with_mods=lambda mods, decision_id=None: confirm("forward_with_mods", mods, decision_id),
                 drop=lambda decision_id=None: calls.append(("drop", decision_id)) or True,
                 stage_mod=lambda *args: calls.append(("stage_mod", args)) or True,
-                intercept_off_with_mods=lambda mods, decision_id=None: calls.append(
-                    ("intercept_off_with_mods", mods, decision_id)
-                ) or True,
+                intercept_off_with_mods=lambda mods, decision_id=None: confirm("intercept_off_with_mods", mods, decision_id),
             )
         )
 
         self.assertTrue(session.forward("decision-3"))
         mods = [("extra_add", "count", "5", "int")]
-        self.assertTrue(session.forward_with_mods(mods, "decision-3"))
+        forward_result = session.forward_with_mods(mods, "decision-3")
+        self.assertTrue(forward_result)
+        self.assertEqual(forward_result.report["infoIntent"]["action"], "confirmed")
         self.assertTrue(session.drop("decision-3"))
         self.assertTrue(session.stage_mod("action", "", "android.intent.action.VIEW", "", "decision-3"))
         self.assertTrue(session.intercept_off_with_mods(mods, "decision-3"))
@@ -268,6 +274,58 @@ class FridaSessionMessageTests(unittest.TestCase):
                 "type": "extra_add", "key": "count", "val": "5", "extraType": "int",
             }], "decision-3"),
         ])
+
+    def test_missing_modification_confirmation_is_not_reported_as_success(self):
+        session = FridaSession(
+            SessionConfig(attach_pid=1), FilterManager(), log_cb=lambda _text: None,
+            intercept_cb=lambda _state: None, get_stack=lambda: (False, 0),
+        )
+        session._script = SimpleNamespace(exports_sync=SimpleNamespace(
+            forward_with_mods=lambda _mods, _decision_id: True,
+        ))
+        with patch("noxen.frida_session.MODIFICATION_CONFIRM_TIMEOUT", 0.01):
+            result = session.forward_with_mods([("action", "", "changed", "")], "decision-4")
+        self.assertTrue(result.resumed)
+        self.assertIsNone(result.report)
+        self.assertEqual(session._pending_modifications, {})
+
+    def test_unmatched_modification_result_cannot_confirm_other_decision(self):
+        session = FridaSession(
+            SessionConfig(attach_pid=1), FilterManager(), log_cb=lambda _text: None,
+            intercept_cb=lambda _state: None, get_stack=lambda: (False, 0),
+        )
+        def resume(_mods, _decision_id):
+            session.on_message({"type": "send", "payload": {
+                "noxenEvent": "modification_result", "decisionId": "different",
+                "ok": True, "infoIntent": {"action": "wrong"},
+            }}, None)
+            return True
+        session._script = SimpleNamespace(exports_sync=SimpleNamespace(forward_with_mods=resume))
+        with patch("noxen.frida_session.MODIFICATION_CONFIRM_TIMEOUT", 0.01):
+            result = session.forward_with_mods([("action", "", "changed", "")], "decision-5")
+        self.assertIsNone(result.report)
+
+    def test_cleanup_releases_worker_waiting_for_modification_result(self):
+        rpc_returned = threading.Event()
+        results = []
+        session = FridaSession(
+            SessionConfig(attach_pid=1), FilterManager(), log_cb=lambda _text: None,
+            intercept_cb=lambda _state: None, get_stack=lambda: (False, 0),
+        )
+        session._script = SimpleNamespace(exports_sync=SimpleNamespace(
+            forward_with_mods=lambda _mods, _decision_id: rpc_returned.set() or True,
+            interceptoff=lambda: None,
+        ))
+        worker = threading.Thread(target=lambda: results.append(
+            session.forward_with_mods([("action", "", "changed", "")], "decision-6")
+        ))
+        worker.start()
+        self.assertTrue(rpc_returned.wait(1))
+        session.cleanup()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(results[0].resumed)
+        self.assertIsNone(results[0].report)
 
 
 class FridaSessionLifecycleTests(unittest.TestCase):

@@ -61,14 +61,19 @@ def history_outcome_cell(
     outcome: str | None,
     success_color: str = "#26a368",
     error_color: str = "red",
+    modification_error: str | None = None,
 ) -> Text:
     if outcome == "forwarded":
-        return Text("→", style=f"bold {success_color}")
-    if outcome == "modified_forwarded":
-        return Text("✎→", style=f"bold {success_color}")
-    if outcome == "dropped":
-        return Text("✗", style=f"bold {error_color}")
-    return Text("")
+        cell = Text("→", style=f"bold {success_color}")
+    elif outcome == "modified_forwarded":
+        cell = Text("✎→", style=f"bold {success_color}")
+    elif outcome == "dropped":
+        cell = Text("✗", style=f"bold {error_color}")
+    else:
+        cell = Text("")
+    if modification_error:
+        cell.append(" !", style=f"bold {error_color}")
+    return cell
 
 
 def decode_pending_intent_flags(raw_flags):
@@ -361,7 +366,7 @@ def history_row_values(
     outcome = entry.get("outcome")
     all_values = {
         "id":        str(entry["id"]),
-        "outcome":   history_outcome_cell(outcome, success_color, error_color),
+        "outcome":   history_outcome_cell(outcome, success_color, error_color, entry.get("modification_error")),
         "time":      time_str,
         "method":    str(entry.get("method") or ""),
         "class":     str(entry.get("class") or ""),
@@ -1057,6 +1062,8 @@ def render_intent_detail(entry: dict, show_stack: bool = False, stack_depth: int
     )
     if entry.get("original_intent"):
         out += _changes_lines(entry["original_intent"], info)
+    if entry.get("modification_error"):
+        out += ["", _section("MODIFICATION WARNING"), _row("Status", _markup(entry["modification_error"]))]
     if show_stack:
         out += _stack_lines(entry.get("stackTrace") or [], stack_depth, show_empty=True)
     out.append("")

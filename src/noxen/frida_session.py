@@ -7,6 +7,9 @@ from noxen.logging_ui import log_debug, log_error, log_info, log_success, log_wa
 from noxen.rendering import payload_to_filter_context, render_intercept_block
 
 
+MODIFICATION_CONFIRM_TIMEOUT = 5
+
+
 @dataclass
 class SessionConfig:
     spawn_package: str | None = None
@@ -24,6 +27,15 @@ class SessionConfig:
         if self.attach_pid is not None:
             return f"PID {self.attach_pid}"
         return ""
+
+
+@dataclass
+class ModificationResume:
+    resumed: bool
+    report: dict | None = None
+
+    def __bool__(self) -> bool:
+        return self.resumed
 
 
 class FridaSession:
@@ -68,6 +80,8 @@ class FridaSession:
         self._blocking_enabled = True
         self._intercept_counter = 0
         self._history_counter = 0
+        self._modification_lock = threading.Lock()
+        self._pending_modifications: dict[str, tuple[threading.Event, dict]] = {}
 
     def connect(self, device_id):
         with self._lock:
@@ -383,6 +397,16 @@ class FridaSession:
                     if self.hold_end_cb:
                         self.hold_end_cb(payload)
                     return
+                if event_name == "modification_result":
+                    decision_id = payload.get("decisionId")
+                    if isinstance(decision_id, str):
+                        with self._modification_lock:
+                            pending = self._pending_modifications.get(decision_id)
+                            if pending:
+                                event, result = pending
+                                result.update(payload)
+                                event.set()
+                    return
 
                 self._history_counter += 1
                 db_id = None
@@ -453,11 +477,32 @@ class FridaSession:
         ]
 
     def forward_with_mods(self, mods, decision_id=None):
-        return bool(
-            self._script.exports_sync.forward_with_mods(
+        return self._resume_with_mods("forward_with_mods", mods, decision_id)
+
+    def _resume_with_mods(self, rpc_name, mods, decision_id):
+        pending = None
+        if mods and decision_id:
+            pending = (threading.Event(), {})
+            with self._modification_lock:
+                if decision_id in self._pending_modifications:
+                    return ModificationResume(False)
+                self._pending_modifications[decision_id] = pending
+        try:
+            resumed = bool(getattr(self._script.exports_sync, rpc_name)(
                 self._rpc_mods(mods), decision_id
-            )
-        )
+            ))
+            if not resumed or not mods:
+                return ModificationResume(resumed)
+            if pending is None or not pending[0].wait(timeout=MODIFICATION_CONFIRM_TIMEOUT):
+                return ModificationResume(True)
+            if not pending[1]:
+                return ModificationResume(True)
+            return ModificationResume(True, pending[1].copy())
+        finally:
+            if pending is not None:
+                with self._modification_lock:
+                    if self._pending_modifications.get(decision_id) is pending:
+                        del self._pending_modifications[decision_id]
 
     def drop(self, decision_id=None):
         return bool(self._script.exports_sync.drop(decision_id))
@@ -480,20 +525,20 @@ class FridaSession:
         self._script.exports_sync.interceptoff()
 
     def intercept_off_with_mods(self, mods, decision_id=None):
-        disabled = bool(
-            self._script.exports_sync.intercept_off_with_mods(
-                self._rpc_mods(mods), decision_id
-            )
-        )
+        result = self._resume_with_mods("intercept_off_with_mods", mods, decision_id)
+        disabled = bool(result)
         if disabled:
             self._blocking_enabled = False
-        return disabled
+        return result
 
     def is_ready(self) -> bool:
         with self._lock:
             return self._script is not None
 
     def cleanup(self):
+        with self._modification_lock:
+            for event, _result in self._pending_modifications.values():
+                event.set()
         with self._lock:
             script = self._script
             session = self._session

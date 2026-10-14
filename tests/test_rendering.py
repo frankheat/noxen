@@ -26,6 +26,19 @@ def plain(rendered: str) -> str:
 
 
 class RenderingTests(unittest.TestCase):
+    def test_modification_warning_is_visible_in_history_detail_and_row(self):
+        entry = {
+            "id": 1, "timestamp": "2026-10-14T08:00:00+00:00",
+            "class": "Example", "method": "startActivity",
+            "intent": {"action": "old", "extras": {}, "categories": []},
+            "outcome": "forwarded", "modification_error": "Result [not verified]",
+        }
+        rendered = plain(render_intent_detail(entry))
+        self.assertIn("[MODIFICATION WARNING]", rendered)
+        self.assertIn("Result [not verified]", rendered)
+        cells = history_row_values(entry, {"outcome"}, [("outcome", "→/✗")])
+        self.assertEqual(cells[0].plain, "→ !")
+
     def test_entry_to_filter_context_normalizes_missing_values(self):
         entry = {
             "class": "com.example.MainActivity",

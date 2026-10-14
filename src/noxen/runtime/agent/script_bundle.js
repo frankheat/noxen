@@ -13557,6 +13557,14 @@ std_string_c_str (StdString * self)
     if (text === "false" || text === "f") return false;
     return parseAndroidInt(text) !== 0;
   }
+  function normalizeFloatingExtra(value) {
+    var text = String(value).trim();
+    var lower = text.toLowerCase();
+    if (lower === "nan" || lower === "+nan" || lower === "-nan") return "NaN";
+    if (lower === "infinity" || lower === "+infinity") return "Infinity";
+    if (lower === "-infinity") return "-Infinity";
+    return text;
+  }
   function extraListValue(value, canonicalType) {
     var items = splitExtraValues(value);
     var elementType = canonicalType.replace(/\[\]$/, "").replace(/-list$/, "");
@@ -13568,8 +13576,8 @@ std_string_c_str (StdString * self)
     return items.map(function(item) {
       if (elementType === "int") return IntegerJava.valueOf(parseAndroidInt(item));
       if (elementType === "long") return LongJava.valueOf(String(item));
-      if (elementType === "float") return FloatJava.valueOf(String(item));
-      if (elementType === "double") return DoubleJava.valueOf(String(item));
+      if (elementType === "float") return FloatJava.valueOf(normalizeFloatingExtra(item));
+      if (elementType === "double") return DoubleJava.valueOf(normalizeFloatingExtra(item));
       return StringJava.$new(String(item));
     });
   }
@@ -13582,8 +13590,8 @@ std_string_c_str (StdString * self)
     return items.map(function(item) {
       if (elementType === "int") return parseAndroidInt(item);
       if (elementType === "long") return int64(String(item));
-      if (elementType === "float") return FloatJava.valueOf(String(item)).floatValue();
-      if (elementType === "double") return DoubleJava.valueOf(String(item)).doubleValue();
+      if (elementType === "float") return FloatJava.valueOf(normalizeFloatingExtra(item)).floatValue();
+      if (elementType === "double") return DoubleJava.valueOf(normalizeFloatingExtra(item)).doubleValue();
       return String(item);
     });
   }
@@ -14141,8 +14149,10 @@ std_string_c_str (StdString * self)
         while (catIterator.hasNext() && catList.length < EXTRA_MAX_CONTAINER_ITEMS) {
           catList.push(boundedExtraText(catIterator.next()).value);
         }
+        if (catIterator.hasNext()) infoIntent.categoriesTruncated = true;
       }
     } catch (e) {
+      infoIntent.categoriesReadError = true;
       send("[!] Intent categories could not be read (" + extraErrorKind(e) + ")");
     }
     infoIntent.categories = catList;
@@ -14190,7 +14200,11 @@ std_string_c_str (StdString * self)
     return infoIntent;
   }
   function applyModifications(intent) {
-    if (!intent || modQueue.length === 0) return;
+    if (!intent) {
+      modQueue = [];
+      return { ok: false, error: "Intent is unavailable" };
+    }
+    var error = null;
     try {
       var dataOrMimeChanged = false;
       var finalData = null;
@@ -14238,10 +14252,10 @@ std_string_c_str (StdString * self)
           } else if (eType === "long") {
             intent.putExtra.overload("java.lang.String", "long").call(intent, key, int64(val));
           } else if (eType === "float") {
-            var scalarFloat = Java.use("java.lang.Float").valueOf(String(val)).floatValue();
+            var scalarFloat = Java.use("java.lang.Float").valueOf(normalizeFloatingExtra(val)).floatValue();
             intent.putExtra.overload("java.lang.String", "float").call(intent, key, scalarFloat);
           } else if (eType === "double") {
-            var scalarDouble = Java.use("java.lang.Double").valueOf(String(val)).doubleValue();
+            var scalarDouble = Java.use("java.lang.Double").valueOf(normalizeFloatingExtra(val)).doubleValue();
             intent.putExtra.overload("java.lang.String", "double").call(intent, key, scalarDouble);
           } else if (eType === "null") {
             intent.putExtra.overload("java.lang.String", "java.lang.String").call(intent, key, null);
@@ -14278,9 +14292,12 @@ std_string_c_str (StdString * self)
         }
       });
     } catch (e) {
+      error = String(e).slice(0, 300);
       send("[!] Error applying modifications: " + e);
+    } finally {
+      modQueue = [];
     }
-    modQueue = [];
+    return { ok: error === null, error };
   }
   var RECEIVING_METHODS = {
     "getIntent": true,
@@ -14524,7 +14541,23 @@ std_string_c_str (StdString * self)
       if (mode === "drop") {
         shouldDrop = true;
       } else if (mode === "forward") {
-        applyModifications(intent);
+        if (modQueue.length > 0) {
+          var modificationResult = applyModifications(intent);
+          var resultingIntent = null;
+          try {
+            resultingIntent = dumpIntent(intent);
+          } catch (snapshotError) {
+            modificationResult.ok = false;
+            modificationResult.error = (modificationResult.error || "") + " (resulting Intent could not be captured: " + String(snapshotError).slice(0, 150) + ")";
+          }
+          send({
+            noxenEvent: "modification_result",
+            decisionId,
+            ok: modificationResult.ok,
+            error: modificationResult.error,
+            infoIntent: resultingIntent
+          });
+        }
       }
       resumeMode = "forward";
     } catch (e) {
