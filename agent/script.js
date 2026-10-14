@@ -1262,12 +1262,7 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
 
     if (shouldDrop) return defaultReturn(returnType);
 
-    try {
-      return method.apply(this, arguments);
-    } catch (e) {
-      send("[!] Forward error in " + methodName + ": " + e);
-      return defaultReturn(returnType);
-    }
+    return method.apply(this, arguments);
   };
 }
 

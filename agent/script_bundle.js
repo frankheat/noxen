@@ -14652,12 +14652,7 @@ std_string_c_str (StdString * self)
       var as = buildAttackSurface(methodName, intent, this, firstArg, sendPermission);
       var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as);
       if (shouldDrop) return defaultReturn(returnType);
-      try {
-        return method.apply(this, arguments);
-      } catch (e) {
-        send("[!] Forward error in " + methodName + ": " + e);
-        return defaultReturn(returnType);
-      }
+      return method.apply(this, arguments);
     };
   }
   rpc.exports = {

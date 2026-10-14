@@ -2,6 +2,7 @@
   "name": "noxen-agent",
   "private": true,
   "scripts": {
+    "test": "node tests/test_agent_hook_exceptions.cjs",
     "build": "npm run build:app && npm run build:system-server && npm run sync:runtime",
     "build:app": "frida-compile agent/script.js -o agent/script_bundle.js -T none --bundle-format iife",
     "build:system-server": "frida-compile agent/system_server.js -o agent/system_server_bundle.js -T none --bundle-format iife",
