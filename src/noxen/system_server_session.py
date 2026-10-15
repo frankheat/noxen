@@ -18,69 +18,118 @@ class SystemServerSession:
         self._session = None
         self._script = None
         self._connect_thread = None
+        self._connecting = False
         self._ready = threading.Event()
         self._lock = threading.Lock()
         self._generation = 0
         self._active_holds: dict[str, dict] = {}
 
     def connect(self, device_id: str) -> None:
-        needs_cleanup = False
         with self._lock:
-            needs_cleanup = self._device_id is not None and self._device_id != device_id
-        if needs_cleanup:
-            self.cleanup()
-
-        with self._lock:
-            if self._device_id == device_id and self._connect_thread and self._connect_thread.is_alive():
+            if self._device_id == device_id and (self._connecting or self._script is not None):
                 return
-            if self._device_id == device_id and self._script is not None:
-                return
+            old_script, old_session = self._script, self._session
+            if self._device_id is not None and self._device_id != device_id:
+                self._active_holds.clear()
             self._device_id = device_id
+            self._script = None
+            self._session = None
             self._ready.clear()
             self._generation += 1
             generation = self._generation
-            self._connect_thread = threading.Thread(
+            self._connecting = True
+            worker = threading.Thread(
                 target=self._start_session,
-                args=(generation,),
+                args=(generation, device_id),
                 daemon=True,
             )
-            self._connect_thread.start()
+            self._connect_thread = worker
+        # No Frida operations under the state lock: detach may invoke callbacks.
+        self._cleanup_resources_async(old_script, old_session)
+        worker.start()
 
-    def _start_session(self, generation: int) -> None:
+    def _is_current(self, generation: int) -> bool:
+        with self._lock:
+            return generation == self._generation
+
+    def _start_session(self, generation: int, device_id: str) -> None:
+        session = script = None
+        keep_session = False
         try:
             import frida
-            device = frida.get_device(self._device_id, timeout=5)
+            if not self._is_current(generation):
+                return
+            device = frida.get_device(device_id, timeout=5)
+            if not self._is_current(generation):
+                return
             pid = self._find_system_server_pid(device)
+            if not self._is_current(generation):
+                return
             self.log_cb(log_info(f"Attaching to system_server (PID {pid})", "input-anr"))
 
             session = device.attach(pid)
-            session.on("detached", self._on_detached)
+            with self._lock:
+                if generation != self._generation:
+                    return
+                self._session = session
+            session.on("detached", lambda reason, crash: self._on_detached(
+                generation, session, reason, crash
+            ))
+            if session.is_detached:
+                self._on_detached(generation, session, "connection-terminated", None)
+                return
 
             script_result = load_system_server_script()
             for message in script_result.messages:
                 self.log_cb(message)
-
-            script = session.create_script(script_result.code)
-            script.on("message", self._on_message)
-            script.load()
-            script.exports_sync.init({"maxHoldMs": self.config.max_hold_ms})
-            status = script.exports_sync.status()
-
-            with self._lock:
-                stale = generation != self._generation
-                if not stale:
-                    self._session = session
-                    self._script = script
-                    self._ready.set()
-            if stale:
-                self._detach_stale_session(script, session)
+            if not self._is_current(generation):
                 return
 
-            self._sync_active_holds()
-            self._log_status(status)
+            script = session.create_script(script_result.code)
+            with self._lock:
+                if generation != self._generation or self._session is not session:
+                    return
+                self._script = script
+            script.on("message", lambda message, data: self._on_script_message(
+                generation, script, message, data
+            ))
+            script.load()
+            if not self._is_current(generation):
+                return
+            script.exports_sync.init({"maxHoldMs": self.config.max_hold_ms})
+            if not self._is_current(generation):
+                return
+            status = script.exports_sync.status()
+            if session.is_detached:
+                self._on_detached(generation, session, "connection-terminated", None)
+                return
+
+            with self._lock:
+                if generation != self._generation or self._session is not session:
+                    return
+                self._ready.set()
+                self._connecting = False
+                keep_session = True
+
+            self._sync_active_holds(generation)
+            if self._is_current(generation):
+                self._log_status(status)
         except Exception as e:
-            self.log_cb(log_warning(f"Input ANR bypass unavailable: {e}", "input-anr"))
-            self.cleanup()
+            keep_session = False
+            with self._lock:
+                current = generation == self._generation
+                if current:
+                    self._generation += 1
+                    self._session = None
+                    self._script = None
+                    self._connecting = False
+                    self._ready.clear()
+                    self._active_holds.clear()
+            if current:
+                self.log_cb(log_warning(f"Input ANR bypass unavailable: {e}", "input-anr"))
+        finally:
+            if not keep_session:
+                self._detach_stale_session(script, session)
 
     @staticmethod
     def _detach_stale_session(script, session) -> None:
@@ -92,6 +141,15 @@ class SystemServerSession:
             session.detach()
         except Exception:
             pass
+
+    def _cleanup_resources_async(self, script, session):
+        if script is None and session is None:
+            return None
+        worker = threading.Thread(
+            target=self._detach_stale_session, args=(script, session), daemon=True,
+        )
+        worker.start()
+        return worker
 
     @staticmethod
     def _find_system_server_pid(device) -> int:
@@ -111,6 +169,12 @@ class SystemServerSession:
                 self.log_cb(log_debug(str(payload) if payload else "message received", "system_server"))
         elif message.get("type") == "error":
             self.log_cb(log_error(f"JavaScript error: {message.get('description')}", "system_server"))
+
+    def _on_script_message(self, generation, script, message, data) -> None:
+        with self._lock:
+            if generation != self._generation or self._script is not script:
+                return
+        self._on_message(message, data)
 
     def _log_status(self, status: dict | None) -> None:
         status = status or {}
@@ -142,13 +206,17 @@ class SystemServerSession:
             elif state == "error":
                 self.log_cb(log_warning(f"{name}: {hook.get('error') or 'failed'}", "input-anr"))
 
-    def _on_detached(self, reason, _crash) -> None:
-        msg = reason.replace("-", " ") if reason else "unknown reason"
-        self.log_cb(log_warning(f"system_server detached: {msg}", "input-anr"))
+    def _on_detached(self, generation, session, reason, _crash) -> None:
         with self._lock:
+            if generation != self._generation or self._session is not session:
+                return
+            self._generation += 1
             self._script = None
             self._session = None
+            self._connecting = False
             self._ready.clear()
+        msg = reason.replace("-", " ") if reason else "unknown reason"
+        self.log_cb(log_warning(f"system_server detached: {msg}", "input-anr"))
 
     def hold_start(self, hold: dict) -> None:
         hold_id = str(hold.get("holdId") or "")
@@ -158,6 +226,7 @@ class SystemServerSession:
         hold["timeoutMs"] = self.config.max_hold_ms
         with self._lock:
             self._active_holds[hold_id] = hold
+            generation = self._generation
         self.log_cb(
             log_debug(
                 f"Hold started: pid={hold.get('pid')} method={hold.get('methodName')} "
@@ -165,37 +234,46 @@ class SystemServerSession:
                 "input-anr",
             )
         )
-        self._call_script_async("holdstart", hold)
+        self._call_script_async("holdstart", hold, generation=generation)
 
     def hold_end(self, hold_id: str | None, pid: int | None = None) -> None:
         if not hold_id:
             return
         with self._lock:
             self._active_holds.pop(str(hold_id), None)
+            generation = self._generation
         self.log_cb(log_debug(f"Hold ended: hold={hold_id} pid={pid}", "input-anr"))
-        self._call_script_async("holdend", str(hold_id), pid)
+        self._call_script_async("holdend", str(hold_id), pid, generation=generation)
 
-    def _sync_active_holds(self) -> None:
+    def _sync_active_holds(self, generation=None) -> None:
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return
+            generation = self._generation
             holds = list(self._active_holds.values())
         for hold in holds:
-            self._call_script_async("holdstart", hold)
+            self._call_script_async("holdstart", hold, generation=generation)
 
-    def _call_script_async(self, method_name: str, *args) -> None:
+    def _call_script_async(self, method_name: str, *args, generation=None) -> None:
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return
             if self._script is None or not self._ready.is_set():
                 return
-        threading.Thread(target=self._call_script, args=(method_name, args), daemon=True).start()
+            script, generation = self._script, self._generation
+        threading.Thread(
+            target=self._call_script, args=(generation, script, method_name, args), daemon=True,
+        ).start()
 
-    def _call_script(self, method_name: str, args: tuple) -> None:
+    def _call_script(self, generation, script, method_name: str, args: tuple) -> None:
         with self._lock:
-            script = self._script
-        if script is None:
-            return
+            if generation != self._generation or self._script is not script or not self._ready.is_set():
+                return
         try:
             getattr(script.exports_sync, method_name)(*args)
         except Exception as e:
-            self.log_cb(log_warning(f"Input ANR bypass RPC failed: {e}", "input-anr"))
+            if self._is_current(generation):
+                self.log_cb(log_warning(f"Input ANR bypass RPC failed: {e}", "input-anr"))
 
     def cleanup(self) -> None:
         with self._lock:
@@ -205,23 +283,12 @@ class SystemServerSession:
             self._session = None
             self._active_holds.clear()
             self._ready.clear()
+            self._connecting = False
             self._generation += 1
 
-        def perform_cleanup() -> None:
-            if script:
-                try:
-                    script.exports_sync.clear()
-                except Exception:
-                    pass
-            if session:
-                try:
-                    session.detach()
-                except Exception:
-                    pass
-
-        cleanup_thread = threading.Thread(target=perform_cleanup, daemon=True)
-        cleanup_thread.start()
-        cleanup_thread.join(timeout=0.5)
+        cleanup_thread = self._cleanup_resources_async(script, session)
+        if cleanup_thread is not None:
+            cleanup_thread.join(timeout=0.5)
 
 
 def format_system_server_log(payload: dict) -> str:
