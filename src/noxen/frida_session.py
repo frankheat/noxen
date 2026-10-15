@@ -124,6 +124,8 @@ class FridaSession:
                 return
             self.log_cb(log_info(f"Connecting to device {device_id}", "frida"))
             device = frida.get_device(device_id, timeout=5)
+            if self._is_stale(generation):
+                return
 
             pid = None
             should_resume = False
@@ -141,20 +143,29 @@ class FridaSession:
                 stage = "spawn"
                 pid = device.spawn([self._config.spawn_package])
                 should_resume = True
+                if self._is_stale(generation):
+                    close_local()
+                    return
                 session = device.attach(pid)
-                session.on("detached", self._on_detached)
+                session.on("detached", lambda reason, crash: self._on_detached(
+                    reason, crash, generation
+                ))
                 self.log_cb(log_success(f"Spawned {self._config.spawn_package} (PID {pid})", "frida"))
             elif self._config.attach_name:
                 stage = "attach"
                 session = device.attach(self._config.attach_name)
-                session.on("detached", self._on_detached)
+                session.on("detached", lambda reason, crash: self._on_detached(
+                    reason, crash, generation
+                ))
                 pid = getattr(session, 'pid', None)
                 pid_str = f" (PID {pid})" if pid else ""
                 self.log_cb(log_success(f"Attached to \"{self._config.attach_name}\"{pid_str}", "frida"))
             elif self._config.attach_pid:
                 stage = "attach"
                 session = device.attach(self._config.attach_pid)
-                session.on("detached", self._on_detached)
+                session.on("detached", lambda reason, crash: self._on_detached(
+                    reason, crash, generation
+                ))
                 self.log_cb(log_success(f"Attached to PID {self._config.attach_pid}", "frida"))
             else:
                 self._report_connection_failure(
@@ -170,10 +181,11 @@ class FridaSession:
                 return
 
         except Exception as e:
-            if self._is_stale(generation):
-                return
+            # Cancellation suppresses feedback, not cleanup of local resources.
             if "close_local" in locals():
                 close_local()
+            if self._is_stale(generation):
+                return
             self._report_connection_failure(
                 generation, stage, e, f"Connection failed: {e}"
             )
@@ -385,10 +397,10 @@ class FridaSession:
                     f"Connection failure callback failed: {callback_error}", "frida"
                 ))
 
-    def _on_detached(self, reason, crash):
-        msg = reason.replace("-", " ") if reason else "unknown reason"
-        self.log_cb(log_warning(f"Session detached: {msg}", "frida"))
+    def _on_detached(self, reason, crash, generation):
         with self._lock:
+            if generation != self._generation:
+                return
             self._script = None
             self._session = None
             self._ready = False
@@ -396,6 +408,8 @@ class FridaSession:
             initializing = self._hook_report_event is not None
             if initializing:
                 self._hook_report_event.set()
+        msg = reason.replace("-", " ") if reason else "unknown reason"
+        self.log_cb(log_warning(f"Session detached: {msg}", "frida"))
         if not initializing and self.disconnected_cb:
             self.disconnected_cb()
 

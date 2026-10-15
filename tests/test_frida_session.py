@@ -726,6 +726,124 @@ class FridaSessionLifecycleTests(unittest.TestCase):
         self.assertEqual(killed, [42])
         self.assertEqual(failures, [("spawn", "attach failed")])
 
+    def test_cancelled_connection_cleans_only_its_spawned_process(self):
+        for mode in ("spawn", "name", "pid"):
+            for kill_fails in (False, True):
+                with self.subTest(mode=mode, kill_fails=kill_fails):
+                    session, _script, _native, device, _logs, connected, failures, _warnings = self._hook_setup()
+                    session._config = SessionConfig(**{
+                        {"spawn": "spawn_package", "name": "attach_name", "pid": "attach_pid"}[mode]:
+                        42 if mode == "pid" else "dev.example",
+                        "validated_hooks": HooksLoadResult([], []),
+                    })
+                    entered, release = threading.Event(), threading.Event()
+                    resumed = []
+
+                    def attach(_target):
+                        entered.set()
+                        release.wait(2)
+                        raise RuntimeError("attach failed after cancellation")
+
+                    def kill(pid):
+                        device.killed.append(pid)
+                        if kill_fails:
+                            raise RuntimeError("kill unavailable")
+
+                    device.attach = attach
+                    device.kill = kill
+                    device.resume = resumed.append
+                    fake_frida = SimpleNamespace(get_device=lambda *_a, **_k: device)
+                    with patch.dict(sys.modules, {"frida": fake_frida}):
+                        session.connect("device-1")
+                        try:
+                            self.assertTrue(entered.wait(2))
+                            session.cleanup()
+                        finally:
+                            release.set()
+                            session._connect_thread.join(2)
+                    self.assertFalse(session._connect_thread.is_alive())
+                    self.assertEqual(device.killed, [42] if mode == "spawn" else [])
+                    self.assertEqual(resumed, [42] if mode == "spawn" and kill_fails else [])
+                    self.assertEqual(connected, [])
+                    self.assertEqual(failures, [])
+
+    def test_cancellation_during_device_lookup_or_spawn_stops_startup(self):
+        for boundary in ("device", "spawn"):
+            with self.subTest(boundary=boundary):
+                session, _script, _native, device, _logs, connected, failures, _warnings = self._hook_setup()
+                entered, release = threading.Event(), threading.Event()
+                calls = []
+
+                def wait():
+                    entered.set()
+                    release.wait(2)
+
+                def get_device(*_args, **_kwargs):
+                    if boundary == "device":
+                        wait()
+                    return device
+
+                def spawn(_args):
+                    calls.append("spawn")
+                    wait()
+                    return 42
+
+                device.spawn = spawn
+                device.attach = lambda _pid: calls.append("attach")
+                with patch.dict(sys.modules, {"frida": SimpleNamespace(get_device=get_device)}):
+                    session.connect("device-1")
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        session.cleanup()
+                    finally:
+                        release.set()
+                        session._connect_thread.join(2)
+                self.assertFalse(session._connect_thread.is_alive())
+                self.assertEqual(calls, ["spawn"] if boundary == "spawn" else [])
+                self.assertEqual(device.killed, [42] if boundary == "spawn" else [])
+                self.assertEqual(connected, [])
+                self.assertEqual(failures, [])
+
+    def test_old_detach_cannot_clear_replacement_connection(self):
+        setup = self._hook_setup()
+        session, _script, native, _device, logs, *_rest = setup
+        self._run_hook_setup(setup, {
+            "installed": 1, "installedIndices": [0], "skipped": [], "failed": [],
+        })
+        old_detach = native.callbacks["detached"]
+        session.cleanup()
+        replacement_script = _FakeHookScript()
+        replacement_native = _FakeHookNativeSession(replacement_script)
+        replacement_device = _FakeHookDevice(replacement_native)
+        setup = (session, replacement_script, replacement_native, replacement_device, *setup[4:])
+        self._run_hook_setup(setup, {
+            "installed": 1, "installedIndices": [0], "skipped": [], "failed": [],
+        })
+        disconnected = []
+        session.disconnected_cb = lambda: disconnected.append(True)
+        before = len(logs)
+        old_detach("application-requested", None)
+        self.assertTrue(session.is_ready())
+        self.assertIs(session._session, replacement_native)
+        self.assertIs(session._script, replacement_script)
+        self.assertEqual(session.hook_registration_count, 1)
+        self.assertEqual(disconnected, [])
+        self.assertEqual(len(logs), before)
+        replacement_native.callbacks["detached"]("process-terminated", None)
+        self.assertFalse(session.is_ready())
+        self.assertEqual(disconnected, [True])
+
+    def test_cleanup_after_resumed_spawn_does_not_kill_app(self):
+        setup = self._hook_setup()
+        session, _script, native, device, *_rest = setup
+        self._run_hook_setup(setup, {
+            "installed": 1, "installedIndices": [0], "skipped": [], "failed": [],
+        })
+        session.cleanup()
+        self.assertTrue(native.detached)
+        self.assertTrue(device.resumed.is_set())
+        self.assertEqual(device.killed, [])
+
     def test_cleanup_invalidates_connection_still_in_progress(self):
         attached = threading.Event()
         release_attach = threading.Event()
