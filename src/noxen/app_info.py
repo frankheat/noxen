@@ -114,7 +114,7 @@ def component_access(component: dict) -> str | None:
 
 
 def is_exposed(component: dict) -> bool:
-    """Reachable by other apps with little/no barrier: exported with open access."""
+    """Exported with open access, independently of the component's enabled state."""
     return component_access(component) == ACCESS_OPEN
 
 

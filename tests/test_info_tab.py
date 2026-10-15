@@ -1,9 +1,10 @@
+import copy
 import os
 import tempfile
 import unittest
 from types import SimpleNamespace
 
-from textual.widgets import ContentSwitcher, DataTable, Label, RichLog, Switch
+from textual.widgets import ContentSwitcher, DataTable, Input, Label, RichLog, Switch
 from textual.widgets.data_table import ColumnKey
 
 from noxen.app import NoxenApp, markup_renderable
@@ -49,6 +50,32 @@ class MarkupRenderableTests(unittest.TestCase):
 
 
 class InfoTabTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_keeps_disabled_components_visible_under_search_and_exposed_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NoxenApp(project_args(os.path.join(tmp, "disabled.noxen")))
+            async with app.run_test(size=(120, 40)) as pilot:
+                snapshot = copy.deepcopy(SNAPSHOT)
+                receiver = snapshot["components"][1]
+                receiver["enabledRuntime"] = 2
+                app._apply_app_info(snapshot)
+                app.query_one("TabbedContent").active = "tab_info"
+                app._switch_info_view("info_nav_components")
+                app.query_one("#info_comp_exposed", Switch).value = True
+                app.query_one("#info_comp_search", Input).value = "R1"
+                app._info_sort["info_comp_table"] = ("enabled", False)
+                await pilot.pause()
+                table = app.query_one("#info_comp_table", DataTable)
+                self.assertEqual(table.row_count, 1)
+                self.assertEqual(table.get_row("com.x.R1")[3:5], ["open", "no"])
+                for runtime, expected in ((1, "yes"), (0, "yes"), (2, "no")):
+                    receiver["enabledRuntime"] = runtime
+                    app._apply_app_info(copy.deepcopy(snapshot))
+                    await pilot.pause()
+                    self.assertEqual(table.row_count, 1)
+                    self.assertEqual(table.get_row("com.x.R1")[3:5], ["open", expected])
+                    self.assertEqual(len(app._app_info["components"]), 3)
+                    self.assertEqual(app._info_sort["info_comp_table"], ("enabled", False))
+
     async def test_component_detail_resize_only_in_components_view(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:

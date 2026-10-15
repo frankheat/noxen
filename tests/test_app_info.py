@@ -80,6 +80,18 @@ class AppInfoTests(unittest.TestCase):
         self.assertFalse(is_exposed({"exported": True, "permission": {"level": "signature"}}))
         self.assertFalse(is_exposed({"exported": False, "permission": None}))
 
+    def test_disabled_components_keep_access_and_remain_in_inventory(self):
+        for kind in ("activity", "service", "receiver", "provider"):
+            for enabled, runtime, expected in ((False, 0, False), (True, 2, False), (False, 1, True)):
+                with self.subTest(kind=kind, runtime=runtime):
+                    component = {"name": "example.Disabled", "type": kind, "exported": True,
+                                 "permission": None, "enabled": enabled, "enabledRuntime": runtime}
+                    self.assertEqual(component_enabled(component), expected)
+                    self.assertTrue(is_exposed(component))
+                    self.assertEqual(component_row(component)[3:5], ["open", "yes" if expected else "no"])
+                    self.assertEqual(filter_components([component], query="disabled", exposed_only=True), [component])
+                    self.assertEqual(component_counts([component])[kind], 1)
+
     def test_format_permission(self):
         self.assertEqual(format_permission(None), "—")
         self.assertEqual(format_permission({"name": "com.x.P", "level": "normal"}), "com.x.P (normal)")

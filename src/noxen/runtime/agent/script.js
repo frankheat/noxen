@@ -1464,9 +1464,12 @@ rpc.exports = {
 
         var GET_ACTIVITIES = 1, GET_RECEIVERS = 2, GET_SERVICES = 4, GET_PROVIDERS = 8,
             GET_META_DATA = 128, GET_SIGNATURES = 64, GET_PERMISSIONS = 4096,
-            GET_URI_PERMISSION_PATTERNS = 2048, GET_SIGNING_CERTIFICATES = 134217728;
+            GET_URI_PERMISSION_PATTERNS = 2048, GET_SIGNING_CERTIFICATES = 134217728,
+            MATCH_DISABLED_COMPONENTS = 512;
+        // Inventory includes disabled components; this is not a routing query.
         var flags = GET_ACTIVITIES | GET_RECEIVERS | GET_SERVICES | GET_PROVIDERS |
                     GET_META_DATA | GET_PERMISSIONS | GET_URI_PERMISSION_PATTERNS |
+                    MATCH_DISABLED_COMPONENTS |
                     (sdkInt >= 28 ? GET_SIGNING_CERTIFICATES : GET_SIGNATURES);
         var pi = pm.getPackageInfo(pkg, flags);
         var ai = pi.applicationInfo.value;
