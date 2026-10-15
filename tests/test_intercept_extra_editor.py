@@ -187,6 +187,10 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                     }
                     commands = []
                     app.process_command_worker = lambda command: commands.append(command)
+                    command_input = app.query_one("#intercept_command_input", Input)
+                    command_input.value = "alpha beta"
+                    command_input.cursor_position = 0
+                    command_input.focus()
                     app.set_intercept_state(True)
                     await pilot.pause()
 
@@ -208,6 +212,19 @@ class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
 
                     self.assertEqual(commands, ["forward", "drop"])
+                    self.assertEqual(command_input.value, "alpha beta")
+
+                    app.set_intercept_state(False)
+                    command_input.focus()
+                    command_input.cursor_position = 0
+                    await pilot.press("ctrl+f")
+                    await pilot.pause()
+
+                    self.assertEqual(commands, ["forward", "drop"])
+                    self.assertFalse(app.check_action("forward_current", ()))
+                    self.assertFalse(app.check_action("apply_edit", ()))
+                    if any(binding.key == "ctrl+f" for binding in Input.BINDINGS):
+                        self.assertNotEqual(command_input.value, "alpha beta")
             finally:
                 os.chdir(previous_cwd)
 

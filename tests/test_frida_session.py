@@ -30,6 +30,58 @@ class SessionConfigTests(unittest.TestCase):
 
 
 class FridaSessionMessageTests(unittest.TestCase):
+    def test_extra_script_messages_and_invalid_events_never_change_interception(self):
+        valid = {
+            "noxenEvent": "intent", "protocolVersion": 1,
+            "className": "Example", "methodName": "getIntent",
+            "infoIntent": {}, "stackTrace": [],
+            "decision": {"required": True, "id": "decision-1"},
+        }
+        payloads = [
+            {"foo": "bar"}, {}, None, ["hello"], 42, True, "[*] Extra script ready",
+            {key: value for key, value in valid.items() if key != "noxenEvent"},
+            {**valid, "noxenEvent": "custom_event"},
+            {key: value for key, value in valid.items() if key != "protocolVersion"},
+            {**valid, "protocolVersion": 2},
+            {**valid, "protocolVersion": True},
+            {**valid, "protocolVersion": "1"},
+            {**valid, "className": ""},
+            {**valid, "methodName": []},
+            {**valid, "infoIntent": None},
+            {**valid, "infoIntent": []},
+            {**valid, "stackTrace": "frame"},
+            {**valid, "stackTrace": [{}]},
+            {**valid, "decision": None},
+            {**valid, "decision": {"required": "false", "id": "decision-1"}},
+            {**valid, "decision": {"required": True}},
+            {**valid, "decision": {"required": True, "id": ""}},
+            {**valid, "decision": {"required": True, "id": " "}},
+            {**valid, "decision": {"required": True, "id": 1}},
+            {**valid, "decision": {"required": False, "id": "decision-1"}},
+        ]
+        for blocking in (True, False):
+            for payload in payloads:
+                with self.subTest(blocking=blocking, payload=payload):
+                    history, outcomes, intercepts, logs = [], [], [], []
+                    session = FridaSession(
+                        SessionConfig(attach_pid=1), FilterManager(), logs.append,
+                        intercept_cb=intercepts.append,
+                        get_stack=lambda: self.fail("Non-Intent message requested rendering"),
+                        history_cb=lambda *args: history.append(args),
+                        outcome_cb=lambda *args: outcomes.append(args),
+                        intercept_log_cb=lambda *args: intercepts.append(args),
+                    )
+                    session._blocking_enabled = blocking
+                    with patch.object(session, "_forward_async") as forward:
+                        session.on_message({"type": "send", "payload": payload}, b"custom data")
+                        forward.assert_not_called()
+                    self.assertEqual(history, [])
+                    self.assertEqual(outcomes, [])
+                    self.assertEqual(intercepts, [])
+                    self.assertEqual(session._history_counter, 0)
+                    self.assertEqual(session._intercept_counter, 0)
+                    self.assertEqual(len(logs), 1)
+
     def test_js_messages_are_normalized_to_consistent_log_shape(self):
         self.assertEqual(
             FridaSession._format_js_message("[+] Hooks ready"),
@@ -110,10 +162,13 @@ class FridaSessionMessageTests(unittest.TestCase):
         session.on_message({
             "type": "send",
             "payload": {
+                "noxenEvent": "intent",
+                "protocolVersion": 1,
                 "className": "Example",
                 "methodName": "getIntent",
                 "infoIntent": {},
                 "stackTrace": [],
+                "decision": {"required": False, "id": None},
             },
         }, None)
 
@@ -144,6 +199,8 @@ class FridaSessionMessageTests(unittest.TestCase):
         session.on_message({
             "type": "send",
             "payload": {
+                "noxenEvent": "intent",
+                "protocolVersion": 1,
                 "className": "Example",
                 "methodName": "getIntent",
                 "infoIntent": {},
@@ -183,6 +240,8 @@ class FridaSessionMessageTests(unittest.TestCase):
         session.on_message({
             "type": "send",
             "payload": {
+                "noxenEvent": "intent",
+                "protocolVersion": 1,
                 "className": "Example",
                 "methodName": "getIntent",
                 "infoIntent": {},
@@ -213,6 +272,8 @@ class FridaSessionMessageTests(unittest.TestCase):
         session.on_message({
             "type": "send",
             "payload": {
+                "noxenEvent": "intent",
+                "protocolVersion": 1,
                 "className": "Example",
                 "methodName": "getIntent",
                 "infoIntent": {},

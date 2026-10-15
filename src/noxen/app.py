@@ -259,8 +259,8 @@ class NoxenApp(App):
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
         Binding("ctrl+r", "info_refresh", "Refresh", show=True, priority=True),
         Binding("ctrl+t", "info_toggle_rail", "Panel", show=True, priority=True),
-        Binding("ctrl+f", "forward_current", "Forward", show=True),
-        Binding("ctrl+f", "apply_edit", "Apply & Forward", show=True),
+        Binding("ctrl+f", "forward_current", "Forward", show=True, priority=True),
+        Binding("ctrl+f", "apply_edit", "Apply & Forward", show=True, priority=True),
         Binding("ctrl+d", "drop_current", "Drop", show=True, priority=True),
         Binding("escape", "cancel_edit", "Cancel edit", show=True),
     ]

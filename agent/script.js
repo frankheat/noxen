@@ -1102,6 +1102,8 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
 
     // --- SEND STACK TRACE ---
     send({
+        "noxenEvent": "intent",
+        "protocolVersion": 1,
         "className": className,
         "methodName": methodName,
         "stackTrace": getStackTrace(),
@@ -1161,7 +1163,8 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
 }
 
 function matchesActiveDecision(decisionId) {
-  return waiting && (!decisionId || decisionId === activeDecisionId);
+  return waiting && typeof decisionId === "string" && decisionId.length > 0 &&
+    decisionId === activeDecisionId;
 }
 
 function normalizeRpcMods(mods) {
@@ -1207,7 +1210,7 @@ function resumeWithMods(mods, decisionId, disableInterception) {
         resumeMode = "forward";
         Java.synchronized(lock, function () { lock.notify(); });
         resumed = true;
-      } else if (disableInterception && !waiting && !decisionId) {
+      } else if (disableInterception && !waiting && (decisionId === null || decisionId === undefined)) {
         blockEnabled = false;
         resumed = true;
       }

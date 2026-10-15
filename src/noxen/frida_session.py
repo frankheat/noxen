@@ -450,8 +450,6 @@ class FridaSession:
                     pass
 
     def on_message(self, message, data):
-        show_stack, stack_depth = self.get_stack()
-
         if message["type"] == "send":
             payload = message["payload"]
             if isinstance(payload, dict):
@@ -481,6 +479,15 @@ class FridaSession:
                                 event.set()
                     return
 
+                if event_name != "intent":
+                    self.log_cb(self._format_js_message(payload))
+                    return
+                if not self._valid_intent_event(payload):
+                    self.log_cb(log_warning(
+                        "Ignored invalid Intent event: unsupported protocol or malformed payload", "agent"
+                    ))
+                    return
+
                 self._history_counter += 1
                 db_id = None
                 if self.history_cb:
@@ -489,8 +496,8 @@ class FridaSession:
                     except Exception as e:
                         self.log_cb(log_warning(f"History callback failed: {e}", "history"))
 
-                decision = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
-                requires_decision = bool(decision.get("required")) if "required" in decision else self._blocking_enabled
+                decision = payload["decision"]
+                requires_decision = decision["required"]
                 decision_id = decision.get("id")
                 is_visible = self.filter_manager.is_visible(payload_to_filter_context(payload))
 
@@ -501,6 +508,7 @@ class FridaSession:
                     self._forward_async(decision_id, db_id)
                 else:
                     self._intercept_counter += 1
+                    show_stack, stack_depth = self.get_stack()
                     rendered = render_intercept_block(
                         payload,
                         self._intercept_counter,
@@ -517,6 +525,28 @@ class FridaSession:
         elif message["type"] == "error":
             self.log_cb(log_error(f"JavaScript error: {message['description']}", "agent"))
 
+    @staticmethod
+    def _valid_intent_event(payload):
+        """Validate the agent envelope without interpreting application extra values."""
+        version = payload.get("protocolVersion")
+        if type(version) is not int or version != 1:
+            return False
+        if not all(isinstance(payload.get(key), str) and payload[key].strip()
+                   for key in ("className", "methodName")):
+            return False
+        if not isinstance(payload.get("infoIntent"), dict):
+            return False
+        stack = payload.get("stackTrace")
+        if not isinstance(stack, list) or not all(isinstance(frame, str) for frame in stack):
+            return False
+        decision = payload.get("decision")
+        if not isinstance(decision, dict) or type(decision.get("required")) is not bool:
+            return False
+        decision_id = decision.get("id")
+        if decision["required"]:
+            return isinstance(decision_id, str) and bool(decision_id.strip())
+        return decision_id is None
+
     def _forward_async(self, decision_id, db_id):
         def _resume():
             try:
@@ -531,6 +561,8 @@ class FridaSession:
 
     @staticmethod
     def _format_js_message(text):
+        if not isinstance(text, str):
+            return log_debug(str(text), "agent")
         if text.startswith("[!]"):
             return log_error(text[3:].strip(), "agent")
         if text.startswith("[*]") or text.startswith("[+]"):

@@ -14520,6 +14520,8 @@ std_string_c_str (StdString * self)
       }
       var infoIntent = dumpIntent(intent);
       send({
+        "noxenEvent": "intent",
+        "protocolVersion": 1,
         "className": className,
         "methodName": methodName,
         "stackTrace": getStackTrace(),
@@ -14572,7 +14574,7 @@ std_string_c_str (StdString * self)
     return shouldDrop;
   }
   function matchesActiveDecision(decisionId) {
-    return waiting && (!decisionId || decisionId === activeDecisionId);
+    return waiting && typeof decisionId === "string" && decisionId.length > 0 && decisionId === activeDecisionId;
   }
   function normalizeRpcMods(mods) {
     if (!Array.isArray(mods)) throw new Error("modifications must be an array");
@@ -14618,7 +14620,7 @@ std_string_c_str (StdString * self)
             lock.notify();
           });
           resumed = true;
-        } else if (disableInterception && !waiting && !decisionId) {
+        } else if (disableInterception && !waiting && (decisionId === null || decisionId === void 0)) {
           blockEnabled = false;
           resumed = true;
         }
