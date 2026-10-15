@@ -14691,6 +14691,19 @@ std_string_c_str (StdString * self)
     };
   }
   rpc.exports = {
+    loadExtraScript: function(name, source) {
+      var exports = rpc.exports;
+      var reserved = Object.keys(exports).map(function(key) {
+        return [key, exports[key]];
+      });
+      Script.evaluate(name, source);
+      if (rpc.exports !== exports || reserved.some(function(entry) {
+        return exports[entry[0]] !== entry[1];
+      })) {
+        throw new Error("Extra script replaced reserved noxen RPC exports; do not overwrite rpc.exports or existing methods");
+      }
+      return true;
+    },
     proxy: function(hookConfig) {
       var report = { installed: 0, installedIndices: [], skipped: [], failed: [] };
       try {

@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 from textual.widgets import Button, Input, Label, Select
@@ -155,6 +156,43 @@ class ConnectionFeedbackTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(app.query_one("#home_btn", Button).disabled)
             finally:
                 os.chdir(cwd)
+
+    async def test_invalid_extra_script_preserves_current_session_and_reports_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(project=None, new_project=os.path.join(tmp, "extra.noxen"), skip_device_scan=True)
+            app = NoxenApp(args)
+            cleaned, notices = [], []
+            current_session = SimpleNamespace(cleanup=lambda: cleaned.append(True))
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.notify = lambda message, **kwargs: notices.append((message, kwargs))
+                app._populate_target_apps = lambda: None
+                app._home_devices = [SimpleNamespace(id="device-1")]
+                device = app.query_one("#home_device", Select)
+                device.set_options([("Android", "device-1")])
+                device.value = "device-1"
+                target = app.query_one("#home_target_select", Select)
+                target.set_options([("Example", "dev.example")])
+                target.value = "dev.example"
+                app.query_one("#home_script_path", Input).value = os.path.join(tmp, "missing.js")
+                await pilot.pause()
+                app.frida_session = current_session
+                app._try_connect()
+                self.assertIs(app.frida_session, current_session)
+                self.assertEqual(cleaned, [])
+                self.assertIn("Extra script", str(app.query_one("#home_error", Label).render()))
+                self.assertEqual(notices[-1][1]["severity"], "error")
+                self.assertFalse(app.query_one("#home_btn", Button).disabled)
+                script_path = os.path.join(tmp, "valid.js")
+                with open(script_path, "w", encoding="utf-8") as file:
+                    file.write("send('snapshot');")
+                app.query_one("#home_script_path", Input).value = script_path
+                with patch.object(app, "_init_session") as init, patch.object(app, "on_device_selected"):
+                    app._try_connect()
+                config = init.call_args.args[0]
+                self.assertEqual(config.extra_script_source.code, "send('snapshot');")
+                self.assertEqual(config.extra_script_source.path, script_path)
+                self.assertEqual(cleaned, [True])
+                app.frida_session = None
 
     async def test_failed_connection_stays_home_and_shows_feedback(self):
         cwd = os.getcwd()

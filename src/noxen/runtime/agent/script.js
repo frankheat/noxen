@@ -5,7 +5,7 @@ import Java_bridge from 'frida-java-bridge';
 // avoid double-loading. In >= 17 globalThis.Java is undefined, so we use the
 // explicitly imported frida-java-bridge.
 const Java = typeof globalThis.Java !== 'undefined' ? globalThis.Java : Java_bridge;
-// Re-export as global so any script appended at runtime (e.g. via -l) can use it.
+// Re-export as global so extra scripts evaluated in this runtime can use it.
 // On Frida < 17 Java is a read-only built-in, so we skip this silently.
 try { globalThis.Java = Java; } catch (_) {}
 
@@ -1305,6 +1305,18 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
 }
 
 rpc.exports = {
+  loadExtraScript: function (name, source) {
+    // Use the same runtime/Java bridge, but preserve the extra file's name in errors.
+    var exports = rpc.exports;
+    var reserved = Object.keys(exports).map(function (key) { return [key, exports[key]]; });
+    Script.evaluate(name, source);
+    if (rpc.exports !== exports || reserved.some(function (entry) {
+      return exports[entry[0]] !== entry[1];
+    })) {
+      throw new Error("Extra script replaced reserved noxen RPC exports; do not overwrite rpc.exports or existing methods");
+    }
+    return true;
+  },
   proxy: function (hookConfig) {
     var report = { installed: 0, installedIndices: [], skipped: [], failed: [] };
     try {

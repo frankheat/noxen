@@ -55,7 +55,7 @@ from noxen.app_info import (
     sort_components,
     sort_permissions,
 )
-from noxen.agent_loader import HookConfigError, load_hook_config
+from noxen.agent_loader import ExtraScriptError, HookConfigError, load_extra_script, load_hook_config
 from noxen.db import ProjectDB
 from noxen.exporting import (
     history_entries_label,
@@ -1092,7 +1092,7 @@ class NoxenApp(App):
                             yield Input(
                                 id="home_script_path",
                                 value=self.db.load_extra_script_path(),
-                                placeholder="appended Frida agent (.js)",
+                                placeholder="additional Frida script (.js)",
                                 select_on_focus=False,
                             )
                             yield Button("Browse", id="home_script_browse")
@@ -1345,6 +1345,18 @@ class NoxenApp(App):
             self._show_hook_config_error(error)
             return
 
+        try:
+            extra_source = load_extra_script(script_path_raw) if script_path_raw else None
+        except ExtraScriptError as error:
+            message = str(error)
+            self.query_one("#home_error", Label).update(Text(message))
+            self.write_log(log_error(message, "loader"))
+            self.notify(message, severity="error", timeout=6)
+            return
+        if extra_source is not None:
+            script_path_raw = extra_source.path
+            self.query_one("#home_script_path", Input).value = script_path_raw
+
         if self.frida_session:
             self.frida_session.cleanup()
             self.frida_session = None
@@ -1361,6 +1373,7 @@ class NoxenApp(App):
             custom_hooks=hooks_path,
             validated_hooks=validated_hooks,
             extra_script=script_path,
+            extra_script_source=extra_source,
         ))
         for msg in self._startup_messages:
             self.write_log(msg)
@@ -1634,6 +1647,8 @@ class NoxenApp(App):
 
     @staticmethod
     def _connection_failure_message(stage: str, error: Exception) -> str:
+        if stage == "extra-script":
+            return "Connection failed. The extra script could not be read or executed. See Log for details."
         error_name = type(error).__name__
         if error_name == "ServerNotRunningError":
             return "Connection failed. Frida server is not running or cannot be reached."

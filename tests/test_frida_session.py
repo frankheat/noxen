@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from noxen.agent_loader import HookConfigError, HooksLoadResult, ScriptLoadResult
+from noxen.agent_loader import ExtraScriptError, ExtraScriptSource, HookConfigError, HooksLoadResult, ScriptLoadResult
 from noxen.filters import FilterManager
 from noxen.frida_session import FridaSession, SessionConfig
 
@@ -390,6 +390,86 @@ class FridaSessionMessageTests(unittest.TestCase):
 
 
 class FridaSessionLifecycleTests(unittest.TestCase):
+    def test_extra_script_read_failure_never_contacts_device(self):
+        setup = self._hook_setup()
+        session, _script, _native, _device, _logs, connected, failures, _warnings = setup
+        session._config.extra_script = "missing.js"
+        fake_frida = SimpleNamespace(get_device=lambda *_args, **_kwargs: self.fail("Device contacted"))
+        with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+            "noxen.frida_session.load_agent_script", side_effect=ExtraScriptError("missing.js")
+        ):
+            session.connect("device-1")
+            session._connect_thread.join(2)
+        self.assertFalse(session._connect_thread.is_alive())
+        self.assertEqual(connected, [])
+        self.assertEqual(failures, [("extra-script", "missing.js")])
+
+    def test_extra_script_execution_precedes_hooks_and_resume_in_spawn_and_attach(self):
+        for spawn in (True, False):
+            with self.subTest(spawn=spawn):
+                setup = self._hook_setup(spawn=spawn)
+                session, script, _native, device, logs, connected, failures, _warnings = setup
+                extra = ExtraScriptSource("/extra.js", "send('ready');")
+                session._config.extra_script_source = extra
+                calls = []
+
+                def execute(name, code):
+                    self.assertFalse(device.resumed.is_set())
+                    self.assertFalse(script.proxy_called.is_set())
+                    calls.append((name, code))
+                    return True
+
+                def proxy(_hooks):
+                    self.assertEqual(calls, [(extra.path, extra.code)])
+                    script.emit_report({"installed": 1, "installedIndices": [0], "skipped": [], "failed": []})
+                    return {"pending": True}
+
+                script.exports_sync.load_extra_script = execute
+                script.exports_sync.proxy = proxy
+                fake_frida = SimpleNamespace(get_device=lambda *_args, **_kwargs: device)
+                with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+                    "noxen.frida_session.load_agent_script", return_value=ScriptLoadResult("agent", [], extra)
+                ) as loader:
+                    session.connect("device-1")
+                    session._connect_thread.join(2)
+                loader.assert_called_once_with(extra)
+                self.assertFalse(session._connect_thread.is_alive())
+                self.assertEqual(connected, [True])
+                self.assertEqual(failures, [])
+                self.assertTrue(any("initial code executed" in line for line in logs))
+
+    def test_extra_script_execution_failure_cleans_up_without_installing_hooks(self):
+        for spawn in (True, False):
+            for result in (RuntimeError("/extra.js:3: broken"), None, False):
+                with self.subTest(spawn=spawn, result=result):
+                    setup = self._hook_setup(spawn=spawn)
+                    session, script, native, device, _logs, connected, failures, _warnings = setup
+                    extra = ExtraScriptSource("/extra.js", "broken")
+
+                    def execute(_name, _code):
+                        if isinstance(result, Exception):
+                            raise result
+                        return result
+
+                    script.exports_sync.load_extra_script = execute
+                    fake_frida = SimpleNamespace(get_device=lambda *_args, **_kwargs: device)
+                    with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+                        "noxen.frida_session.load_agent_script", return_value=ScriptLoadResult("agent", [], extra)
+                    ):
+                        session.connect("device-1")
+                        session._connect_thread.join(2)
+                    self.assertFalse(session._connect_thread.is_alive())
+                    self.assertEqual(connected, [])
+                    self.assertFalse(script.proxy_called.is_set())
+                    self.assertEqual(failures[0][0], "extra-script")
+                    self.assertTrue(native.detached)
+                    self.assertEqual(device.killed, [42] if spawn else [])
+
+    def test_javascript_error_logs_full_stack(self):
+        session, _script, _native, _device, logs, *_rest = self._hook_setup()
+        session.on_message({"type": "error", "description": "broken", "stack": "Error: broken\n at /extra.js:7"}, None)
+        self.assertIn("/extra.js:7", logs[-1])
+
     def _hook_setup(self, spawn=True):
         script = _FakeHookScript()
         native_session = _FakeHookNativeSession(script)

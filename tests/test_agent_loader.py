@@ -6,10 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from noxen.agent_loader import (
+    ExtraScriptError,
     HookConfigError,
     PASSTHROUGH_AGENT,
     PASSTHROUGH_SYSTEM_SERVER_AGENT,
     load_agent_script,
+    load_extra_script,
     load_hook_config,
     load_json_hooks,
     load_system_server_script,
@@ -134,7 +136,7 @@ class AgentLoaderTests(unittest.TestCase):
 
         self.assertIn("path is a directory", str(raised.exception))
 
-    def test_load_agent_script_prefers_bundle_and_appends_extra(self):
+    def test_load_agent_script_keeps_extra_separate_for_named_execution(self):
         with self._temp_cwd():
             os.makedirs("agent")
             bundle = os.path.abspath("agent/script_bundle.js")
@@ -146,8 +148,38 @@ class AgentLoaderTests(unittest.TestCase):
             with patch("noxen.agent_loader.BUNDLE_SCRIPT_FILE", bundle):
                 result = load_agent_script("extra.js")
 
-            self.assertEqual(result.code, "bundle\n\nextra")
-            self.assertEqual(result.messages, ["[dim]loader       [/dim] [dim]DEBUG[/dim] Extra script loaded: extra.js"])
+            self.assertEqual(result.code, "bundle")
+            self.assertEqual(result.extra_script.code, "extra")
+            self.assertEqual(result.extra_script.path, os.path.abspath("extra.js"))
+            self.assertIn("Extra script read:", result.messages[0])
+
+    def test_extra_script_read_errors_are_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            invalid = Path(tmp) / "invalid.js"
+            invalid.write_bytes(b"\xff")
+            for path in (Path(tmp) / "missing.js", Path(tmp), invalid):
+                with self.subTest(path=path), self.assertRaises(ExtraScriptError):
+                    load_agent_script(str(path))
+            with patch("pathlib.Path.read_text", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(ExtraScriptError, "denied"):
+                    load_extra_script(str(invalid))
+
+    def test_extra_script_snapshot_accepts_bom_and_is_not_read_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "extra [test].js"
+            path.write_text("\ufeffsend('first');", encoding="utf-8")
+            source = load_extra_script(str(path))
+            path.unlink()
+            result = load_agent_script(source)
+            self.assertIs(result.extra_script, source)
+            self.assertEqual(source.code, "send('first');")
+
+    def test_empty_extra_script_is_an_explicit_noop(self):
+        self.assertIsNone(load_agent_script("").extra_script)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "empty.js"
+            path.touch()
+            self.assertEqual(load_agent_script(str(path)).extra_script.code, "")
 
     def test_load_agent_script_falls_back_to_source_without_bundle(self):
         with self._temp_cwd():

@@ -62,9 +62,29 @@ class HookConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class ExtraScriptSource:
+    path: str
+    code: str
+
+
+class ExtraScriptError(ValueError):
+    """An explicitly selected extra script could not be read."""
+
+
+def load_extra_script(filepath: str) -> ExtraScriptSource:
+    try:
+        path = Path(filepath).expanduser().resolve()
+        code = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError, ValueError, RuntimeError) as error:
+        raise ExtraScriptError(f"Extra script {filepath}: {error}") from None
+    return ExtraScriptSource(str(path), code)
+
+
+@dataclass(frozen=True)
 class ScriptLoadResult:
     code: str
     messages: list[str]
+    extra_script: ExtraScriptSource | None = None
 
 
 def load_json_hooks(filepath: str | Path) -> list:
@@ -219,7 +239,13 @@ def load_hook_config(custom_hooks: str | None = None) -> HooksLoadResult:
     return HooksLoadResult(hooks, messages, tuple(sources), custom_count)
 
 
-def load_agent_script(extra_script: str | None = None) -> ScriptLoadResult:
+def load_agent_script(extra_script: str | ExtraScriptSource | None = None) -> ScriptLoadResult:
+    if isinstance(extra_script, ExtraScriptSource):
+        extra_source = extra_script
+    elif extra_script:
+        extra_source = load_extra_script(extra_script)
+    else:
+        extra_source = None
     messages = []
     bundle_file = _resolve_runtime_path(
         BUNDLE_SCRIPT_FILE,
@@ -249,15 +275,10 @@ def load_agent_script(extra_script: str | None = None) -> ScriptLoadResult:
             messages.append(log_warning("No agent script found; running in passthrough mode", "loader"))
             code = PASSTHROUGH_AGENT
 
-    if extra_script:
-        try:
-            with open(extra_script, "r", encoding="utf-8") as f:
-                code += "\n\n" + f.read()
-            messages.append(log_debug(f"Extra script loaded: {extra_script}", "loader"))
-        except FileNotFoundError:
-            messages.append(log_warning(f"Extra script not found: {extra_script}", "loader"))
+    if extra_source:
+        messages.append(log_debug(f"Extra script read: {extra_source.path}", "loader"))
 
-    return ScriptLoadResult(code, messages)
+    return ScriptLoadResult(code, messages, extra_source)
 
 
 def load_system_server_script() -> ScriptLoadResult:

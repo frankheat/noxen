@@ -16,8 +16,30 @@ function agent() {
     Process: { id: 123 }, rpc: {}, send: payload => messages.push(payload),
   });
   vm.runInContext(source, context, { filename: agentPath });
+  context.Script = {
+    evaluate: (name, code) => vm.runInContext(code, context, { filename: name }),
+  };
   return { context, messages, exports: context.rpc.exports };
 }
+
+test('extra scripts execute in the shared runtime and preserve their source filename', () => {
+  const { context, messages, exports } = agent();
+  assert.equal(exports.loadExtraScript('/extra/bypass.js', 'send(Java !== undefined);'), true);
+  assert.equal(messages.pop(), true);
+  assert.equal(exports.loadExtraScript('/extra/empty.js', ''), true);
+  assert.throws(() => exports.loadExtraScript('/extra/bad.js', 'function broken('), /SyntaxError/);
+  assert.throws(() => exports.loadExtraScript('/extra/fails.js', 'throw new Error("oops");'),
+    error => error.stack.includes('/extra/fails.js:1') && error.message === 'oops');
+  assert.equal(exports.loadExtraScript('/extra/custom.js', 'rpc.exports.custom = () => 42;'), true);
+  assert.equal(context.rpc.exports.custom(), 42);
+});
+
+test('extra scripts cannot silently replace reserved RPC exports during initial execution', () => {
+  for (const code of ['rpc.exports = {};', 'rpc.exports.proxy = () => {};', 'delete rpc.exports.forward;']) {
+    const { exports } = agent();
+    assert.throws(() => exports.loadExtraScript('/extra/conflict.js', code), /reserved noxen RPC/);
+  }
+});
 
 test('intent events identify protocol and retain explicit blocking/passive decisions', () => {
   for (const state of ['blocking', 'passive', 'busy']) {

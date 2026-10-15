@@ -1,7 +1,7 @@
 import threading
 from dataclasses import dataclass
 
-from noxen.agent_loader import HooksLoadResult, load_agent_script, load_hook_config
+from noxen.agent_loader import ExtraScriptSource, HooksLoadResult, load_agent_script, load_hook_config
 from noxen.filters import FilterManager
 from noxen.logging_ui import log_debug, log_error, log_info, log_success, log_warning
 from noxen.rendering import payload_to_filter_context, render_intercept_block
@@ -19,6 +19,7 @@ class SessionConfig:
     custom_hooks: str | None = None
     validated_hooks: HooksLoadResult | None = None
     extra_script: str | None = None
+    extra_script_source: ExtraScriptSource | None = None
 
     def target_label(self) -> str:
         if self.spawn_package:
@@ -110,6 +111,13 @@ class FridaSession:
             for message in hooks_result.messages:
                 self.log_cb(message)
 
+            stage = "extra-script" if self._config.extra_script or self._config.extra_script_source else "agent"
+            script_result = load_agent_script(
+                self._config.extra_script_source or self._config.extra_script
+            )
+            for message in script_result.messages:
+                self.log_cb(message)
+
             stage = "device"
             import frida
             if self._is_stale(generation):
@@ -171,25 +179,12 @@ class FridaSession:
             )
             return
 
+        stage = "agent"
         try:
             if self._is_stale(generation):
                 close_local()
                 return
-            script_result = load_agent_script(self._config.extra_script)
-            code = script_result.code
-            for message in script_result.messages:
-                self.log_cb(message)
-        except Exception as e:
-            self._clear_if_current(generation, session=session)
-            self._report_connection_failure(
-                generation, "agent", e, f"Failed to load agent script: {e}"
-            )
-            close_local()
-            return
-
-        stage = "agent"
-        try:
-            script = session.create_script(code)
+            script = session.create_script(script_result.code)
             script.on("message", lambda message, data: self._on_script_message(
                 message, data, generation, script
             ))
@@ -205,6 +200,19 @@ class FridaSession:
             if self._is_stale(generation):
                 close_local(script)
                 return
+
+            if script_result.extra_script is not None:
+                stage = "extra-script"
+                extra = script_result.extra_script
+                if script.exports_sync.load_extra_script(extra.path, extra.code) is not True:
+                    raise RuntimeError("Extra script execution was not confirmed")
+                self.log_cb(log_info(
+                    f"Extra script initial code executed: {extra.path} (async callbacks may still be pending)",
+                    "loader",
+                ))
+                if self._is_stale(generation):
+                    close_local(script)
+                    return
 
             stage = "hooks"
             self._hooks_result = hooks_result
@@ -523,7 +531,8 @@ class FridaSession:
             else:
                 self.log_cb(self._format_js_message(payload))
         elif message["type"] == "error":
-            self.log_cb(log_error(f"JavaScript error: {message['description']}", "agent"))
+            detail = message.get("stack") or message.get("description", "Unknown error")
+            self.log_cb(log_error(f"JavaScript error: {detail}", "agent"))
 
     @staticmethod
     def _valid_intent_event(payload):
