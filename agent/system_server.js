@@ -395,8 +395,9 @@ rpc.exports = {
 
   holdend: function(holdId, pid) {
     var pidKey = pid !== undefined && pid !== null ? String(pid) : null;
-    if (pidKey && activeHolds[pidKey]) {
-      delete activeHolds[pidKey];
+    if (pidKey !== null) {
+      var hold = activeHolds[pidKey];
+      if (hold && hold.holdId === String(holdId)) delete activeHolds[pidKey];
       return;
     }
 

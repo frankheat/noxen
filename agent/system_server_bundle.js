@@ -13793,8 +13793,9 @@ std_string_c_str (StdString * self)
     },
     holdend: function(holdId, pid) {
       var pidKey = pid !== void 0 && pid !== null ? String(pid) : null;
-      if (pidKey && activeHolds[pidKey]) {
-        delete activeHolds[pidKey];
+      if (pidKey !== null) {
+        var hold = activeHolds[pidKey];
+        if (hold && hold.holdId === String(holdId)) delete activeHolds[pidKey];
         return;
       }
       Object.keys(activeHolds).forEach(function(key) {

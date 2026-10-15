@@ -21,6 +21,7 @@ class SystemServerSession:
         self._connecting = False
         self._ready = threading.Event()
         self._lock = threading.Lock()
+        self._rpc_lock = threading.Lock()
         self._generation = 0
         self._active_holds: dict[str, dict] = {}
 
@@ -37,6 +38,7 @@ class SystemServerSession:
             self._ready.clear()
             self._generation += 1
             generation = self._generation
+            self._rpc_lock = threading.Lock()
             self._connecting = True
             worker = threading.Thread(
                 target=self._start_session,
@@ -261,19 +263,27 @@ class SystemServerSession:
             if self._script is None or not self._ready.is_set():
                 return
             script, generation = self._script, self._generation
+            rpc_lock = self._rpc_lock
         threading.Thread(
-            target=self._call_script, args=(generation, script, method_name, args), daemon=True,
+            target=self._call_script, args=(generation, script, rpc_lock, method_name, args), daemon=True,
         ).start()
 
-    def _call_script(self, generation, script, method_name: str, args: tuple) -> None:
-        with self._lock:
-            if generation != self._generation or self._script is not script or not self._ready.is_set():
-                return
-        try:
-            getattr(script.exports_sync, method_name)(*args)
-        except Exception as e:
-            if self._is_current(generation):
-                self.log_cb(log_warning(f"Input ANR bypass RPC failed: {e}", "input-anr"))
+    def _call_script(self, generation, script, rpc_lock, method_name: str, args: tuple) -> None:
+        # Serialize only this connection's hold RPCs, never Frida calls under the state lock.
+        with rpc_lock:
+            with self._lock:
+                if generation != self._generation or self._script is not script or not self._ready.is_set():
+                    return
+                if method_name == "holdstart":
+                    hold = args[0]
+                    # Dispatch only the exact snapshot still registered as active.
+                    if self._active_holds.get(str(hold.get("holdId") or "")) is not hold:
+                        return
+            try:
+                getattr(script.exports_sync, method_name)(*args)
+            except Exception as e:
+                if self._is_current(generation):
+                    self.log_cb(log_warning(f"Input ANR bypass RPC failed: {e}", "input-anr"))
 
     def cleanup(self) -> None:
         with self._lock:

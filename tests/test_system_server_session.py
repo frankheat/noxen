@@ -181,6 +181,135 @@ class SystemServerLifecycleTests(unittest.TestCase):
         calls = self.sessions["new"].script.exports_sync.calls
         self.assertEqual(calls, [])
 
+    def test_ended_hold_is_not_recreated_by_a_delayed_start_or_startup_replay(self):
+        for replay in (False, True):
+            with self.subTest(replay=replay):
+                self.owner.cleanup()
+                self.sessions["old"] = LifecycleNativeSession()
+                self.finish("old")
+                with patch("noxen.system_server_session.threading.Thread") as thread:
+                    if replay:
+                        self.owner._ready.clear()
+                    self.owner.hold_start({"holdId": "h1", "pid": 42})
+                    if replay:
+                        self.owner._ready.set()
+                        self.owner._sync_active_holds()
+                    start = thread.call_args.kwargs
+                    self.owner.hold_end("h1", 42)
+                    end = thread.call_args.kwargs
+                end["target"](*end["args"])
+                start["target"](*start["args"])
+                self.assertEqual(self.sessions["old"].script.exports_sync.calls, [("holdend", "h1", 42)])
+
+    def test_delayed_start_cannot_overwrite_a_newer_hold_with_the_same_id(self):
+        self.finish("old")
+        with patch("noxen.system_server_session.threading.Thread") as thread:
+            self.owner.hold_start({"holdId": "h1", "pid": 42, "methodName": "old"})
+            old = thread.call_args.kwargs
+            self.owner.hold_start({"holdId": "h1", "pid": 42, "methodName": "new"})
+            new = thread.call_args.kwargs
+        new["target"](*new["args"])
+        old["target"](*old["args"])
+        calls = self.sessions["old"].script.exports_sync.calls
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["methodName"], "new")
+
+    def test_rpc_waiting_on_old_connection_does_not_block_new_connection(self):
+        self.finish("old")
+        entered, release = threading.Event(), threading.Event()
+        self.releases.append(release)
+
+        def blocked(_hold):
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError("Test barrier timed out")
+
+        self.sessions["old"].script.exports_sync.holdstart = blocked
+        with patch("noxen.system_server_session.threading.Thread") as thread:
+            self.owner.hold_start({"holdId": "h1", "pid": 42})
+            task = thread.call_args.kwargs
+        worker = threading.Thread(target=task["target"], args=task["args"])
+        self.workers.append(worker)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        self.finish("new")
+        self.owner.hold_start({"holdId": "h2", "pid": 43})
+        self.assertTrue(self.sessions["new"].script.exports_sync.called.wait(1))
+        self.assert_new_ready()
+        release.set()
+        worker.join(2)
+
+    def test_end_waits_for_inflight_start_without_holding_state_lock(self):
+        self.finish("old")
+        waiting, entered, release = threading.Event(), threading.Event(), threading.Event()
+        self.releases.append(release)
+
+        class ObservedLock:
+            def __init__(self):
+                self.lock = threading.Lock()
+
+            def __enter__(self):
+                if not self.lock.acquire(blocking=False):
+                    waiting.set()
+                    self.lock.acquire()
+
+            def __exit__(self, *_args):
+                self.lock.release()
+
+        self.owner._rpc_lock = ObservedLock()
+        exports = self.sessions["old"].script.exports_sync
+        original_start = exports.holdstart
+
+        def blocked_start(hold):
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError("Test barrier timed out")
+            original_start(hold)
+
+        exports.holdstart = blocked_start
+        with patch("noxen.system_server_session.threading.Thread") as thread:
+            self.owner.hold_start({"holdId": "h1", "pid": 42})
+            task = thread.call_args.kwargs
+        first = threading.Thread(target=task["target"], args=task["args"])
+        self.workers.append(first)
+        first.start()
+        self.assertTrue(entered.wait(1))
+        with patch("noxen.system_server_session.threading.Thread") as thread:
+            self.owner.hold_end("h1", 42)
+            task = thread.call_args.kwargs
+        second = threading.Thread(target=task["target"], args=task["args"])
+        self.workers.append(second)
+        second.start()
+        self.assertTrue(waiting.wait(1))
+        self.assertEqual(exports.calls, [])
+        self.assertTrue(self.owner._lock.acquire(blocking=False))
+        self.owner._lock.release()
+        release.set()
+        first.join(2)
+        second.join(2)
+        self.assertEqual([call[0] for call in exports.calls], ["holdstart", "holdend"])
+
+    def test_rpc_error_releases_dispatch_lock_for_following_end(self):
+        self.finish("old")
+        exports = self.sessions["old"].script.exports_sync
+
+        def fail(_hold):
+            raise RuntimeError("Hold RPC failed")
+
+        exports.holdstart = fail
+        with patch("noxen.system_server_session.threading.Thread") as thread:
+            self.owner.hold_start({"holdId": "h1", "pid": 42})
+            task = thread.call_args.kwargs
+        task["target"](*task["args"])
+        self.assertTrue(self.owner._rpc_lock.acquire(blocking=False))
+        self.owner._rpc_lock.release()
+        with patch("noxen.system_server_session.threading.Thread") as thread:
+            self.owner.hold_end("h1", 42)
+            task = thread.call_args.kwargs
+        task["target"](*task["args"])
+        self.assertEqual(exports.calls, [("holdend", "h1", 42)])
+        self.assertTrue(any("Hold RPC failed" in line for line in self.logs))
+
     def test_cleanup_during_initialization_cannot_resurrect_connection(self):
         entered, release = self.pause(self.sessions["old"], "status")
         worker = self.start("old")
@@ -351,8 +480,10 @@ class SystemServerLifecycleTests(unittest.TestCase):
             raise RuntimeError("Stale RPC failure")
 
         script.exports_sync.holdstart = fail
+        hold = {"holdId": "h1"}
+        self.owner._active_holds["h1"] = hold
         worker = threading.Thread(target=self.owner._call_script,
-                                  args=(generation, script, "holdstart", ({"holdId": "h1"},)))
+                                  args=(generation, script, self.owner._rpc_lock, "holdstart", (hold,)))
         self.workers.append(worker)
         worker.start()
         self.assertTrue(entered.wait(1))
