@@ -8,6 +8,7 @@ from unittest.mock import patch
 from noxen.db import ProjectDB
 from noxen.filters import FilterManager
 from noxen.history_columns import parse_history_column_width
+from noxen.rendering import render_intent_detail
 from noxen.settings import load_settings, save_settings, settings_file_path
 
 
@@ -256,6 +257,107 @@ class ProjectDBTests(unittest.TestCase):
             self.assertIn("mime_type", columns)
             self.assertIn("selector", columns)
             self.assertIn("clip_data", columns)
+            self.assertIn("intent_package", columns)
+
+    def test_package_roundtrip_preserves_value_null_empty_and_uncaptured(self):
+        infos = [{"package": "dev.example"}, {"package": None}, {"package": ""}, {}]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "project.noxen")
+            db = ProjectDB(path)
+            db.create("project")
+            for info in infos:
+                db.save_intent({"timestamp": "2026-10-15T08:00:00+00:00", "intent": info})
+            db.close()
+
+            for _ in range(2):
+                reopened = ProjectDB(path)
+                entries = reopened.open_existing()
+                reopened.close()
+                for info, entry in zip(infos, entries):
+                    with self.subTest(info=info):
+                        if "package" in info:
+                            self.assertIn("package", entry["intent"])
+                            self.assertEqual(entry["intent"]["package"], info["package"])
+                        else:
+                            self.assertNotIn("package", entry["intent"])
+
+    def test_package_and_routing_render_identically_after_reopen(self):
+        selector = {"kind": "intent", "package": "dev.selector", "action": "SELECT"}
+        scenarios = [
+            ({"package": "dev.example"}, {"intentExplicit": False}),
+            ({"package": None}, {"intentExplicit": False}),
+            ({}, {"intentExplicit": False}),
+            ({"package": "dev.example"}, {
+                "intentExplicit": False, "routingSource": "base", "routingPackage": "dev.example",
+            }),
+            ({"package": None, "selector": selector}, {
+                "intentExplicit": False, "routingSource": "selector", "routingPackage": "dev.selector",
+            }),
+            ({"package": "dev.example", "component": "dev.example/.Target"}, {
+                "intentExplicit": True, "routingSource": "base", "routingPackage": "dev.example",
+            }),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "project.noxen")
+            db = ProjectDB(path)
+            db.create("project")
+            expected = []
+            for info, surface in scenarios:
+                entry = {
+                    "timestamp": "2026-10-15T08:00:00+00:00", "class": "dev.example.Main",
+                    "method": "sendBroadcast", "intent": info, "attackSurface": surface,
+                }
+                entry["id"] = db.save_intent(entry)
+                expected.append(render_intent_detail(entry))
+            db.close()
+            reopened = ProjectDB(path)
+            entries = reopened.open_existing()
+            reopened.close()
+            self.assertEqual([render_intent_detail(entry) for entry in entries], expected)
+
+    def test_modified_intent_preserves_package_and_original_snapshot(self):
+        for before, after in (("dev.example", "dev.example"), (None, None), ("", ""),
+                              ("dev.old", "dev.new"), ("dev.example", None)):
+            with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "project.noxen")
+                db = ProjectDB(path)
+                db.create("project")
+                original = {"package": before, "action": "OLD", "extras": {}}
+                final = {**original, "package": after, "action": "NEW"}
+                row_id = db.save_intent({"timestamp": "2026-10-15T08:00:00+00:00", "intent": original})
+                db.update_modified_intent(row_id, original, final)
+                db.update_outcome(row_id, "modified_forwarded")
+                db.close()
+                reopened = ProjectDB(path)
+                entry = reopened.open_existing()[0]
+                reopened.close()
+                self.assertEqual(entry["intent"]["package"], after)
+                self.assertEqual(entry["intent"]["action"], "NEW")
+                self.assertEqual(entry["original_intent"], original)
+                self.assertEqual(entry["outcome"], "modified_forwarded")
+
+    def test_package_migration_does_not_infer_outer_package_from_routing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy.noxen")
+            db = ProjectDB(path)
+            db.create("legacy")
+            row_id = db.save_intent({
+                "timestamp": "2026-10-15T08:00:00+00:00", "intent": {"action": "OLD"},
+                "attackSurface": {"routingSource": "selector", "routingPackage": "dev.selector"},
+            })
+            db.close()
+            with sqlite3.connect(path) as conn:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(intents)")}
+                if "intent_package" in columns:
+                    conn.execute("ALTER TABLE intents DROP COLUMN intent_package")
+            for _ in range(2):
+                reopened = ProjectDB(path)
+                entry = reopened.open_existing()[0]
+                reopened.close()
+                self.assertNotIn("package", entry["intent"])
+                self.assertEqual(entry["id"], row_id)
+                self.assertEqual(entry["intent"]["action"], "OLD")
+                self.assertEqual(entry["attackSurface"]["routingPackage"], "dev.selector")
 
     def test_mime_type_roundtrip_distinguishes_absent_null_and_value(self):
         with tempfile.TemporaryDirectory() as tmp:

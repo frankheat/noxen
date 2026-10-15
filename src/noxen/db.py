@@ -15,6 +15,7 @@ _MIGRATED_INTENT_COLUMNS = {
     "selector": "TEXT",
     "clip_data": "TEXT",
     "modification_error": "TEXT",
+    "intent_package": "TEXT",
 }
 
 
@@ -31,6 +32,11 @@ def _stored_selector(info: dict):
 def _stored_clip_data(info: dict):
     """Preserve the distinction between old captures and an absent ClipData."""
     return json.dumps(info.get("clipData")) if "clipData" in info else None
+
+
+def _stored_package(info: dict):
+    """SQL NULL means uncaptured; JSON preserves null and exact package strings."""
+    return json.dumps(info.get("package")) if "package" in info else None
 
 
 class ProjectDB:
@@ -128,6 +134,7 @@ class ProjectDB:
                 mime_type            TEXT,
                 selector             TEXT,
                 clip_data            TEXT,
+                intent_package       TEXT,
                 flags                INTEGER,
                 categories           TEXT,
                 extras               TEXT,
@@ -169,6 +176,10 @@ class ProjectDB:
             # records a new capture whose Intent had no MIME type.
             if row["mime_type"] is not None:
                 intent["mimeType"] = row["mime_type"] or None
+            if row["intent_package"] is not None:
+                intent["package"] = self._load_json_field(
+                    row_id, "intent_package", row["intent_package"], None, (str, type(None))
+                )
             # SQL NULL means the capture predates selector recording. JSON null means
             # the selector was inspected and absent; an object is the captured tree.
             if row["selector"] is not None:
@@ -247,8 +258,8 @@ class ProjectDB:
             cur = self._conn.execute(
                 """INSERT INTO intents
                    (timestamp, class, method, action, component, data, mime_type, selector, clip_data, flags,
-                    categories, extras, stack_trace, pending_intent_flags, attack_surface)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    categories, extras, stack_trace, pending_intent_flags, attack_surface, intent_package)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     entry.get("timestamp"),
                     entry.get("class"),
@@ -265,6 +276,7 @@ class ProjectDB:
                     json.dumps(entry.get("stackTrace") or []),
                     entry.get("pendingIntentFlags"),
                     json.dumps(entry.get("attackSurface")) if entry.get("attackSurface") else None,
+                    _stored_package(info),
                 ),
             )
             self._conn.commit()
@@ -348,7 +360,7 @@ class ProjectDB:
         with self._lock:
             self._conn.execute(
                 """UPDATE intents SET
-                   action=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?
+                   action=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?, intent_package=?
                    WHERE id=?""",
                 (
                     modified_info.get("action"),
@@ -358,6 +370,7 @@ class ProjectDB:
                     json.dumps(modified_info.get("categories") or []),
                     json.dumps(modified_info.get("extras") or {}),
                     json.dumps(original_info),
+                    _stored_package(modified_info),
                     intent_id,
                 ),
             )
