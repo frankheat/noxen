@@ -254,7 +254,7 @@ class ProjectDB:
         if self._conn is None:
             return 0
         info = entry.get("intent", {}) or {}
-        with self._lock:
+        with self._lock, self._conn:
             cur = self._conn.execute(
                 """INSERT INTO intents
                    (timestamp, class, method, action, component, data, mime_type, selector, clip_data, flags,
@@ -279,7 +279,6 @@ class ProjectDB:
                     _stored_package(info),
                 ),
             )
-            self._conn.commit()
             return cur.lastrowid
 
     def save_intercept_filters(self, filters: list) -> None:
@@ -357,7 +356,7 @@ class ProjectDB:
         """Persist the modified intent fields and the original snapshot."""
         if self._conn is None or intent_id is None:
             return
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute(
                 """UPDATE intents SET
                    action=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?, intent_package=?
@@ -374,27 +373,24 @@ class ProjectDB:
                     intent_id,
                 ),
             )
-            self._conn.commit()
 
     def update_modification_error(self, intent_id: int, error: str | None) -> None:
         if self._conn is None or intent_id is None:
             return
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE intents SET modification_error=? WHERE id=?", (error, intent_id)
             )
-            self._conn.commit()
 
     def update_outcome(self, intent_id: int, outcome: str) -> None:
         """Set the outcome ('forwarded' or 'dropped') for a stored intent."""
         if self._conn is None or intent_id is None:
             return
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE intents SET outcome=? WHERE id=?",
                 (outcome, intent_id),
             )
-            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Properties

@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from itertools import count
 from importlib.metadata import version as pkg_version, PackageNotFoundError
 from pathlib import Path
 
@@ -275,6 +276,7 @@ class NoxenApp(App):
         self.show_stack = self._settings["stack"]
         self.stack_depth = self._settings["stack_depth"]
         self._all_intents = []
+        self._unsaved_intent_ids = count(-1, -1)
         self._app_info: dict | None = None
         # Info app table sort (column key, reverse); session-only. Components start by type.
         self._info_sort: dict[str, tuple[str | None, bool]] = {
@@ -797,7 +799,7 @@ class NoxenApp(App):
                 if changed:
                     entry["original_intent"] = before
                     if self.db and intent_id:
-                        self.db.update_modified_intent(intent_id, before, actual)
+                        self._persist_history_update(intent_id, self.db.update_modified_intent, before, actual)
                 self._history_search_index[id(entry)] = history_search_text(entry)
 
         outcome = "modified_forwarded" if changed else "forwarded"
@@ -805,7 +807,7 @@ class NoxenApp(App):
             entry["modification_error"] = error
         if error:
             if self.db and intent_id:
-                self.db.update_modification_error(intent_id, error)
+                self._persist_history_update(intent_id, self.db.update_modification_error, error)
             self.write_log(log_warning(error, "intercept"))
             self.call_from_thread(lambda message=error: self.notify(
                 message, title="Intent modification warning", severity="warning", timeout=8
@@ -1958,15 +1960,48 @@ class NoxenApp(App):
 
     def _on_history_intent(self, payload, _history_id):
         entry = payload_to_history_entry(payload)
-        db_id = self.db.save_intent(entry)
-        entry["id"] = db_id if db_id else len(self._all_intents) + 1
+        save_error = None
+        try:
+            db_id = self.db.save_intent(entry)
+            if not db_id:
+                raise RuntimeError("Project database is unavailable")
+        except Exception as error:
+            db_id = None
+            save_error = error
+            entry["persistence_error"] = (
+                "Capture not saved to the project; available only in this session. "
+                "Export History before closing noxen."
+            )
+        # Temporary negative IDs cannot collide with SQLite's generated row IDs.
+        entry["id"] = db_id if db_id is not None else next(self._unsaved_intent_ids)
         self._all_intents.append(entry)
         self._history_search_index[id(entry)] = history_search_text(entry)
         self._pending_append.append(entry)
+        if save_error is not None:
+            self.write_log(log_error(
+                f"History #{entry['id']} not saved: {save_error}. Capture kept in memory; export before closing.",
+                "history",
+            ), notify=True)
         if not self._history_refresh_pending:
             self._history_refresh_pending = True
             self.call_from_thread(self._do_history_refresh)
         return entry["id"]
+
+    def _persist_history_update(self, intent_id, update, *args):
+        if intent_id is None or intent_id <= 0:
+            return
+        try:
+            update(intent_id, *args)
+        except Exception as error:
+            entry = next((e for e in self._all_intents if e["id"] == intent_id), None)
+            if entry is not None:
+                entry["persistence_error"] = (
+                    "Latest changes not saved to the project; stored values may be outdated. "
+                    "Export History before closing noxen."
+                )
+            self.write_log(log_error(
+                f"History #{intent_id} update not saved: {error}. Export History before closing.", "history",
+            ), notify=True)
 
     def _do_history_refresh(self):
         self._history_refresh_pending = False
@@ -2152,8 +2187,6 @@ class NoxenApp(App):
         entry = None
         if entry_id is not None:
             entry = next((e for e in self._all_intents if e["id"] == entry_id), None)
-        elif self._all_intents:
-            entry = self._all_intents[-1]
 
         if entry is None:
             self._current_intercept_id = None
@@ -3027,7 +3060,7 @@ class NoxenApp(App):
                 e["outcome"] = outcome
                 entry = e
                 break
-        self.db.update_outcome(intent_id, outcome)
+        self._persist_history_update(intent_id, self.db.update_outcome, outcome)
 
         def _apply():
             try:

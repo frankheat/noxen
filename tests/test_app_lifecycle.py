@@ -120,7 +120,7 @@ class AppLifecycleTests(unittest.TestCase):
 
     def test_intercept_display_without_entry_does_not_keep_stale_current_intent(self):
         fake_app = SimpleNamespace(
-            _all_intents=[],
+            _all_intents=[{"id": 98, "intent": {"action": "previous"}}],
             _current_intercept_id=99,
             _current_decision_id="old-decision",
             _current_intercepted_entry={"id": 99},

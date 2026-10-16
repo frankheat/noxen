@@ -54,6 +54,7 @@ class ModificationConfirmationTests(unittest.TestCase):
             entry["outcome"] = outcome
             db.update_outcome(intent_id, outcome)
         app._update_outcome = update_outcome
+        app._persist_history_update = lambda *args: NoxenApp._persist_history_update(app, *args)
         return app, entry, messages
 
     def test_partial_failure_persists_only_observed_changes_and_warning(self):

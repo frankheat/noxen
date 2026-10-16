@@ -1057,6 +1057,8 @@ def render_intent_detail(entry: dict, show_stack: bool = False, stack_depth: int
         f"[bold]#{entry['id']}[/bold] [dim]|[/dim] {_markup(time_str)} [dim]|[/dim] {outcome_label}",
         "",
     ]
+    if entry.get("persistence_error"):
+        out += [_section("STORAGE WARNING"), _row("Status", _markup(entry["persistence_error"])), ""]
     out += _event_body(
         entry.get("class"), entry.get("method"), info, attack_surface, entry.get("pendingIntentFlags")
     )
