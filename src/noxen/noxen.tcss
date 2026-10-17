@@ -615,7 +615,7 @@ Switch.-on > .switch--slider {
 .ef_x_key_header { width: 18; }
 .ef_x_type_header { width: 25; }
 .ef_x_value_header { width: 1fr; padding-left: 2; }
-.ef_x_remove_header { width: 3; }
+.ef_x_remove_header { width: 3; margin-right: 2; }
 .ef_x_key_input { width: 18; padding: 0; }
 .ef_x_type_select { width: 25; height: 1; }
 .ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
@@ -625,6 +625,7 @@ Switch.-on > .switch--slider {
     border: none;
     min-width: 3;
     padding: 0;
+    margin-right: 2;
     color: $foreground-muted;
     background: transparent;
 }

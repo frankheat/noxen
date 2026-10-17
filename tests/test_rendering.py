@@ -26,6 +26,37 @@ def plain(rendered: str) -> str:
 
 
 class RenderingTests(unittest.TestCase):
+    def test_routing_is_separate_from_objects_in_history_and_intercept(self):
+        info = {"component": "example/.Base", "action": "BASE", "selector": {
+            "kind": "intent", "component": "example/.Other", "action": "OTHER", "flags": 0,
+        }}
+        surface = {
+            "intentExplicit": True, "routingSource": "base", "selectorRoutingRole": "ignored",
+            "targetComponent": "example/.Base", "broadcastPermission": {"name": "example.PERM", "level": "signature"},
+        }
+        history = render_intent_detail({"id": 1, "intent": info, "attackSurface": surface})
+        intercept = render_intercept_block({"infoIntent": info, "attackSurface": surface}, 1, False, 1)
+        for rendered in (history, intercept):
+            with self.subTest(view=rendered):
+                text = plain(rendered)
+                self.assertEqual(text.count("[ROUTING]"), 1)
+                routing, objects = text.split("[CAPTURED INTENT PAYLOAD]", 1)
+                for label in ("Mode", "Source", "Selector", "Target", "Enforced Perm"):
+                    self.assertIn(f"  {label:<13} :", routing)
+                    self.assertNotIn(f"  {label:<13} :", objects)
+                payload, selector = objects.split("[SELECTOR]", 1)
+                self.assertIn("Component     : example/.Base", payload)
+                self.assertIn("Component     : example/.Other", selector)
+                self.assertNotIn("Routing role", text)
+
+    def test_receiving_and_legacy_captures_do_not_invent_routing(self):
+        for info in ({}, {"component": "example/.Base", "selector": {"kind": "intent", "flags": 0}}):
+            text = plain(render_intent_detail({"id": 1, "method": "onReceive", "intent": info}))
+            self.assertNotIn("[ROUTING]", text)
+            self.assertNotIn("ACTIVE", text)
+            if "component" not in info:
+                self.assertNotIn("  Component", text)
+
     def test_modification_warning_is_visible_in_history_detail_and_row(self):
         entry = {
             "id": 1, "timestamp": "2026-10-14T08:00:00+00:00",
@@ -564,7 +595,7 @@ class RenderingTests(unittest.TestCase):
         rendered = render_intent_detail(entry, show_stack=False, stack_depth=1)
 
         Text.from_markup(rendered)
-        self.assertIn("  Routing       : EXPLICIT", plain(rendered))
+        self.assertIn("  Mode          : EXPLICIT", plain(rendered))
         self.assertIn("  Target        : com.example/.Receiver2", plain(rendered))
         self.assertIn("                  ├─ Exported            : true", plain(rendered))
         self.assertIn("                  └─ Required Permission : com.x.PERM (normal)", plain(rendered))
@@ -622,12 +653,13 @@ class RenderingTests(unittest.TestCase):
         scoped = dict(base, intent={"action": "com.example.PING", "package": "com.example"})
         legacy = dict(base, intent={"action": "com.example.PING"})  # captured before the package was recorded
 
-        self.assertIn("  Routing       : IMPLICIT (any app)", plain(render_intent_detail(open_to_all)))
+        self.assertIn("  Mode          : IMPLICIT (any app)", plain(render_intent_detail(open_to_all)))
         self.assertNotIn("Package", plain(render_intent_detail(open_to_all)))
-        self.assertIn("  Routing       : IMPLICIT (package-scoped)", plain(render_intent_detail(scoped)))
+        self.assertIn("  Mode          : IMPLICIT (package-scoped)", plain(render_intent_detail(scoped)))
         self.assertIn("  Package       : com.example", plain(render_intent_detail(scoped)))
         legacy_text = plain(render_intent_detail(legacy))
-        self.assertIn("  Routing       : IMPLICIT\n", legacy_text)  # no guess for old captures
+        self.assertIn("  Mode          : IMPLICIT\n", legacy_text)  # no guess for old captures
+        self.assertNotIn("  Source", legacy_text)
 
     def test_explicit_intent_type_is_unqualified(self):
         entry = {
@@ -636,7 +668,7 @@ class RenderingTests(unittest.TestCase):
             "intent": {"component": "com.example/.A", "package": None},
             "attackSurface": {"intentExplicit": True, "targetComponent": "com.example/.A", "targetType": "activity"},
         }
-        self.assertIn("  Routing       : EXPLICIT\n", plain(render_intent_detail(entry)))
+        self.assertIn("  Mode          : EXPLICIT\n", plain(render_intent_detail(entry)))
 
     def test_selector_controls_routing_when_base_has_no_component(self):
         selector = {
@@ -661,11 +693,18 @@ class RenderingTests(unittest.TestCase):
 
         visible = plain(render_intent_detail(entry))
 
-        self.assertIn("  Routing       : EXPLICIT (selector)", visible)
+        self.assertIn("  Mode          : EXPLICIT", visible)
+        self.assertIn("  Source        : selector", visible)
         self.assertIn("  Target        : com.example/.SelectorActivity", visible)
         self.assertNotIn("SelectorActivity (resolved)", visible)
         self.assertIn("[SELECTOR]", visible)
-        self.assertIn("  Routing role  : ACTIVE", visible)
+        self.assertIn("  Selector      : ACTIVE", visible)
+        routing, payload = visible.split("[CAPTURED INTENT PAYLOAD]", 1)
+        self.assertIn("[ROUTING]", routing)
+        self.assertIn("  Target", routing)
+        self.assertNotIn("  Mode", payload)
+        self.assertNotIn("  Selector      :", payload)
+        self.assertNotIn("  Component", payload.split("[SELECTOR]")[0])
         self.assertIn("  Action        : com.example.SELECT", visible)
         self.assertIn("  MIME Type     : application/selector", visible)
 
@@ -677,14 +716,14 @@ class RenderingTests(unittest.TestCase):
             "targetComponent": None,
         })
         self.assertIn(
-            "  Routing       : IMPLICIT (selector, package-scoped)",
+            "  Mode          : IMPLICIT (package-scoped)",
             plain(render_intent_detail(entry)),
         )
 
         selector["package"] = None
         entry["attackSurface"]["routingPackage"] = None
         self.assertIn(
-            "  Routing       : IMPLICIT (selector, any app)",
+            "  Mode          : IMPLICIT (any app)",
             plain(render_intent_detail(entry)),
         )
 
@@ -707,14 +746,15 @@ class RenderingTests(unittest.TestCase):
 
         visible = plain(render_intent_detail(entry))
 
-        self.assertIn("  Routing       : EXPLICIT (base component)", visible)
+        self.assertIn("  Mode          : EXPLICIT", visible)
+        self.assertIn("  Source        : base component", visible)
         self.assertIn("  Target        : com.example/.ActivityA", visible)
-        self.assertIn("  Routing role  : IGNORED (base component takes precedence)", visible)
+        self.assertIn("  Selector      : IGNORED (base component takes precedence)", visible)
         self.assertIn("  Component     : com.example/.ActivityB", visible)
 
         entry["attackSurface"]["selectorRoutingRole"] = "redundant"
         self.assertIn(
-            "  Routing role  : REDUNDANT (same component as base)",
+            "  Selector      : REDUNDANT (same component as base)",
             plain(render_intent_detail(entry)),
         )
 

@@ -474,25 +474,20 @@ def _hook_caller_lines(class_name, method, attack_surface: dict) -> list[str]:
 
 
 def _intent_routing(info: dict, attack_surface: dict) -> str:
-    """Describe the effective Android routing source and scope.
+    """Describe the captured effective routing mode and scope.
 
     A base component takes precedence over a selector. Otherwise Android uses the
     selector, when present, to choose a handler. Older captures lack `routingSource`,
     so retain their previous unqualified representation rather than inventing data.
     """
     source = attack_surface.get("routingSource")
-    has_selector = isinstance(info.get("selector"), dict)
     if attack_surface.get("intentExplicit"):
-        if source == "selector":
-            return "EXPLICIT [dim](selector)[/dim]"
-        if source == "base" and has_selector:
-            return "EXPLICIT [dim](base component)[/dim]"
         return "EXPLICIT"
 
     if source == "selector":
         if attack_surface.get("routingPackage"):
-            return "IMPLICIT [dim](selector, package-scoped)[/dim]"
-        return "IMPLICIT [dim](selector, any app)[/dim]"
+            return "IMPLICIT [dim](package-scoped)[/dim]"
+        return "IMPLICIT [dim](any app)[/dim]"
 
     if "package" not in info and "routingPackage" not in attack_surface:
         return "IMPLICIT"
@@ -502,15 +497,33 @@ def _intent_routing(info: dict, attack_surface: dict) -> str:
     return "IMPLICIT [dim](any app)[/dim]"
 
 
-def _payload_lines(info: dict, attack_surface: dict) -> list[str]:
+def _routing_lines(info: dict, attack_surface: dict, *, row=_row, include_target=True) -> list[str]:
+    """Captured routing metadata, not Intent fields or proof of delivery."""
     lines = []
-    # Routing + Target only apply to sending methods.
     if "intentExplicit" in attack_surface:
-        lines.append(_row("Routing", _intent_routing(info, attack_surface)))
+        lines.append(row("Mode", _intent_routing(info, attack_surface)))
+        source = attack_surface.get("routingSource")
+        if source in {"base", "selector"}:
+            source_text = "selector" if source == "selector" else (
+                "base component" if attack_surface.get("intentExplicit") else "base Intent"
+            )
+            lines.append(row("Source", source_text))
+    if isinstance(info.get("selector"), dict):
+        role = _selector_role(attack_surface.get("selectorRoutingRole"))
+        if role:
+            lines.append(row("Selector", role))
+    if include_target and "intentExplicit" in attack_surface:
         lines += _target_lines(attack_surface)
         enforced = _format_permission(attack_surface.get("broadcastPermission"))
         if enforced:
-            lines.append(_row("Enforced Perm", enforced))
+            lines.append(row("Enforced Perm", enforced))
+    return [_section("ROUTING"), *lines] if lines else []
+
+
+def _payload_lines(info: dict) -> list[str]:
+    lines = []
+    if info.get("component"):
+        lines.append(_row("Component", _markup(info["component"])))
     lines.append(_row("Action", _markup(info.get("action")) if info.get("action") else "None"))
     lines.append(_row("Data (URI)", _markup(info.get("data")) if info.get("data") else "None"))
     # New captures always carry this key, including a null value. Older captures omit
@@ -849,15 +862,12 @@ def _selector_role(role: str | None) -> str | None:
     }.get(role)
 
 
-def _selector_lines(selector: dict | None, role: str | None, *, row=_row, indent="  ") -> list[str]:
+def _selector_lines(selector: dict | None, *, row=_row, indent="  ") -> list[str]:
     """Render a top-level selector separately from the delivered base payload."""
     if not isinstance(selector, dict):
         return []
 
     lines = [_section("SELECTOR")]
-    role_text = _selector_role(role)
-    if role_text:
-        lines.append(row("Routing role", role_text))
 
     if selector.get("kind") != "intent":
         context = {"lines": 0, "active": set()}
@@ -909,22 +919,15 @@ def _edit_context_row(label: str, value: str) -> str:
 def render_edit_context(info: dict, attack_surface: dict) -> dict[str, str]:
     """Reuse bounded, read-only trees; editable outer grant flags live in the form."""
     selector = _selector_lines(
-        info.get("selector"), attack_surface.get("selectorRoutingRole"), row=_edit_context_row, indent="",
+        info.get("selector"), row=_edit_context_row, indent="",
     )
-    if selector and "intentExplicit" in attack_surface:
-        selector.insert(1, _edit_context_row("Routing", _intent_routing(info, attack_surface)))
-    if selector and attack_surface.get("selectorRoutingRole") == "active":
-        selector += [
-            "",
-            _edit_context_row("Note", "[dim]Routing uses this selector.[/dim]"),
-            _edit_context_row("", "[dim]Editable fields modify the base Intent only.[/dim]"),
-        ]
+    routing = _routing_lines(info, attack_surface, row=_edit_context_row, include_target=False)
     clip = info.get("clipData")
     clip_lines = _clip_data_lines(clip, None, include_grant_flags=False, row=_edit_context_row, indent="")
     if clip_lines and clip.get("kind") == "clipdata" and isinstance(clip.get("count"), int):
         clip_lines.insert(1, _edit_context_row("Items", str(clip["count"])))
     sections = {}
-    for key, lines in (("selector", selector), ("clipData", clip_lines)):
+    for key, lines in (("routing", routing), ("selector", selector), ("clipData", clip_lines)):
         if lines:
             sections[key] = "\n".join(lines[1:])
     return sections
@@ -945,10 +948,13 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     """The shared section stack: caller context, payload, pending intent, extras."""
     out = [_section("HOOK")]
     out += _hook_caller_lines(class_name, method, attack_surface)
+    routing = _routing_lines(info, attack_surface)
+    if routing:
+        out += [""] + routing
     out.append("")
     out.append(_section("CAPTURED INTENT PAYLOAD"))
-    out += _payload_lines(info, attack_surface)
-    selector = _selector_lines(info.get("selector"), attack_surface.get("selectorRoutingRole"))
+    out += _payload_lines(info)
+    selector = _selector_lines(info.get("selector"))
     if selector:
         out += [""] + selector
     clip_data = _clip_data_lines(info.get("clipData"), info.get("flags"))

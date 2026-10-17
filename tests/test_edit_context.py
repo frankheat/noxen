@@ -35,7 +35,7 @@ def context_text(info, attack_surface):
 
 
 def widget_context(app):
-    return "\n".join(str(app.query_one(f"#ef_{key}_body", Static).render()) for key in ("selector", "clip"))
+    return "\n".join(str(app.query_one(f"#ef_{key}_body", Static).render()) for key in ("routing", "selector", "clip"))
 
 
 class EditContextRenderingTests(unittest.TestCase):
@@ -48,14 +48,12 @@ class EditContextRenderingTests(unittest.TestCase):
                       "application/selector", "content://example/report-1", "shared [documents]"):
             self.assertIn(value, rendered)
         self.assertNotIn("Grant flags", rendered)
-        note = rendered.index("\n\nNote")
-        self.assertLess(rendered.index("Flags"), note)
-        self.assertLess(note, rendered.index("Items"))
+        self.assertLess(rendered.index("ACTIVE"), rendered.index("Component"))
         self.assertIn("Component       dev.noxen.playground/.Activity1", rendered)
         self.assertNotIn("  Component", rendered)
         self.assertEqual(info, original)
 
-    def test_routing_note_requires_both_selector_and_observed_active_role(self):
+    def test_routing_metadata_requires_observed_role_and_is_separate_from_selector(self):
         for role in ("active", "ignored", "redundant", None, "unknown"):
             for present in (True, False):
                 with self.subTest(role=role, selector=present):
@@ -63,7 +61,10 @@ class EditContextRenderingTests(unittest.TestCase):
                     if not present:
                         info["selector"] = None
                     rendered = context_text(info, {"selectorRoutingRole": role})
-                    self.assertEqual("Routing uses this selector." in rendered, present and role == "active")
+                    sections = render_edit_context(info, {"selectorRoutingRole": role})
+                    self.assertEqual("routing" in sections, present and role in {"active", "ignored", "redundant"})
+                    self.assertNotIn("Routing", sections.get("selector", ""))
+                    self.assertNotIn("[dim]Selector", sections.get("selector", ""))
                     self.assertNotIn("unchanged", rendered)
                     self.assertNotIn("not the fields above", rendered)
 
@@ -91,7 +92,7 @@ class EditContextRenderingTests(unittest.TestCase):
         for role, label in (("active", "ACTIVE"), ("ignored", "IGNORED"), ("redundant", "REDUNDANT")):
             with self.subTest(role=role):
                 rendered = context_text(info, {"selectorRoutingRole": role})
-                self.assertIn(f"{'Routing role':<16}{label}", rendered)
+                self.assertIn(f"{'Selector':<16}{label}", rendered)
                 self.assertIn("CLIP_NESTED", rendered)
                 self.assertIn("inner text", rendered)
 
@@ -131,7 +132,7 @@ class EditContextUITests(unittest.IsolatedAsyncioTestCase):
                             await pilot.pause()
 
                             def assert_spacing():
-                                rules = list(app.query("#edit_form Rule"))
+                                rules = [r for r in app.query("#edit_form Rule") if r.parent.id != "ef_routing_section"]
                                 categories = list(app.query(".ef_cat_row"))
                                 extras = list(app.query(".ef_x_row"))
                                 category_end = categories[-1] if categories else app.query_one("#ef_categories_header")
@@ -165,10 +166,14 @@ class EditContextUITests(unittest.IsolatedAsyncioTestCase):
             ))
             async with app.run_test(size=(110, 52)) as pilot:
                 app.query_one("#main_tabs").active = "tab_intercept"
+                info = example_info()
+                info["categories"] = ["android.intent.category.DEFAULT"]
+                info["extras"] = {"existing": {"type": "java.lang.String", "value": "value"}}
                 app._current_intercepted_entry = {
-                    "id": 1, "intent": example_info(), "attackSurface": {"selectorRoutingRole": "active"},
+                    "id": 1, "intent": info, "attackSurface": {"selectorRoutingRole": "active"},
                 }
                 app._enter_edit_mode()
+                app._add_edit_extra_row("new_key", "string", "value", True)
                 for theme in ("noxen-dark", "noxen-light"):
                     app.theme = theme
                     for width in (110, 72):
@@ -177,12 +182,19 @@ class EditContextUITests(unittest.IsolatedAsyncioTestCase):
                             await pilot.pause()
                             headers = list(app.query(".ef_section"))
                             self.assertEqual([str(h.render()) for h in headers],
-                                             ["Base Intent", "Categories", "Extras", "Selector", "ClipData"])
+                                             ["Routing", "Base Intent", "Categories", "Extras", "Selector", "ClipData"])
                             self.assertEqual(len({str(h.styles.color) for h in headers}), 1)
                             self.assertEqual(len({h.content_region.x for h in headers}), 1)
                             field = app.query_one("#ef_action", Input)
                             grants = app.query_one("#ef_grant_flags", Static)
                             self.assertEqual(field.content_region.x, grants.content_region.x)
+                            remove_buttons = list(app.query(".ef_x_rm"))
+                            self.assertEqual(len(remove_buttons), 3)
+                            for button in remove_buttons:
+                                self.assertEqual(button.region.width, 3)
+                                self.assertEqual(button.parent.content_region.right - button.region.right, 2)
+                            remove_header = app.query_one(".ef_x_remove_header")
+                            self.assertEqual(remove_header.region.x, remove_buttons[-1].region.x)
                             for key in ("selector", "clip"):
                                 body = app.query_one(f"#ef_{key}_body", Static)
                                 self.assertEqual(body.content_region.x, headers[0].content_region.x)
@@ -206,6 +218,8 @@ class EditContextUITests(unittest.IsolatedAsyncioTestCase):
                 app._current_intercept_id = 1
                 app._enter_edit_mode()
                 await pilot.pause()
+                self.assertTrue(app.query_one("#ef_routing_section").display)
+                self.assertIn("Derived from capture", str(app.query_one("#ef_routing_section .ef_section_meta").render()))
                 self.assertTrue(app.query_one("#ef_readonly_context").display)
                 self.assertEqual(len(app.query("#ef_mime_scope")), 0)
                 context = widget_context(app)
@@ -239,8 +253,20 @@ class EditContextUITests(unittest.IsolatedAsyncioTestCase):
                 app._exit_edit_mode()
                 self.assertEqual(app._current_intercepted_entry["intent"], capture)
 
-                app._current_intercepted_entry = {"id": 2, "intent": {"flags": 0, "extras": {}}}
+                app._current_intercepted_entry = {
+                    "id": 2, "intent": {"flags": 0, "extras": {}, "package": None},
+                    "attackSurface": {"intentExplicit": False, "routingSource": "base"},
+                }
+                app._enter_edit_mode()
+                await pilot.pause()
+                self.assertTrue(app.query_one("#ef_routing_section").display)
+                self.assertIn("IMPLICIT", str(app.query_one("#ef_routing_body", Static).render()))
+                self.assertFalse(app.query_one("#ef_readonly_context").display)
+                app._exit_edit_mode()
+
+                app._current_intercepted_entry = {"id": 3, "intent": {"flags": 0, "extras": {}}}
                 app._enter_edit_mode()
                 await pilot.pause()
                 self.assertFalse(app.query_one("#ef_readonly_context").display)
+                self.assertFalse(app.query_one("#ef_routing_section").display)
                 self.assertFalse(app.query_one("#ef_grant_row").display)

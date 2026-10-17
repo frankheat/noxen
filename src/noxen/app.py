@@ -510,10 +510,10 @@ class NoxenApp(App):
             self.query_one("#ef_flags", Input).value = ""
 
         context = render_edit_context(info, (self._current_intercepted_entry or {}).get("attackSurface") or {})
-        for key, widget in (("selector", "selector"), ("clipData", "clip")):
+        for key, widget in (("routing", "routing"), ("selector", "selector"), ("clipData", "clip")):
             self.query_one(f"#ef_{widget}_section").display = key in context
             self.query_one(f"#ef_{widget}_body", Static).update(self._render_markup(context.get(key, "")))
-        self.query_one("#ef_readonly_context").display = bool(context)
+        self.query_one("#ef_readonly_context").display = any(key in context for key in ("selector", "clipData"))
         self._update_edit_grant_flags()
 
     def _update_edit_grant_flags(self) -> None:
@@ -1148,6 +1148,12 @@ class NoxenApp(App):
                 )
                 yield RichLog(id="intercept_output", markup=True, highlight=False, auto_scroll=False)
                 with VerticalScroll(id="edit_form"):
+                    with Vertical(id="ef_routing_section", classes="ef_readonly_section"):
+                        with Horizontal(classes="ef_section_header"):
+                            yield Label("Routing", classes="ef_section")
+                            yield Label("Derived from capture", classes="ef_section_meta")
+                        yield Static(id="ef_routing_body", classes="ef_context_body", markup=False)
+                        yield Rule()
                     with Horizontal(classes="ef_section_header"):
                         yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
                         yield Label("Editable", classes="ef_section_meta")
