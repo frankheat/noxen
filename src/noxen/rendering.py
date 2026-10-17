@@ -800,41 +800,42 @@ def _clip_data_has_uri(clip_data: dict) -> bool:
     return False
 
 
-def _clip_data_lines(clip_data: dict | None, intent_flags) -> list[str]:
+def format_uri_grant_flags(intent_flags) -> str:
+    """Decode requested grants, not evidence of access granted by Android."""
+    flags = _parse_flag_int(intent_flags)
+    if flags is None:
+        return "unavailable"
+    return " | ".join(
+        name for mask, name in (
+            (0x01, "READ"), (0x02, "WRITE"), (0x40, "PERSISTABLE"), (0x80, "PREFIX"),
+        ) if flags & mask
+    ) or "none"
+
+
+def _clip_data_lines(clip_data: dict | None, intent_flags, *, include_grant_flags=True, row=_row, indent="  ") -> list[str]:
     if not isinstance(clip_data, dict):
         return []
     lines = [_section("CLIP DATA")]
     if clip_data.get("kind") == "clipdata" and isinstance(clip_data.get("count"), int):
         count = clip_data["count"]
         lines[0] += f" ({count} {'item' if count == 1 else 'items'})"
-    if _clip_data_has_uri(clip_data):
-        flags = _parse_flag_int(intent_flags)
-        if flags is None:
-            grant_flags = "unavailable"
-        else:
-            grant_flags = " | ".join(
-                name for mask, name in (
-                    (0x01, "READ"),
-                    (0x02, "WRITE"),
-                    (0x40, "PERSISTABLE"),
-                    (0x80, "PREFIX"),
-                ) if flags & mask
-            ) or "none"
-        lines.append(_row("Grant flags", f"{grant_flags} [dim](outer Intent)[/dim]"))
+    if include_grant_flags and _clip_data_has_uri(clip_data):
+        grant_flags = format_uri_grant_flags(intent_flags)
+        lines.append(row("Grant flags", f"{grant_flags} [dim](outer Intent)[/dim]"))
     context = {"lines": 0, "active": set()}
     if clip_data.get("kind") == "clipdata":
         roots = []
         for label, node in _extra_node_children(clip_data):
             if node.get("kind") == "field":
-                lines.append(_row(label or "", _extra_display_text(node.get("value"))))
+                lines.append(row(label or "", _extra_display_text(node.get("value"))))
             else:
                 roots.append((label, node))
         for index, (label, node) in enumerate(roots):
-            _render_extra_node(lines, label, node, "  ", index == len(roots) - 1, context, 0)
+            _render_extra_node(lines, label, node, indent, index == len(roots) - 1, context, 0)
             if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
                 break
     else:
-        _render_extra_node(lines, None, clip_data, "  ", True, context, 0)
+        _render_extra_node(lines, None, clip_data, indent, True, context, 0)
     if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
         lines.append("  [dim]… ClipData rendering limit reached[/dim]")
     return lines
@@ -848,7 +849,7 @@ def _selector_role(role: str | None) -> str | None:
     }.get(role)
 
 
-def _selector_lines(selector: dict | None, role: str | None) -> list[str]:
+def _selector_lines(selector: dict | None, role: str | None, *, row=_row, indent="  ") -> list[str]:
     """Render a top-level selector separately from the delivered base payload."""
     if not isinstance(selector, dict):
         return []
@@ -856,23 +857,23 @@ def _selector_lines(selector: dict | None, role: str | None) -> list[str]:
     lines = [_section("SELECTOR")]
     role_text = _selector_role(role)
     if role_text:
-        lines.append(_row("Routing role", role_text))
+        lines.append(row("Routing role", role_text))
 
     if selector.get("kind") != "intent":
         context = {"lines": 0, "active": set()}
-        _render_extra_node(lines, None, selector, "  ", True, context, 0)
+        _render_extra_node(lines, None, selector, indent, True, context, 0)
         return lines
 
-    lines.append(_row("Component", _markup(selector.get("component")) if selector.get("component") else "None"))
-    lines.append(_row("Action", _markup(selector.get("action")) if selector.get("action") else "None"))
-    lines.append(_row("Data (URI)", _markup(selector.get("data")) if selector.get("data") else "None"))
+    lines.append(row("Component", _markup(selector.get("component")) if selector.get("component") else "None"))
+    lines.append(row("Action", _markup(selector.get("action")) if selector.get("action") else "None"))
+    lines.append(row("Data (URI)", _markup(selector.get("data")) if selector.get("data") else "None"))
     if "mimeType" in selector:
-        lines.append(_row("MIME Type", _markup(selector.get("mimeType")) if selector.get("mimeType") else "None"))
+        lines.append(row("MIME Type", _markup(selector.get("mimeType")) if selector.get("mimeType") else "None"))
     if selector.get("package"):
-        lines.append(_row("Package", _markup(selector.get("package"))))
-    lines.append(_row("Flags", _format_intent_flags(selector.get("flags") or 0)))
+        lines.append(row("Package", _markup(selector.get("package"))))
+    lines.append(row("Flags", _format_intent_flags(selector.get("flags") or 0)))
     for category in selector.get("categories") or []:
-        lines.append(_row("Category", _markup(category)))
+        lines.append(row("Category", _markup(category)))
     if selector.get("categoriesTruncated"):
         lines.append("  [dim]additional categories omitted[/dim]")
 
@@ -891,11 +892,42 @@ def _selector_lines(selector: dict | None, role: str | None) -> list[str]:
 
     context = {"lines": 0, "active": set()}
     for index, (label, node) in enumerate(roots):
-        _render_extra_node(lines, label, node, "  ", index == len(roots) - 1, context, 0)
+        _render_extra_node(lines, label, node, indent, index == len(roots) - 1, context, 0)
         if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
             lines.append("  [dim]… selector rendering limit reached[/dim]")
             break
     return lines
+
+
+def _edit_context_row(label: str, value: str) -> str:
+    # Match the editor's .ef_label width, without detail-view indentation or colons.
+    if label == "Data (URI)":
+        label = "Data URI"
+    return f"[dim]{label:<16}[/dim]{value}"
+
+
+def render_edit_context(info: dict, attack_surface: dict) -> dict[str, str]:
+    """Reuse bounded, read-only trees; editable outer grant flags live in the form."""
+    selector = _selector_lines(
+        info.get("selector"), attack_surface.get("selectorRoutingRole"), row=_edit_context_row, indent="",
+    )
+    if selector and "intentExplicit" in attack_surface:
+        selector.insert(1, _edit_context_row("Routing", _intent_routing(info, attack_surface)))
+    if selector and attack_surface.get("selectorRoutingRole") == "active":
+        selector += [
+            "",
+            _edit_context_row("Note", "[dim]Routing uses this selector.[/dim]"),
+            _edit_context_row("", "[dim]Editable fields modify the base Intent only.[/dim]"),
+        ]
+    clip = info.get("clipData")
+    clip_lines = _clip_data_lines(clip, None, include_grant_flags=False, row=_edit_context_row, indent="")
+    if clip_lines and clip.get("kind") == "clipdata" and isinstance(clip.get("count"), int):
+        clip_lines.insert(1, _edit_context_row("Items", str(clip["count"])))
+    sections = {}
+    for key, lines in (("selector", selector), ("clipData", clip_lines)):
+        if lines:
+            sections[key] = "\n".join(lines[1:])
+    return sections
 
 
 def _stack_lines(trace: list, stack_depth: int, show_empty: bool = False) -> list[str]:

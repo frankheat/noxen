@@ -95,6 +95,8 @@ from noxen.rendering import (
     history_search_text,
     payload_to_history_entry,
     render_intent_detail,
+    render_edit_context,
+    format_uri_grant_flags,
 )
 from noxen.settings import load_settings, save_settings
 from noxen.system_server_session import SystemServerConfig, SystemServerSession
@@ -276,6 +278,7 @@ class NoxenApp(App):
         self.show_stack = self._settings["stack"]
         self.stack_depth = self._settings["stack_depth"]
         self._all_intents = []
+        self._history_lock = threading.Lock()
         self._unsaved_intent_ids = count(-1, -1)
         self._app_info: dict | None = None
         # Info app table sort (column key, reverse); session-only. Components start by type.
@@ -505,6 +508,24 @@ class NoxenApp(App):
             self.query_one("#ef_flags", Input).value = hex(int(flags_val)) if flags_val else ""
         except Exception:
             self.query_one("#ef_flags", Input).value = ""
+
+        context = render_edit_context(info, (self._current_intercepted_entry or {}).get("attackSurface") or {})
+        for key, widget in (("selector", "selector"), ("clipData", "clip")):
+            self.query_one(f"#ef_{widget}_section").display = key in context
+            self.query_one(f"#ef_{widget}_body", Static).update(self._render_markup(context.get(key, "")))
+        self.query_one("#ef_readonly_context").display = bool(context)
+        self._update_edit_grant_flags()
+
+    def _update_edit_grant_flags(self) -> None:
+        text = self.query_one("#ef_flags", Input).value.strip()
+        flags = parse_flag_value(text) if text else 0
+        hint = self.query_one("#ef_grant_flags", Static)
+        has_context = any(isinstance(self._edit_display_info.get(key), dict) for key in ("selector", "clipData"))
+        self.query_one("#ef_grant_row").display = has_context or flags is None or bool(flags & 0xC3)
+        if flags is None:
+            hint.update("unavailable (invalid 32-bit Flags value)")
+        else:
+            hint.update(self._render_markup(f"{format_uri_grant_flags(flags)} [dim](requested)[/dim]"))
 
     def _exit_edit_mode(self):
         if not self._edit_mode:
@@ -1127,7 +1148,9 @@ class NoxenApp(App):
                 )
                 yield RichLog(id="intercept_output", markup=True, highlight=False, auto_scroll=False)
                 with VerticalScroll(id="edit_form"):
-                    yield Label("EDITING CAPTURED INTENT", id="ef_mode_label")
+                    with Horizontal(classes="ef_section_header"):
+                        yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
+                        yield Label("Editable", classes="ef_section_meta")
                     with Horizontal(classes="ef_row"):
                         yield Label("Action", classes="ef_label")
                         yield Input(id="ef_action", placeholder="e.g. android.intent.action.VIEW")
@@ -1140,8 +1163,11 @@ class NoxenApp(App):
                     with Horizontal(classes="ef_row"):
                         yield Label("Flags", classes="ef_label")
                         yield Input(id="ef_flags", placeholder="e.g. 0x10000000")
+                    with Horizontal(id="ef_grant_row"):
+                        yield Label("URI grants", classes="ef_label")
+                        yield Static(id="ef_grant_flags", markup=False)
                     yield Rule()
-                    with Horizontal(classes="ef_section_header"):
+                    with Horizontal(id="ef_categories_header", classes="ef_section_header"):
                         yield Label("Categories", classes="ef_section")
                         yield Label("", classes="ef_section_spacer")
                         yield Button("+ Add", id="ef_add_cat")
@@ -1157,6 +1183,19 @@ class NoxenApp(App):
                         yield Label("Value", classes="ef_x_value_header")
                         yield Label("", classes="ef_x_remove_header")
                     yield Vertical(id="ef_extras")
+                    with Vertical(id="ef_readonly_context"):
+                        with Vertical(id="ef_selector_section", classes="ef_readonly_section"):
+                            yield Rule()
+                            with Horizontal(classes="ef_section_header"):
+                                yield Label("Selector", classes="ef_section")
+                                yield Label("Read-only", classes="ef_section_meta")
+                            yield Static(id="ef_selector_body", classes="ef_context_body", markup=False)
+                        with Vertical(id="ef_clip_section", classes="ef_readonly_section"):
+                            yield Rule()
+                            with Horizontal(classes="ef_section_header"):
+                                yield Label("ClipData", classes="ef_section")
+                                yield Label("Read-only", classes="ef_section_meta")
+                            yield Static(id="ef_clip_body", classes="ef_context_body", markup=False)
                 yield RichLog(id="intercept_cmd_output", markup=True, highlight=False)
                 yield OptionList(id="intercept_cmd_suggestions")
                 yield Vertical(
@@ -1961,29 +2000,33 @@ class NoxenApp(App):
     def _on_history_intent(self, payload, _history_id):
         entry = payload_to_history_entry(payload)
         save_error = None
-        try:
-            db_id = self.db.save_intent(entry)
-            if not db_id:
-                raise RuntimeError("Project database is unavailable")
-        except Exception as error:
-            db_id = None
-            save_error = error
-            entry["persistence_error"] = (
-                "Capture not saved to the project; available only in this session. "
-                "Export History before closing noxen."
-            )
-        # Temporary negative IDs cannot collide with SQLite's generated row IDs.
-        entry["id"] = db_id if db_id is not None else next(self._unsaved_intent_ids)
-        self._all_intents.append(entry)
-        self._history_search_index[id(entry)] = history_search_text(entry)
-        self._pending_append.append(entry)
+        # Keep SQLite and memory on the same side of a concurrent Clear action.
+        with self._history_lock:
+            try:
+                db_id = self.db.save_intent(entry)
+                if not db_id:
+                    raise RuntimeError("Project database is unavailable")
+            except Exception as error:
+                db_id = None
+                save_error = error
+                entry["persistence_error"] = (
+                    "Capture not saved to the project; available only in this session. "
+                    "Export History before closing noxen."
+                )
+            # Temporary negative IDs cannot collide with SQLite's generated row IDs.
+            entry["id"] = db_id if db_id is not None else next(self._unsaved_intent_ids)
+            self._all_intents.append(entry)
+            self._history_search_index[id(entry)] = history_search_text(entry)
+            self._pending_append.append(entry)
+            refresh = not self._history_refresh_pending
+            self._history_refresh_pending = True
         if save_error is not None:
             self.write_log(log_error(
                 f"History #{entry['id']} not saved: {save_error}. Capture kept in memory; export before closing.",
                 "history",
             ), notify=True)
-        if not self._history_refresh_pending:
-            self._history_refresh_pending = True
+        # call_from_thread waits for the UI: never call it while holding the lock.
+        if refresh:
             self.call_from_thread(self._do_history_refresh)
         return entry["id"]
 
@@ -2004,9 +2047,10 @@ class NoxenApp(App):
             ), notify=True)
 
     def _do_history_refresh(self):
-        self._history_refresh_pending = False
-        pending = self._pending_append[:]
-        self._pending_append.clear()
+        with self._history_lock:
+            self._history_refresh_pending = False
+            pending = self._pending_append[:]
+            self._pending_append.clear()
         if not pending:
             return
         try:
@@ -2356,16 +2400,24 @@ class NoxenApp(App):
 
 
     def action_clear_history(self):
-        self._all_intents.clear()
-        self._history_search_index.clear()
-        self._history_selected_entry = None
+        try:
+            with self._history_lock:
+                self.db.clear_intents()
+                self._all_intents.clear()
+                self._history_search_index.clear()
+                self._history_selected_entry = None
+                self._pending_append.clear()
+                self._history_refresh_pending = False
+        except Exception as error:
+            self.write_log(log_error(
+                f"Could not clear History: {error}. History kept unchanged.", "history",
+            ), notify=True)
+            return
         try:
             self.query_one("#history_table", DataTable).clear(columns=False)
             self.query_one("#history_detail", RichLog).clear()
         except Exception:
             pass
-        if self.db:
-            self.db.clear_intents()
         self.write_log(log_success("History cleared", "history"), notify=True)
 
     def check_action(self, action: str, parameters) -> bool | None:
@@ -2648,6 +2700,9 @@ class NoxenApp(App):
     def on_input_changed(self, event: Input.Changed):
         inp_id = event.input.id
         text = event.value.strip()
+        if inp_id == "ef_flags":
+            self._update_edit_grant_flags()
+            return
         if inp_id == "history_search":
             self._history_search_text = text
             self._refresh_rows_only()

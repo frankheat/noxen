@@ -595,18 +595,20 @@ Switch.-on > .switch--slider {
     padding: 1 2;
     overflow-y: auto;
 }
-#ef_mode_label {
-    height: 1;
-    margin-bottom: 1;
-    color: $secondary;
-    text-style: bold;
-}
 .ef_row { height: 1; align: left middle; margin-bottom: 1; }
-.ef_label { width: 12; content-align: left middle; }
-.ef_section_header { height: 3; align: left middle; }
-.ef_section { width: auto; text-style: bold; color: $warning; }
+.ef_label { width: 16; content-align: left middle; color: $foreground-muted; }
+.ef_row Input { padding: 0; }
+#ef_grant_row { height: auto; margin-bottom: 1; }
+#ef_grant_flags { height: auto; width: 1fr; }
+#ef_readonly_context { height: auto; display: none; }
+.ef_readonly_section { height: auto; }
+.ef_context_body { height: auto; }
+.ef_section_header { height: 1; align: left middle; margin-bottom: 1; }
+#ef_categories_header { margin-bottom: 0; }
+.ef_section { width: auto; text-style: bold; color: $foreground; }
+.ef_section_meta { width: auto; margin-left: 2; color: $foreground-muted; }
 .ef_section_spacer { width: 1fr; }
-.ef_x_row { height: 1; align: left middle; margin-bottom: 1; }
+.ef_x_row { height: 1; align: left middle; }
 .ef_x_key_label { width: 18; }
 .ef_x_type_label { width: 25; color: $foreground-muted; }
 .ef_x_columns { height: 1; color: $foreground-muted; text-style: bold; }
@@ -631,7 +633,13 @@ Switch.-on > .switch--slider {
     background: $boost;
     background-tint: $surface 0%;
 }
-#ef_extras { height: auto; }
+#ef_extras {
+    height: auto;
+    layout: grid;
+    grid-size: 1;
+    grid-rows: 1;
+    grid-gutter: 1 0;
+}
 #ef_categories { height: auto; }
 #ef_add_extra, #ef_add_cat {
     width: auto;
@@ -647,9 +655,9 @@ Switch.-on > .switch--slider {
     background: $boost;
     background-tint: $surface 0%;
 }
-.ef_cat_row { height: 1; align: left middle; margin-bottom: 1; }
+.ef_cat_row { height: 1; align: left middle; margin-top: 1; }
 .ef_cat_input { padding: 0; }
-#edit_form Rule { margin: 0 2 0 0; color: $foreground-muted; }
+#edit_form Rule { margin: 1 0; color: $foreground-muted; }
 #app_footer {
     dock: bottom;
     height: 1;

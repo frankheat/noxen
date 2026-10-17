@@ -347,10 +347,9 @@ class ProjectDB:
     def clear_intents(self) -> None:
         """Delete all rows from the intents table."""
         if self._conn is None:
-            return
-        with self._lock:
+            raise RuntimeError("Project database is unavailable")
+        with self._lock, self._conn:
             self._conn.execute("DELETE FROM intents")
-            self._conn.commit()
 
     def update_modified_intent(self, intent_id: int, original_info: dict, modified_info: dict) -> None:
         """Persist the modified intent fields and the original snapshot."""
