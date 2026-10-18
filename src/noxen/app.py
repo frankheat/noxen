@@ -89,9 +89,7 @@ from noxen.modals import (
     StackModal,
 )
 from noxen.rendering import (
-    entry_to_filter_context,
     filter_sort_history_entries,
-    history_outcome_cell,
     history_row_values,
     history_search_text,
     payload_to_history_entry,
@@ -114,6 +112,8 @@ _HISTORY_COLUMNS = [
     ("action",    "Action"),
     ("extras",    "Extras"),
 ]
+
+HISTORY_REFRESH_INTERVAL = 0.1
 
 LOGGER = logging.getLogger(__name__)
 
@@ -335,8 +335,9 @@ class NoxenApp(App):
             "info_perm_table": (None, False),
         }
         self._info_selected_component: str | None = None
+        # Only rendering is deferred; captures and outcomes are saved immediately.
         self._history_refresh_pending = False
-        self._pending_append: list = []
+        self._history_columns_dirty = True
         self._sort_column: str | None = "id"
         self._sort_reverse: bool = True
         self._history_visible_cols: set[str] = {key for key, _ in _HISTORY_COLUMNS}
@@ -902,8 +903,6 @@ class NoxenApp(App):
                 message, title="Intent modification warning", severity="warning", timeout=8
             ))
         self._update_outcome(intent_id, outcome)
-        if changed:
-            self.call_from_thread(self._refresh_modified_history_row)
         self._staged_mods.clear()
         self.call_from_thread(lambda e=resolved_entry: self._clear_intercept_output(e))
 
@@ -1393,6 +1392,7 @@ class NoxenApp(App):
             self.query_one(f"#{btn_id}", Button).active_effect_duration = 0
         self._apply_command_bar_visibility()
         self._refresh_history_table()
+        self.set_interval(HISTORY_REFRESH_INTERVAL, self._do_history_refresh)
         self._init_info_tab()
         self._update_filter_count()
         self.query_one("#session_info", Label).update("Not connected")
@@ -2096,17 +2096,12 @@ class NoxenApp(App):
             entry["id"] = db_id if db_id is not None else next(self._unsaved_intent_ids)
             self._all_intents.append(entry)
             self._history_search_index[id(entry)] = history_search_text(entry)
-            self._pending_append.append(entry)
-            refresh = not self._history_refresh_pending
             self._history_refresh_pending = True
         if save_error is not None:
             self.write_log(log_error(
                 f"History #{entry['id']} not saved: {save_error}. Capture kept in memory; export before closing.",
                 "history",
             ), notify=True)
-        # call_from_thread waits for the UI: never call it while holding the lock.
-        if refresh:
-            self.call_from_thread(self._do_history_refresh)
         return entry["id"]
 
     def _persist_history_update(self, intent_id, update, *args):
@@ -2126,50 +2121,22 @@ class NoxenApp(App):
             ), notify=True)
 
     def _do_history_refresh(self):
-        with self._history_lock:
-            self._history_refresh_pending = False
-            pending = self._pending_append[:]
-            self._pending_append.clear()
-        if not pending:
+        """Coalesce visual updates on the UI thread, only while History is visible."""
+        if self._active_tab != "tab_history":
             return
+        with self._history_lock:
+            if not self._history_refresh_pending and not self._history_columns_dirty:
+                return
         try:
             table = self.query_one("#history_table", DataTable)
-            has_columns = len(table.columns) > 0
+            has_columns = len(table.columns) > 0 and not self._history_columns_dirty
         except Exception:
             self._refresh_history_table()
             return
         if not has_columns:
             self._refresh_history_table()
             return
-        if self._sort_column is not None:
-            # Sorted: rows need reordering but columns are already correct
-            self._refresh_rows_only()
-            return
-        # Unsorted fast path: batch-append without any rebuild
-        saved_cursor = table.cursor_row
-        for entry in pending:
-            self._append_history_row(entry)
-        if saved_cursor >= 0:
-            self.set_timer(0, lambda t=table, c=saved_cursor: t.move_cursor(row=c, animate=False))
-
-    def _append_history_row(self, entry):
-        """Append a single row to the table without full rebuild."""
-        try:
-            table = self.query_one("#history_table", DataTable)
-        except Exception:
-            return
-        ctx = entry_to_filter_context(entry)
-        if not self._history_filter_manager.is_visible(ctx):
-            return
-        colors = semantic_colors(self.current_theme.dark)
-        row_vals = history_row_values(
-            entry,
-            self._history_visible_cols,
-            _HISTORY_COLUMNS,
-            colors.success,
-            colors.error,
-        )
-        table.add_row(*row_vals, key=str(entry["id"]))
+        self._refresh_rows_only()
 
     def _update_filter_count(self):
         if self._active_tab == "tab_intercept":
@@ -2251,6 +2218,9 @@ class NoxenApp(App):
             return
         table.move_cursor(row=idx, animate=False)
         def _restore(t=table, sid=saved_sel_id):
+            # A user selection made after rebuilding takes precedence over this timer.
+            if not self._history_selected_entry or str(self._history_selected_entry["id"]) != sid:
+                return
             try:
                 for i, rk in enumerate(t.rows):
                     if str(rk.value) == sid:
@@ -2262,34 +2232,35 @@ class NoxenApp(App):
 
     def _refresh_rows_only(self):
         """Rebuild rows without touching columns (sort stable, columns unchanged)."""
+        if self._active_tab != "tab_history":
+            with self._history_lock:
+                self._history_refresh_pending = True
+            return
         try:
             table = self.query_one("#history_table", DataTable)
         except Exception:
             return
+        with self._history_lock:
+            self._history_refresh_pending = False
         saved_sel_id = str(self._history_selected_entry["id"]) if self._history_selected_entry else None
         filtered = self._get_filtered_sorted()
         table.clear(columns=False)
         self._fill_table_rows(table, filtered)
         self._restore_cursor(table, filtered, saved_sel_id)
 
-    def _refresh_modified_history_row(self):
-        # The full rebuild already includes entries waiting in the append buffer.
-        # Leave nothing for the scheduled append pass to duplicate.
-        self._pending_append.clear()
-        try:
-            has_columns = bool(self.query_one("#history_table", DataTable).columns)
-        except Exception:
-            return
-        if has_columns:
-            self._refresh_rows_only()
-        else:
-            self._refresh_history_table()
-
     def _refresh_history_table(self):
+        if self._active_tab != "tab_history":
+            with self._history_lock:
+                self._history_refresh_pending = True
+                self._history_columns_dirty = True
+            return
         try:
             table = self.query_one("#history_table", DataTable)
         except Exception:
             return
+        with self._history_lock:
+            self._history_refresh_pending = False
+            self._history_columns_dirty = False
         saved_sel_id = str(self._history_selected_entry["id"]) if self._history_selected_entry else None
         filtered = self._get_filtered_sorted()
 
@@ -2420,6 +2391,7 @@ class NoxenApp(App):
                 pass
             self._focus_intercept_default()
         elif pane_id == "tab_history":
+            self._do_history_refresh()
             self._focus_history_main_panel()
             if self._history_table_height is None:
                 self.call_after_refresh(self._init_panel_heights)
@@ -2486,7 +2458,6 @@ class NoxenApp(App):
                 self._all_intents.clear()
                 self._history_search_index.clear()
                 self._history_selected_entry = None
-                self._pending_append.clear()
                 self._history_refresh_pending = False
         except Exception as error:
             self.write_log(log_error(
@@ -3197,25 +3168,9 @@ class NoxenApp(App):
                 break
         self._persist_history_update(intent_id, self.db.update_outcome, outcome)
 
-        def _apply():
-            try:
-                table = self.query_one("#history_table", DataTable)
-                if "outcome" in self._history_visible_cols:
-                    colors = semantic_colors(self.current_theme.dark)
-                    table.update_cell(
-                        str(intent_id),
-                        "outcome",
-                        history_outcome_cell(
-                            outcome, colors.success, colors.error,
-                            entry.get("modification_error") if entry else None,
-                        ),
-                    )
-            except Exception:
-                pass
-            if self._history_selected_entry and self._history_selected_entry.get("id") == intent_id:
-                self._refresh_history_detail()
-
-        self.call_from_thread(_apply)
+        if entry is not None:
+            with self._history_lock:
+                self._history_refresh_pending = True
 
     def _clear_intercept_output(self, resolved_entry=None):
         # If a new intent arrived before this clear was scheduled,

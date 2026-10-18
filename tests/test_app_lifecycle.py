@@ -1,3 +1,4 @@
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -154,6 +155,8 @@ class AppLifecycleTests(unittest.TestCase):
     def test_history_table_applies_saved_column_widths(self):
         table = _FakeHistoryTable()
         fake_app = SimpleNamespace(
+            _active_tab="tab_history",
+            _history_lock=threading.Lock(),
             _history_selected_entry=None,
             _history_visible_cols={"id", "time", "method", "class"},
             _history_column_widths={"time": 19, "method": 18, "class": 40},

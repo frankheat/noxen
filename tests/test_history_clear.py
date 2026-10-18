@@ -63,7 +63,6 @@ class HistoryClearTests(SettingsIsolationMixin, unittest.TestCase):
         self.assertEqual(self.app._all_intents, [entry])
         self.assertIs(self.app._history_selected_entry, entry)
         self.assertEqual(self.app._history_search_index, index)
-        self.assertEqual(self.app._pending_append, [entry])
         self.assertTrue(self.app._history_refresh_pending)
         self.assertEqual(len(self.app.db._load_all()), 1)
         self.assertIn("Could not clear History", self.app.write_log.call_args.args[0])
@@ -74,10 +73,9 @@ class HistoryClearTests(SettingsIsolationMixin, unittest.TestCase):
         current = self.app._current_intercepted_entry
         self.app._staged_mods = [("action", "", "EDITED", "")]
         self.app._intent_blocked = True
-        scheduled = self.app.call_from_thread.call_args.args[0]
+        scheduled = self.app._do_history_refresh
         self.app.action_clear_history()
         self.assertEqual(self.app._all_intents, [])
-        self.assertEqual(self.app._pending_append, [])
         self.assertEqual(self.app._history_search_index, {})
         self.assertFalse(self.app._history_refresh_pending)
         self.assertEqual(self.app.db._load_all(), [])
@@ -90,7 +88,6 @@ class HistoryClearTests(SettingsIsolationMixin, unittest.TestCase):
         self.assertEqual(self.app._staged_mods, [("action", "", "EDITED", "")])
         self.capture("AFTER")
         self.assertTrue(self.app._history_refresh_pending)
-        self.assertEqual(len(self.app._pending_append), 1)
 
     def test_clear_with_closed_database_does_not_discard_unsaved_captures(self):
         self.app.db.close()
@@ -167,6 +164,7 @@ class HistoryClearTests(SettingsIsolationMixin, unittest.TestCase):
             self.app._history_lock.release()
         self.app.call_from_thread.side_effect = ui_callback
         self.capture("CURRENT")
+        self.app.call_from_thread.assert_not_called()
         self.app._history_refresh_pending = False
         self.app.write_log.side_effect = ui_callback
         with patch.object(self.app.db, "save_intent", side_effect=sqlite3.OperationalError("disk full")):
@@ -196,8 +194,8 @@ class HistoryClearUITests(IsolatedAppTestCase):
                 self.assertIs(app._history_selected_entry, selected)
                 self.assertEqual(detail.lines, lines)
                 callbacks = []
-                with patch.object(app, "call_from_thread", side_effect=callbacks.append):
-                    app._on_history_intent(payload("QUEUED_BEFORE_CLEAR"), 2)
+                app._on_history_intent(payload("QUEUED_BEFORE_CLEAR"), 2)
+                callbacks.append(app._do_history_refresh)
                 app.action_clear_history()
                 self.assertEqual(table.row_count, 0)
                 with patch.object(app, "call_from_thread", side_effect=lambda callback, *args: callback(*args)):

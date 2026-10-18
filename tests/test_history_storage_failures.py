@@ -255,4 +255,6 @@ class HistoryStorageFailureUITests(IsolatedAppTestCase):
                 self.assertEqual(app._all_intents[0]["intent"]["action"], "PREVIOUS")
                 self.assertEqual(app._all_intents[1]["outcome"], "modified_forwarded")
                 self.assertEqual(app._all_intents[2]["outcome"], "dropped")
+                app.query_one("#main_tabs").active = "tab_history"
+                await pilot.pause()
                 self.assertEqual(app.query_one("#history_table", DataTable).row_count, 3)

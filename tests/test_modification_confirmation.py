@@ -10,28 +10,6 @@ from noxen.rendering import payload_to_history_entry
 
 
 class ModificationConfirmationTests(unittest.TestCase):
-    def test_modified_row_refresh_consumes_pending_appends(self):
-        calls = []
-        app = SimpleNamespace(
-            _pending_append=[{"id": 1}],
-            query_one=lambda *_args: SimpleNamespace(columns={"id": object()}),
-            _refresh_rows_only=lambda: calls.append("refresh"),
-        )
-        NoxenApp._refresh_modified_history_row(app)
-        self.assertEqual(app._pending_append, [])
-        self.assertEqual(calls, ["refresh"])
-
-    def test_modified_row_refresh_creates_missing_columns(self):
-        calls = []
-        app = SimpleNamespace(
-            _pending_append=[{"id": 1}],
-            query_one=lambda *_args: SimpleNamespace(columns={}),
-            _refresh_history_table=lambda: calls.append("rebuild"),
-        )
-        NoxenApp._refresh_modified_history_row(app)
-        self.assertEqual(app._pending_append, [])
-        self.assertEqual(calls, ["rebuild"])
-
     def make_app(self, path):
         db = ProjectDB(path)
         db.create("session")
@@ -48,7 +26,6 @@ class ModificationConfirmationTests(unittest.TestCase):
             notify=lambda *args, **kwargs: messages.append((args, kwargs)),
             call_from_thread=lambda callback: callback(),
             _clear_intercept_output=lambda _entry: None,
-            _refresh_modified_history_row=lambda: None,
         )
         def update_outcome(intent_id, outcome):
             entry["outcome"] = outcome
