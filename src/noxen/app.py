@@ -1931,23 +1931,40 @@ class NoxenApp(App):
         # Connect fires right after resume; in spawn mode the app's Application context
         # may not exist yet, so poll a few times until the snapshot is ready.
         worker = get_current_worker()
-        for _ in range(8):
-            if worker.is_cancelled:
+        session = self.frida_session
+
+        def is_current():
+            return (
+                not worker.is_cancelled
+                and session is not None
+                and session is self.frida_session
+                and session.is_ready()
+            )
+
+        def publish(info=None):
+            # Check on the UI thread: disconnect or a new Refresh may have
+            # happened after the RPC completed, while this callback was queued.
+            if not is_current():
                 return
-            session = self.frida_session
-            if session is None or not session.is_ready():
+            if info is not None:
+                self._apply_app_info(info)
+            else:
+                self.write_log(log_warning("App info not ready yet — use Refresh", "info"))
+
+        for _ in range(8):
+            if not is_current():
                 return
             try:
                 info = session.get_app_info()
             except Exception:
                 info = None
             if info and not info.get("error") and (info.get("identity") or {}).get("package"):
-                self.call_from_thread(self._apply_app_info, info)
+                self.call_from_thread(publish, info)
+                return
+            if not is_current():
                 return
             time.sleep(0.4)
-        self.call_from_thread(
-            self.write_log, log_warning("App info not ready yet — use Refresh", "info")
-        )
+        self.call_from_thread(publish)
 
     def _apply_app_info(self, info: dict) -> None:
         self._app_info = info
@@ -2012,6 +2029,7 @@ class NoxenApp(App):
         return table
 
     def _clear_info_tab(self) -> None:
+        self.workers.cancel_group(self, "app_info")
         self._app_info = None
         self._info_selected_component = None
         try:
