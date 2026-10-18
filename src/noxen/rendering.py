@@ -109,7 +109,7 @@ def entry_to_filter_context(entry: dict) -> dict:
         "action": str(info.get("action") or ""),
         "component": str(info.get("component") or ""),
         "data": str(info.get("data") or ""),
-        "flags": str(info.get("flags") or "0"),
+        "flags": "" if (entry.get("attackSurface") or {}).get("intentPresent") is False else str(info.get("flags") or "0"),
         "category": info.get("categories", []),
     }
 
@@ -122,7 +122,7 @@ def payload_to_filter_context(payload: dict) -> dict:
         "action": str(info.get("action") or ""),
         "component": str(info.get("component") or ""),
         "data": str(info.get("data") or ""),
-        "flags": str(info.get("flags") or "0"),
+        "flags": "" if (payload.get("attackSurface") or {}).get("intentPresent") is False else str(info.get("flags") or "0"),
         "category": info.get("categories", []),
     }
 
@@ -268,6 +268,10 @@ def history_search_text(entry: dict) -> str:
 
     info = entry.get("intent")
     info = info if isinstance(info, dict) else {}
+    if (entry.get("attackSurface") or {}).get("intentPresent") is False:
+        info = {}
+        add("null")
+        add("no Intent object")
     for value in (
         entry.get("class"),
         entry.get("method"),
@@ -585,7 +589,9 @@ def _routing_lines(info: dict, attack_surface: dict, *, method=None, row=_row, i
     return [_section("ROUTING"), *lines] if lines else []
 
 
-def _payload_lines(info: dict, *, component_details=None, show_component=False) -> list[str]:
+def _payload_lines(info: dict, *, component_details=None, show_component=False, intent_present=None) -> list[str]:
+    if intent_present is False:
+        return [_row("Intent", "null [dim](no Intent object)[/dim]")]
     lines = []
     if info.get("component") or show_component:
         lines += _component_lines(info.get("component"), component_details)
@@ -985,6 +991,8 @@ def _edit_context_row(label: str, value: str) -> str:
 
 def render_edit_context(info: dict, attack_surface: dict, method=None) -> dict[str, str]:
     """Reuse bounded, read-only trees; editable outer grant flags live in the form."""
+    if attack_surface.get("intentPresent") is False:
+        return {}
     named_components = _is_component_event(method, attack_surface)
     selector_info = info.get("selector")
     selector_details = _captured_component_info(
@@ -1029,8 +1037,11 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     """The shared section stack: caller context, payload, pending intent, extras."""
     out = [_section("HOOK")]
     out += _hook_caller_lines(class_name, method, attack_surface)
+    intent_present = attack_surface.get("intentPresent")
+    if intent_present is False:
+        info = {}
     named_components = _is_component_event(method, attack_surface)
-    routing = _routing_lines(info, attack_surface, method=method)
+    routing = _routing_lines(info, attack_surface, method=method) if intent_present is not False else []
     if routing:
         out += [""] + routing
     out.append("")
@@ -1038,6 +1049,7 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     out += _payload_lines(
         info, component_details=_captured_component_info(info.get("component"), attack_surface, "base") if named_components else None,
         show_component=named_components and _has_component_metadata(attack_surface),
+        intent_present=intent_present,
     )
     selector_info = info.get("selector")
     selector_details = _captured_component_info(

@@ -85,6 +85,7 @@ test('the exact current ID still permits each decision and cannot address a late
     const { context, exports } = agent();
     let notifications = 0;
     context.waiting = true;
+    context.activeIntentPresent = true;
     context.activeDecisionId = 'decision-current';
     context.lock = { notify() { notifications++; } };
     const mods = [{ type: 'action', key: '', val: 'changed', extraType: '' }];
@@ -112,4 +113,65 @@ test('explicitly disabling interception remains a global operation', () => {
   assert.equal(notifications, 1);
   context.waiting = false;
   assert.equal(exports.interceptOffWithMods([], null), true);
+});
+
+test('new captures distinguish a null Intent from a present empty Intent without mutating metadata', () => {
+  for (const intent of [null, {}]) {
+    const { context, messages } = agent();
+    context.getStackTrace = () => [];
+    context.dumpIntent = () => ({});
+    context.blockEnabled = false;
+    const surface = { callerExported: true };
+    context.processIntercept('Example', 'onStartCommand', intent, null, surface);
+    const event = messages.find(item => item.noxenEvent === 'intent');
+    assert.equal(event.attackSurface.intentPresent, intent !== null);
+    assert.equal(event.attackSurface.callerExported, true);
+    assert.equal('intentPresent' in surface, false);
+    assert.equal(event.decision.required, false);
+  }
+});
+
+test('a null held Intent rejects modifications but can still forward, drop or disable interception', () => {
+  for (const operation of ['forward', 'drop', 'forwardWithMods', 'interceptOffWithMods']) {
+    const { context, exports } = agent();
+    let notifications = 0;
+    context.waiting = true;
+    context.activeDecisionId = 'decision-null';
+    context.activeIntentPresent = false;
+    context.lock = { notify() { notifications++; } };
+    const mods = [{ type: 'extra_add', key: 'key', val: 'value', extraType: 'string' }];
+    assert.equal(exports.stageMod('action', '', 'changed', '', 'decision-null'), false);
+    assert.equal(exports.forwardWithMods(mods, 'decision-null'), false);
+    assert.equal(exports.interceptOffWithMods(mods, 'decision-null'), false);
+    assert.equal(context.modQueue.length, 0);
+    assert.equal(context.blockEnabled, true);
+    assert.equal(notifications, 0);
+    assert.equal(operation.endsWith('WithMods')
+      ? exports[operation]([], 'decision-null') : exports[operation]('decision-null'), true);
+    assert.equal(notifications, 1);
+  }
+});
+
+test('a busy null event does not overwrite the presence of an already held Intent', () => {
+  const { context } = agent();
+  context.waiting = true;
+  context.activeIntentPresent = true;
+  context.getStackTrace = () => [];
+  context.dumpIntent = () => ({});
+  context.processIntercept('Example', 'onStartCommand', null, null, null);
+  assert.equal(context.activeIntentPresent, true);
+});
+
+test('declared Intent arguments preserve subclasses and null values', () => {
+  for (const intent of [null, { $className: 'example.CustomIntent' }]) {
+    const { context } = agent();
+    let captured;
+    context.buildAttackSurface = () => ({});
+    context.processIntercept = (_class, _method, value) => { captured = value; return false; };
+    const method = { returnType: { className: 'void' }, apply(_self, args) { assert.equal(args[1], intent); } };
+    const target = { customMethod: { overload: () => method } };
+    context.createHook(target, 'Example', 'customMethod', ['int', 'android.content.Intent']);
+    method.implementation.call({ $className: 'Example' }, 7, intent);
+    assert.equal(captured, intent);
+  }
 });

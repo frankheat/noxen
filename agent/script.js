@@ -17,6 +17,7 @@ var UriJava = null;
 var blockEnabled = true;
 var waiting = false;
 var activeDecisionId = null;
+var activeIntentPresent = false;
 var resumeMode = "forward"; 
 var modQueue = []; 
 var holdCounter = 0;
@@ -1050,6 +1051,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
       decisionCounter += 1;
       decisionId = "decision-" + Process.id + "-" + decisionCounter;
       activeDecisionId = decisionId;
+      activeIntentPresent = intent !== null;
       resumeMode = "forward";
       modQueue = [];
     }
@@ -1065,7 +1067,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
         "stackTrace": getStackTrace(),
         "infoIntent": infoIntent,
         "pendingIntentFlags": pendingIntentFlags !== undefined ? pendingIntentFlags : null,
-        "attackSurface": attackSurface || null,
+        "attackSurface": Object.assign({}, attackSurface || {}, { intentPresent: intent !== null }),
         "decision": {
           "required": willBlock,
           "id": decisionId,
@@ -1112,6 +1114,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
       endHold(holdId);
       waiting = false;
       activeDecisionId = null;
+      activeIntentPresent = false;
     }
   }
 
@@ -1159,6 +1162,7 @@ function resumeWithMods(mods, decisionId, disableInterception) {
   try {
     Java.performNow(function () {
       if (matchesActiveDecision(decisionId) && lock) {
+        if (normalized.length > 0 && !activeIntentPresent) return;
         // Replacing, instead of extending, the queue makes retries idempotent and
         // ensures the agent applies exactly the draft visible in the TUI.
         modQueue = normalized;
@@ -1206,6 +1210,7 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
   const method = targetWrapper[methodName].overload.apply(targetWrapper[methodName], overloadArgs);
   const returnType = returnTypeName(method);
   const isPendingIntent = className === 'android.app.PendingIntent';
+  const intentIndex = overloadArgs.indexOf('android.content.Intent');
 
   if (methodName === "getIntent" && returnType !== "android.content.Intent") {
     throw new Error("getIntent return type is " + (returnType || "unknown") + ", expected android.content.Intent");
@@ -1236,6 +1241,9 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
       // getActivity/getBroadcast/getService: (Context, int requestCode, Intent, int flags[, Bundle])
       intent = arguments[2];
       pendingIntentFlags = arguments[3];
+    } else if (intentIndex >= 0) {
+      // The declared argument position also handles subclasses of Intent.
+      intent = arguments[intentIndex];
     } else {
       for (const arg of arguments) {
         if (arg && arg.$className === "android.content.Intent") {
@@ -1364,12 +1372,12 @@ rpc.exports = {
   },
 
   stageMod: function (type, key, val, extraType, decisionId) {
-    if (matchesActiveDecision(decisionId)) {
+    if (matchesActiveDecision(decisionId) && activeIntentPresent) {
         modQueue.push({type: type, key: key, val: val, extraType: extraType});
         send("[+] Modification staged: " + type + (extraType ? " (" + extraType + ")" : ""));
         return true;
     } else {
-        send("[!] Error: No intent blocked to modify.");
+        send("[!] Error: No matching editable Intent is blocked.");
         return false;
     }
   },

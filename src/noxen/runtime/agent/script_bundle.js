@@ -13435,6 +13435,7 @@ std_string_c_str (StdString * self)
   var blockEnabled = true;
   var waiting = false;
   var activeDecisionId = null;
+  var activeIntentPresent = false;
   var resumeMode = "forward";
   var modQueue = [];
   var holdCounter = 0;
@@ -14465,6 +14466,7 @@ std_string_c_str (StdString * self)
         decisionCounter += 1;
         decisionId = "decision-" + Process.id + "-" + decisionCounter;
         activeDecisionId = decisionId;
+        activeIntentPresent = intent !== null;
         resumeMode = "forward";
         modQueue = [];
       }
@@ -14477,7 +14479,7 @@ std_string_c_str (StdString * self)
         "stackTrace": getStackTrace(),
         "infoIntent": infoIntent,
         "pendingIntentFlags": pendingIntentFlags !== void 0 ? pendingIntentFlags : null,
-        "attackSurface": attackSurface || null,
+        "attackSurface": Object.assign({}, attackSurface || {}, { intentPresent: intent !== null }),
         "decision": {
           "required": willBlock,
           "id": decisionId,
@@ -14519,6 +14521,7 @@ std_string_c_str (StdString * self)
         endHold(holdId);
         waiting = false;
         activeDecisionId = null;
+        activeIntentPresent = false;
       }
     }
     return shouldDrop;
@@ -14563,6 +14566,7 @@ std_string_c_str (StdString * self)
     try {
       Java.performNow(function() {
         if (matchesActiveDecision(decisionId) && lock) {
+          if (normalized.length > 0 && !activeIntentPresent) return;
           modQueue = normalized;
           if (disableInterception) blockEnabled = false;
           resumeMode = "forward";
@@ -14600,6 +14604,7 @@ std_string_c_str (StdString * self)
     const method = targetWrapper[methodName].overload.apply(targetWrapper[methodName], overloadArgs);
     const returnType = returnTypeName(method);
     const isPendingIntent = className === "android.app.PendingIntent";
+    const intentIndex = overloadArgs.indexOf("android.content.Intent");
     if (methodName === "getIntent" && returnType !== "android.content.Intent") {
       throw new Error("getIntent return type is " + (returnType || "unknown") + ", expected android.content.Intent");
     }
@@ -14621,6 +14626,8 @@ std_string_c_str (StdString * self)
       if (isPendingIntent) {
         intent = arguments[2];
         pendingIntentFlags = arguments[3];
+      } else if (intentIndex >= 0) {
+        intent = arguments[intentIndex];
       } else {
         for (const arg of arguments) {
           if (arg && arg.$className === "android.content.Intent") {
@@ -14740,12 +14747,12 @@ std_string_c_str (StdString * self)
       return resumed;
     },
     stageMod: function(type, key, val, extraType, decisionId) {
-      if (matchesActiveDecision(decisionId)) {
+      if (matchesActiveDecision(decisionId) && activeIntentPresent) {
         modQueue.push({ type, key, val, extraType });
         send("[+] Modification staged: " + type + (extraType ? " (" + extraType + ")" : ""));
         return true;
       } else {
-        send("[!] Error: No intent blocked to modify.");
+        send("[!] Error: No matching editable Intent is blocked.");
         return false;
       }
     },

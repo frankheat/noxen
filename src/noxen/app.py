@@ -441,8 +441,15 @@ class NoxenApp(App):
             )
 
 
+    def _current_intent_is_null(self) -> bool:
+        surface = (self._current_intercepted_entry or {}).get("attackSurface") or {}
+        return surface.get("intentPresent") is False
+
     def _enter_edit_mode(self):
         if not self._current_intercepted_entry or self._edit_mode:
+            return
+        if self._current_intent_is_null():
+            self.write_cmd("[red]Cannot edit: Intent is null[/red]")
             return
         original = self._current_intercepted_entry.get("intent", {}) or {}
         draft = apply_mods_to_intent(original, self._staged_mods)
@@ -552,7 +559,7 @@ class NoxenApp(App):
         self.refresh_bindings()
         try:
             still_intercepted = "intercepted" in self.query_one("#intercept_input_bar").classes
-            self.query_one("#btn_edit").disabled = not still_intercepted
+            self.query_one("#btn_edit").disabled = not still_intercepted or self._current_intent_is_null()
             if still_intercepted:
                 self.query_one("#btn_forward", Button).disabled = False
                 self.query_one("#btn_drop", Button).disabled = False
@@ -585,6 +592,8 @@ class NoxenApp(App):
             pass
 
     def _mod_safety_error(self, mod: tuple) -> str | None:
+        if self._current_intent_is_null():
+            return "Cannot modify: Intent is null"
         mod_type, key, _value, _extra_type = mod
         if mod_type not in {"extra_add", "extra_rem"}:
             return None
@@ -2266,6 +2275,7 @@ class NoxenApp(App):
                 intercept_output = self.query_one("#intercept_output", RichLog)
                 intercept_output.clear()
                 intercept_output.write(rendered)
+                self.query_one("#btn_edit", Button).disabled = not self._intent_blocked or self._current_intent_is_null()
             except Exception:
                 pass
 
@@ -2391,7 +2401,7 @@ class NoxenApp(App):
                     self._set_intercept_action_button_classes(edit)
                 fwd.disabled = not is_intercepted
                 drp.disabled = not is_intercepted
-                edit.disabled = not is_intercepted
+                edit.disabled = not is_intercepted or self._current_intent_is_null()
                 if not is_intercepted and self._edit_mode:
                     self._exit_edit_mode()
                 self.refresh_bindings()

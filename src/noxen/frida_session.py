@@ -559,6 +559,12 @@ class FridaSession:
             return False
         if not isinstance(payload.get("infoIntent"), dict):
             return False
+        surface = payload.get("attackSurface")
+        if isinstance(surface, dict) and "intentPresent" in surface:
+            if type(surface["intentPresent"]) is not bool:
+                return False
+            if surface["intentPresent"] is False and payload["infoIntent"]:
+                return False
         stack = payload.get("stackTrace")
         if not isinstance(stack, list) or not all(isinstance(frame, str) for frame in stack):
             return False
