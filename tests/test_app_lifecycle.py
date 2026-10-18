@@ -165,7 +165,6 @@ class AppLifecycleTests(unittest.TestCase):
             query_one=lambda *_args, **_kwargs: table,
             _get_filtered_sorted=lambda: [],
             _fill_table_rows=lambda _table, _filtered: None,
-            _restore_cursor=lambda _table, _filtered, _saved: None,
         )
 
         NoxenApp._refresh_history_table(fake_app)
@@ -188,12 +187,8 @@ class _FakeHistoryTable:
     def __init__(self):
         self.columns = {}
 
-    def clear(self, columns=False):
-        if columns:
-            self.columns = {}
-
-    def add_column(self, _label, *, key=None, width=None):
-        self.columns[key] = width
+    def configure_columns(self, columns):
+        self.columns = {key: width for key, label, width in columns}
 
 
 if __name__ == "__main__":

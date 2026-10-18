@@ -8,7 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from textual.widgets import DataTable, Input
+from textual.widgets import Input
+from noxen.history_table import HistoryTable
 
 from tests.ui_test_case import IsolatedAppTestCase, SettingsIsolationMixin
 
@@ -257,4 +258,4 @@ class HistoryStorageFailureUITests(IsolatedAppTestCase):
                 self.assertEqual(app._all_intents[2]["outcome"], "dropped")
                 app.query_one("#main_tabs").active = "tab_history"
                 await pilot.pause()
-                self.assertEqual(app.query_one("#history_table", DataTable).row_count, 3)
+                self.assertEqual(app.query_one("#history_table", HistoryTable).row_count, 3)

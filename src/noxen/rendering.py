@@ -56,6 +56,7 @@ _HISTORY_SEARCH_MAX_DEPTH = 12
 _HISTORY_SEARCH_MAX_NODES = 400
 _HISTORY_SEARCH_MAX_TERM = 2048
 _HISTORY_SEARCH_MAX_TEXT = 32768
+_HISTORY_OUTCOME_GLYPHS = {"forwarded": "→", "modified_forwarded": "✎→", "dropped": "✗"}
 
 def history_outcome_cell(
     outcome: str | None,
@@ -64,11 +65,11 @@ def history_outcome_cell(
     modification_error: str | None = None,
 ) -> Text:
     if outcome == "forwarded":
-        cell = Text("→", style=f"bold {success_color}")
+        cell = Text(_HISTORY_OUTCOME_GLYPHS[outcome], style=f"bold {success_color}")
     elif outcome == "modified_forwarded":
-        cell = Text("✎→", style=f"bold {success_color}")
+        cell = Text(_HISTORY_OUTCOME_GLYPHS[outcome], style=f"bold {success_color}")
     elif outcome == "dropped":
-        cell = Text("✗", style=f"bold {error_color}")
+        cell = Text(_HISTORY_OUTCOME_GLYPHS[outcome], style=f"bold {error_color}")
     else:
         cell = Text("")
     if modification_error:
@@ -356,6 +357,22 @@ def filter_sort_history_entries(
     return filtered
 
 
+def history_row_texts(entry: dict) -> dict[str, str]:
+    """Plain table values, shared by width measurement and visible-row rendering."""
+    info = entry.get("intent", {}) or {}
+    timestamp = entry.get("timestamp", "")
+    outcome = _HISTORY_OUTCOME_GLYPHS.get(entry.get("outcome"), "")
+    if entry.get("modification_error"):
+        outcome += " !"
+    return {
+        "id": str(entry["id"]), "outcome": outcome,
+        "time": timestamp[:19].replace("T", " ") if len(timestamp) >= 19 else timestamp,
+        "method": str(entry.get("method") or ""), "class": str(entry.get("class") or ""),
+        "component": str(info.get("component") or ""), "action": str(info.get("action") or ""),
+        "extras": "✓" if info.get("extras") else "",
+    }
+
+
 def history_row_values(
     entry: dict,
     visible_columns: set[str],
@@ -365,19 +382,10 @@ def history_row_values(
 ) -> list:
     info = entry.get("intent", {}) or {}
     extras = info.get("extras", {}) or {}
-    timestamp = entry.get("timestamp", "")
-    time_str = timestamp[:19].replace("T", " ") if len(timestamp) >= 19 else timestamp
     outcome = entry.get("outcome")
-    all_values = {
-        "id":        str(entry["id"]),
-        "outcome":   history_outcome_cell(outcome, success_color, error_color, entry.get("modification_error")),
-        "time":      time_str,
-        "method":    str(entry.get("method") or ""),
-        "class":     str(entry.get("class") or ""),
-        "component": str(info.get("component") or ""),
-        "action":    str(info.get("action") or ""),
-        "extras":    Text("✓", style=success_color) if extras else "",
-    }
+    all_values = history_row_texts(entry)
+    all_values["outcome"] = history_outcome_cell(outcome, success_color, error_color, entry.get("modification_error"))
+    all_values["extras"] = Text("✓", style=success_color) if extras else ""
     return [all_values[key] for key, _label in columns if key in visible_columns]
 
 

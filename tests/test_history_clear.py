@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from textual.widgets import DataTable, RichLog
+from textual.widgets import RichLog
+from noxen.history_table import HistoryTable
 
 from tests.ui_test_case import IsolatedAppTestCase, SettingsIsolationMixin
 
@@ -183,7 +184,7 @@ class HistoryClearUITests(IsolatedAppTestCase):
                 with patch.object(app, "call_from_thread", side_effect=lambda callback, *args: callback(*args)):
                     app._on_history_intent(payload("KEEP"), 1)
                 await pilot.pause()
-                table = app.query_one("#history_table", DataTable)
+                table = app.query_one("#history_table", HistoryTable)
                 detail = app.query_one("#history_detail", RichLog)
                 selected = app._history_selected_entry
                 lines = list(detail.lines)

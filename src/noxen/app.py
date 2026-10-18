@@ -67,6 +67,7 @@ from noxen.filters import FilterManager
 from noxen.frida_devices import enumerate_preferred_devices
 from noxen.frida_session import FridaSession, SessionConfig
 from noxen.history_columns import normalize_history_column_widths
+from noxen.history_table import HistoryTable
 from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
@@ -90,7 +91,6 @@ from noxen.modals import (
 )
 from noxen.rendering import (
     filter_sort_history_entries,
-    history_row_values,
     history_search_text,
     payload_to_history_entry,
     render_intent_detail,
@@ -1128,7 +1128,7 @@ class NoxenApp(App):
 
     def _focus_history_main_panel(self) -> None:
         try:
-            self.query_one("#history_table", DataTable).focus()
+            self.query_one("#history_table", HistoryTable).focus()
         except Exception:
             LOGGER.debug("Unable to focus history table", exc_info=True)
 
@@ -1296,7 +1296,7 @@ class NoxenApp(App):
                     yield Label("", id="filter_bar_spacer")
                     yield Input(id="history_search", placeholder="Search", select_on_focus=False)
                     yield Button("⊟", id="btn_columns")
-                yield DataTable(id="history_table", cursor_type="row")
+                yield HistoryTable(id="history_table")
                 yield RichLog(id="history_detail", markup=True, highlight=False, auto_scroll=False)
             with TabPane(" Info app ", id="tab_info"):
                 with Horizontal(id="info_split"):
@@ -2128,7 +2128,7 @@ class NoxenApp(App):
             if not self._history_refresh_pending and not self._history_columns_dirty:
                 return
         try:
-            table = self.query_one("#history_table", DataTable)
+            table = self.query_one("#history_table", HistoryTable)
             has_columns = len(table.columns) > 0 and not self._history_columns_dirty
         except Exception:
             self._refresh_history_table()
@@ -2197,56 +2197,26 @@ class NoxenApp(App):
         )
 
     def _fill_table_rows(self, table, filtered):
-        """Add rows to table from a filtered+sorted entry list."""
-        colors = semantic_colors(self.current_theme.dark)
-        for entry in filtered:
-            row_vals = history_row_values(
-                entry,
-                self._history_visible_cols,
-                _HISTORY_COLUMNS,
-                colors.success,
-                colors.error,
-            )
-            table.add_row(*row_vals, key=str(entry["id"]))
-
-    def _restore_cursor(self, table, filtered, saved_sel_id):
-        """Restore cursor to previously selected row by id."""
-        if not saved_sel_id:
-            return
-        idx = next((i for i, e in enumerate(filtered) if str(e.get("id")) == saved_sel_id), None)
-        if idx is None:
-            return
-        table.move_cursor(row=idx, animate=False)
-        def _restore(t=table, sid=saved_sel_id):
-            # A user selection made after rebuilding takes precedence over this timer.
-            if not self._history_selected_entry or str(self._history_selected_entry["id"]) != sid:
-                return
-            try:
-                for i, rk in enumerate(t.rows):
-                    if str(rk.value) == sid:
-                        t.move_cursor(row=i, animate=False)
-                        break
-            except Exception:
-                pass
-        self.set_timer(0.1, _restore)
+        """Give the table the complete result, without materializing every cell."""
+        table.set_entries(filtered, notify=False)
+        # Result and detail must agree on the first frame, not after a queued
+        # highlight message from the table has made another trip through the UI.
+        self._show_history_entry(table.selected_id)
 
     def _refresh_rows_only(self):
-        """Rebuild rows without touching columns (sort stable, columns unchanged)."""
+        """Update the ordered result while keeping columns and event selection."""
         if self._active_tab != "tab_history":
             with self._history_lock:
                 self._history_refresh_pending = True
             return
         try:
-            table = self.query_one("#history_table", DataTable)
+            table = self.query_one("#history_table", HistoryTable)
         except Exception:
             return
         with self._history_lock:
             self._history_refresh_pending = False
-        saved_sel_id = str(self._history_selected_entry["id"]) if self._history_selected_entry else None
         filtered = self._get_filtered_sorted()
-        table.clear(columns=False)
         self._fill_table_rows(table, filtered)
-        self._restore_cursor(table, filtered, saved_sel_id)
 
     def _refresh_history_table(self):
         if self._active_tab != "tab_history":
@@ -2255,26 +2225,25 @@ class NoxenApp(App):
                 self._history_columns_dirty = True
             return
         try:
-            table = self.query_one("#history_table", DataTable)
+            table = self.query_one("#history_table", HistoryTable)
         except Exception:
             return
         with self._history_lock:
             self._history_refresh_pending = False
             self._history_columns_dirty = False
-        saved_sel_id = str(self._history_selected_entry["id"]) if self._history_selected_entry else None
         filtered = self._get_filtered_sorted()
 
         # Rebuild columns with sort indicator (only visible ones)
         visible = self._history_visible_cols
-        table.clear(columns=True)
+        columns = []
         for key, label in _HISTORY_COLUMNS:
             if key not in visible:
                 continue
             indicator = (" ↓" if self._sort_reverse else " ↑") if key == self._sort_column else ""
-            table.add_column(label + indicator, key=key, width=self._history_column_widths.get(key))
+            columns.append((key, label + indicator, self._history_column_widths.get(key)))
 
+        table.configure_columns(columns)
         self._fill_table_rows(table, filtered)
-        self._restore_cursor(table, filtered, saved_sel_id)
 
 
     def _on_intercept_display(self, _text, entry_id=None, decision_id=None):
@@ -2334,25 +2303,28 @@ class NoxenApp(App):
                 except Exception:
                     pass
             return
-        if event.data_table.id != "history_table":
+
+    def on_history_table_row_highlighted(self, event: HistoryTable.RowHighlighted):
+        # A queued highlight from an older result must not replace a new selection.
+        if event.entry_id != event.table.selected_id:
             return
-        if event.row_key is None or event.row_key.value is None:
-            return
-        entry_id = int(event.row_key.value)
+        self._show_history_entry(event.entry_id)
+
+    def _show_history_entry(self, entry_id: int | None):
         entry = next((e for e in self._all_intents if e["id"] == entry_id), None)
-        if entry:
-            self._history_selected_entry = entry
-            try:
-                detail = self.query_one("#history_detail", RichLog)
-                detail.clear()
+        self._history_selected_entry = entry
+        try:
+            detail = self.query_one("#history_detail", RichLog)
+            detail.clear()
+            if entry is not None:
                 detail.write(self._render_markup(render_intent_detail(
                     entry,
                     show_stack=self._history_show_stack,
                     stack_depth=self._history_stack_depth,
                 )))
                 detail.scroll_home(animate=False)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
         table_id = event.data_table.id
@@ -2365,9 +2337,11 @@ class NoxenApp(App):
             else:
                 self._refresh_info_permissions()
             return
-        if event.data_table.id != "history_table":
+
+    def on_history_table_header_selected(self, event: HistoryTable.HeaderSelected):
+        col_key = event.column_key
+        if col_key not in event.table.columns:
             return
-        col_key = event.column_key.value
         if self._sort_column == col_key:
             self._sort_reverse = not self._sort_reverse
         else:
@@ -2465,7 +2439,7 @@ class NoxenApp(App):
             ), notify=True)
             return
         try:
-            self.query_one("#history_table", DataTable).clear(columns=False)
+            self.query_one("#history_table", HistoryTable).clear()
             self.query_one("#history_detail", RichLog).clear()
         except Exception:
             pass
@@ -2675,7 +2649,7 @@ class NoxenApp(App):
                 event.stop()
                 try:
                     self.query_one("#history_search", Input).value = ""
-                    self.query_one("#history_table", DataTable).focus()
+                    self.query_one("#history_table", HistoryTable).focus()
                 except Exception:
                     pass
             return

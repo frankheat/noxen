@@ -4,9 +4,10 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from textual.widgets import DataTable, RichLog
+from textual.widgets import RichLog
 
 from noxen.app import NoxenApp
+from noxen.history_table import HistoryTable
 from noxen.exporting import write_history_export
 from noxen.frida_session import SessionConfig
 from tests.ui_test_case import IsolatedAppTestCase
@@ -51,9 +52,9 @@ class HistoryBatchingTests(IsolatedAppTestCase):
                 self.assertEqual(len(json.loads(export_path.read_text())), 60)
                 app.query_one("#main_tabs").active = "tab_history"
                 await pilot.pause()
-                table = app.query_one("#history_table", DataTable)
+                table = app.query_one("#history_table", HistoryTable)
                 self.assertEqual(table.row_count, 60)
-                self.assertEqual([key.value for key in table.rows], [str(i) for i in range(60, 0, -1)])
+                self.assertEqual([table.entry_at(i)['id'] for i in range(table.row_count)], list(range(60, 0, -1)))
                 self.assertEqual(table_refresh.call_count, 1)
                 self.assertFalse(app._history_refresh_pending)
 
@@ -71,7 +72,7 @@ class HistoryBatchingTests(IsolatedAppTestCase):
                     app._do_history_refresh()
                     app._do_history_refresh()
                     self.assertEqual(rebuild.call_count, 1)
-                    self.assertEqual(app.query_one("#history_table", DataTable).row_count, 30)
+                    self.assertEqual(app.query_one("#history_table", HistoryTable).row_count, 30)
 
     async def test_outcome_without_a_new_capture_updates_selected_detail_on_the_timer(self):
         app = self.make_app()
@@ -80,7 +81,7 @@ class HistoryBatchingTests(IsolatedAppTestCase):
             await pilot.pause()
             await asyncio.to_thread(self.emit, app, 0, 1)
             await pilot.pause(.2)
-            self.assertEqual(app.query_one("#history_table", DataTable).row_count, 1)
+            self.assertEqual(app.query_one("#history_table", HistoryTable).row_count, 1)
             await asyncio.to_thread(app._update_outcome, 1, "dropped")
             await pilot.pause(.2)
             detail = app.query_one("#history_detail", RichLog)
@@ -115,9 +116,9 @@ class HistoryBatchingTests(IsolatedAppTestCase):
                     app._do_history_refresh()
                 self.assertEqual(errors, [])
                 self.assertTrue(app._history_refresh_pending)
-                self.assertEqual(app.query_one("#history_table", DataTable).row_count, 1)
+                self.assertEqual(app.query_one("#history_table", HistoryTable).row_count, 1)
                 app._do_history_refresh()
-                self.assertEqual(app.query_one("#history_table", DataTable).row_count, 2)
+                self.assertEqual(app.query_one("#history_table", HistoryTable).row_count, 2)
                 self.assertFalse(app._history_refresh_pending)
                 self.assertEqual(len(app.db._load_all()), 2)
 
@@ -133,7 +134,7 @@ class HistoryBatchingTests(IsolatedAppTestCase):
                 self.assertEqual(app._current_decision_id, "decision-7")
                 self.assertEqual(app._current_intercepted_entry["intent"]["action"], "EVENT_7")
                 self.assertTrue(app._history_refresh_pending)
-                self.assertEqual(app.query_one("#history_table", DataTable).row_count, 0)
+                self.assertEqual(app.query_one("#history_table", HistoryTable).row_count, 0)
 
     async def test_hidden_column_changes_are_applied_when_history_is_opened(self):
         app = self.make_app()
@@ -153,11 +154,11 @@ class HistoryBatchingTests(IsolatedAppTestCase):
                 self.assertTrue(app._history_columns_dirty)
                 app.query_one("#main_tabs").active = "tab_history"
                 await pilot.pause()
-                table = app.query_one("#history_table", DataTable)
-                self.assertEqual([key.value for key in table.columns], ["id", "action"])
-                action_column = next(column for key, column in table.columns.items() if key.value == "action")
+                table = app.query_one("#history_table", HistoryTable)
+                self.assertEqual(list(table.columns), ["id", "action"])
+                action_column = table.columns['action']
                 self.assertEqual(action_column.width, 37)
-                self.assertIn("↑", action_column.label.plain)
+                self.assertIn("↑", action_column.label)
                 self.assertEqual(table.row_count, 3)
                 self.assertFalse(app._history_columns_dirty)
 
@@ -170,7 +171,7 @@ class HistoryBatchingTests(IsolatedAppTestCase):
                 await asyncio.to_thread(self.emit, app, 0, 20)
                 app._do_history_refresh()
                 await pilot.pause(.2)
-                table = app.query_one("#history_table", DataTable)
+                table = app.query_one("#history_table", HistoryTable)
                 table.move_cursor(row=5)
                 await pilot.pause(.2)
                 await asyncio.to_thread(app._update_outcome, 20, "dropped")
