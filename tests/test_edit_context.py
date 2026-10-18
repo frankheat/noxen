@@ -312,6 +312,8 @@ class EditContextUITests(unittest.IsolatedAsyncioTestCase):
                             headers = list(app.query(".ef_section"))
                             self.assertEqual([str(h.render()) for h in headers],
                                              ["Routing", "Base Intent", "Categories", "Extras", "Selector", "ClipData"])
+                            self.assertEqual([str(label.render()) for label in app.query(".ef_section_meta")],
+                                             ["Derived from capture", "Read-only", "Read-only"])
                             self.assertEqual(len({str(h.styles.color) for h in headers}), 1)
                             self.assertEqual(len({h.content_region.x for h in headers}), 1)
                             field = app.query_one("#ef_action", Input)

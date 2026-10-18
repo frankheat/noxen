@@ -609,15 +609,32 @@ Switch.-on > .switch--slider {
 .ef_section { width: auto; text-style: bold; color: $foreground; }
 .ef_section_meta { width: auto; margin-left: 2; color: $foreground-muted; }
 .ef_section_spacer { width: 1fr; }
-.ef_x_row { height: 1; align: left middle; }
-.ef_x_key_label { width: 18; }
+.ef_x_row { height: auto; min-height: 1; align: left top; }
+.ef_x_row Input { height: 1; }
+.ef_x_key_cell, .ef_x_key_input, .ef_x_key_header {
+    width: 30%; min-width: 18; max-width: 40;
+}
+.ef_x_key_cell { height: auto; }
+.ef_x_key_label {
+    width: 1fr; height: auto; min-height: 1; padding-right: 1;
+    text-wrap: wrap; text-overflow: fold;
+}
+.ef_x_key_label:focus { background: $boost; }
+.ef_x_key_label > .extra-key--ellipsis { color: $foreground-muted; }
+.ef_x_key_view {
+    width: auto; min-width: 0; height: 1; margin-top: 1;
+    padding: 0 1; border: none; background: $panel; color: $foreground-muted;
+    text-style: bold; tint: transparent; background-tint: $surface 0%;
+}
+.ef_x_key_view:hover, .ef_x_key_view:focus, .ef_x_key_view.-active {
+    color: $accent; background: $boost;
+}
 .ef_x_type_label { width: 25; color: $foreground-muted; }
 .ef_x_columns { height: 1; color: $foreground-muted; text-style: bold; }
-.ef_x_key_header { width: 18; }
 .ef_x_type_header { width: 25; }
 .ef_x_value_header { width: 1fr; padding-left: 2; }
 .ef_x_remove_header { width: 3; margin-right: 2; }
-.ef_x_key_input { width: 18; padding: 0; }
+.ef_x_key_input { padding: 0; }
 .ef_x_type_select { width: 25; height: 1; }
 .ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
 .ef_x_rm {
@@ -639,7 +656,7 @@ Switch.-on > .switch--slider {
     height: auto;
     layout: grid;
     grid-size: 1;
-    grid-rows: 1;
+    grid-rows: auto;
     grid-gutter: 1 0;
 }
 #ef_categories { height: auto; }

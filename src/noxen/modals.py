@@ -15,6 +15,7 @@ from textual.widgets import (
     Rule,
     Select,
     Switch,
+    TextArea,
 )
 
 from noxen.filters import FilterManager
@@ -25,6 +26,46 @@ from noxen.history_columns import (
 )
 from noxen.textual_compat import is_select_empty
 from noxen.ui_theme import semantic_colors, themed_markup
+
+
+class ExtraKeyModal(ModalScreen):
+    """Read a captured key without changing the editor draft."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+    CSS = """
+    ExtraKeyModal { align: center middle; }
+    #extra_key_dialog {
+        width: 90%; max-width: 110; height: 75%;
+        background: $surface; border: solid $foreground-muted; padding: 1 2;
+    }
+    #extra_key_title { text-style: bold; margin-bottom: 1; }
+    #extra_key_text { height: 1fr; }
+    #extra_key_buttons { height: 3; align: right middle; margin-top: 1; }
+    #extra_key_buttons Button {
+        width: auto; min-width: 10; height: 3; margin-left: 1; padding: 0 1;
+        border: round $foreground-muted; background: transparent; color: $foreground;
+        text-style: bold; tint: transparent; background-tint: $surface 0%;
+    }
+    #extra_key_close:hover, #extra_key_close:focus, #extra_key_close.-active {
+        border: round $accent; color: $accent;
+    }
+    """
+
+    def __init__(self, key: str):
+        super().__init__()
+        self._key = key
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="extra_key_dialog"):
+            yield Label("Extra key (read-only)", id="extra_key_title")
+            yield TextArea(self._key, read_only=True, id="extra_key_text")
+            with Horizontal(id="extra_key_buttons"):
+                yield Button("Close", id="extra_key_close")
+
+    def on_button_pressed(self, event: Button.Pressed):
+        event.stop()
+        if event.button.id == "extra_key_close":
+            self.dismiss()
 
 
 class _VisibleTree(DirectoryTree):

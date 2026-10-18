@@ -82,6 +82,7 @@ from noxen.intent_mods import (
 from noxen.logging_ui import is_debug_log, log_debug, log_error, log_info, log_success, log_warning
 from noxen.modals import (
     ColumnSelectModal,
+    ExtraKeyModal,
     FileBrowserModal,
     HelpModal,
     FilterModal,
@@ -128,6 +129,53 @@ INTERCEPT_ACTION_BUTTON_CLASSES = (
     "drop-ready",
     "edit-ready",
 )
+
+
+class ExtraKeyLabel(Label):
+    """Bounded plain-text preview; the original key stays available on demand."""
+
+    BINDINGS = [("enter", "view_key", "View key")]
+    COMPONENT_CLASSES = {"extra-key--ellipsis"}
+    PREVIEW_LIMIT = 96
+
+    def __init__(self, key: str):
+        # Escape control characters only in the preview, never in the stored key.
+        preview = "".join(char if char.isprintable() else repr(char)[1:-1]
+                          for char in key[:self.PREVIEW_LIMIT])
+        self.truncated = len(key) > self.PREVIEW_LIMIT or len(preview) > self.PREVIEW_LIMIT
+        preview = preview[:self.PREVIEW_LIMIT]
+        self._preview = preview
+        super().__init__(Text(preview + ("…" if self.truncated else "")), classes="ef_x_key_label")
+        self._key = key
+        self.can_focus = self.truncated
+
+    def notify_style_update(self) -> None:
+        super().notify_style_update()
+        if self.is_mounted and self.truncated:
+            self.call_after_refresh(self._update_preview)
+
+    def _update_preview(self) -> None:
+        text = Text(self._preview)
+        if self.truncated:
+            text.append("…", self.get_component_rich_style("extra-key--ellipsis"))
+        self.update(text)
+
+    def on_mount(self) -> None:
+        self._update_preview()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.can_focus = self.truncated or event.size.height > 1
+        self.tooltip = "Click or press Enter to view the full key" if self.can_focus else None
+        if not self.can_focus and self.has_focus:
+            self.blur()
+
+    def action_view_key(self):
+        if self.can_focus:
+            self.app.push_screen(ExtraKeyModal(self._key))
+
+    def on_click(self, event: events.Click):
+        event.stop()
+        self.action_view_key()
 
 
 class _EditValidationError(ValueError):
@@ -664,8 +712,12 @@ class NoxenApp(App):
         else:
             editable = simple_type is not None and simple_type != "null"
             type_label = simple_type or java_type_display(java_type)
+            key_label = ExtraKeyLabel(key)
+            key_widgets = [key_label]
+            if key_label.truncated:
+                key_widgets.append(Button("View full key", id=f"ef_xview_{n}", classes="ef_x_key_view"))
             row = Horizontal(
-                Label(key, classes="ef_x_key_label"),
+                Vertical(*key_widgets, classes="ef_x_key_cell"),
                 Label(type_label, classes="ef_x_type_label"),
                 Input(id=f"ef_xv_{n}", value=value, disabled=not editable),
                 Button("✕", id=f"ef_xrm_{n}", classes="ef_x_rm", disabled=not removable),
@@ -909,6 +961,10 @@ class NoxenApp(App):
             return
         elif event.button.id == "ef_add_cat":
             self._add_edit_category_row("")
+            return
+        elif (event.button.id or "").startswith("ef_xview_"):
+            n = int(event.button.id.split("_")[-1])
+            self.app.push_screen(ExtraKeyModal(self._edit_extra_rows[n]["key"]))
             return
         elif (event.button.id or "").startswith("ef_crm_"):
             n = int(event.button.id.split("_")[-1])
@@ -1171,7 +1227,6 @@ class NoxenApp(App):
                     yield Static(id="ef_call_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_section_header"):
                         yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
-                        yield Label("Editable", classes="ef_section_meta")
                     yield Static(id="ef_component_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_row"):
                         yield Label("Action", classes="ef_label")
