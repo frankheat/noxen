@@ -26,6 +26,34 @@ def plain(rendered: str) -> str:
 
 
 class RenderingTests(unittest.TestCase):
+    def test_service_components_keep_metadata_without_routing_in_both_views(self):
+        info = {"component": "example/.Work", "selector": {
+            "kind": "intent", "component": "example/.Other", "flags": 0,
+        }}
+        surface = {"serviceComponents": {
+            "base": {"component": "example/.Work", "exported": False,
+                     "permission": {"name": "example.SERVICE", "level": "signature"}},
+            "selector": {"component": "example/.Other", "unavailable": True},
+        }, "intentExplicit": True, "selectorRoutingRole": "active", "targetComponent": "wrong/.Target"}
+        for method in ("startService", "startForegroundService", "bindService", "getService", "onStartCommand", "onBind"):
+            for text in (
+                plain(render_intent_detail({"id": 1, "method": method, "intent": info, "attackSurface": surface})),
+                plain(render_intercept_block({"methodName": method, "infoIntent": info,
+                                               "attackSurface": surface}, 1, False, 1)),
+            ):
+                base, selector = text.split("[SELECTOR]", 1)
+                self.assertIn("Required Permission : example.SERVICE (signature)", base)
+                self.assertNotIn("example.SERVICE", selector)
+                self.assertIn("Details             : unavailable", selector)
+                for value in ("[ROUTING]", "wrong/.Target", "ACTIVE", "Receiver Perm"):
+                    self.assertNotIn(value, text)
+        info["component"] = None
+        text = plain(render_intent_detail({"id": 1, "method": "getService", "intent": info,
+                                          "attackSurface": surface, "pendingIntentFlags": 0x04000000}))
+        self.assertIn("Component     : None", text)
+        self.assertNotIn("example.SERVICE", text)  # no mismatched base metadata
+        self.assertIn("[PENDING INTENT]", text)
+
     def test_broadcast_component_metadata_and_call_permission_are_separate(self):
         surface = {"broadcastComponents": {
             "base": {"component": "example/.Base", "exported": True,
@@ -709,25 +737,30 @@ class RenderingTests(unittest.TestCase):
         del entry["intent"]["mimeType"]
         self.assertNotIn("MIME Type", plain(render_intent_detail(entry)))
 
-    def test_render_intent_detail_target_states(self):
+    def test_legacy_service_candidates_are_not_presented_as_actual_components(self):
         base = {
             "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",
             "class": "com.example.MainActivity", "method": "startService", "stackTrace": [],
             "intent": {},
         }
         unresolved = dict(base, attackSurface={"intentExplicit": False})
-        self.assertIn("  Target        : (unresolved)", plain(render_intent_detail(unresolved)))
+        self.assertNotIn("  Target", plain(render_intent_detail(unresolved)))
 
         unreadable = dict(base, attackSurface={
             "intentExplicit": True, "targetComponent": "com.other/.X", "targetUnreadable": True,
         })
-        self.assertIn("  Target        : com.other/.X (couldn't read — not visible)", plain(render_intent_detail(unreadable)))
+        self.assertNotIn("com.other/.X", plain(render_intent_detail(unreadable)))
 
         resolved_single = dict(base, attackSurface={
             "intentExplicit": False, "targetComponent": "com.example/.Activity8",
             "targetResolved": True, "targetExported": True,
         })
-        self.assertIn("  Target        : com.example/.Activity8 (resolved)", plain(render_intent_detail(resolved_single)))
+        self.assertNotIn("com.example/.Activity8", plain(render_intent_detail(resolved_single)))
+        resolved_single["intent"] = {"component": "com.example/.Activity8"}
+        text = plain(render_intent_detail(resolved_single))
+        self.assertIn("Component     : com.example/.Activity8", text)
+        self.assertIn("Exported            : true", text)
+        self.assertNotIn("[ROUTING]", text)
 
     def test_implicit_intent_scope_and_package_row(self):
         base = {

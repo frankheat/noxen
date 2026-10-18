@@ -508,6 +508,20 @@ def _is_broadcast_event(method, attack_surface: dict) -> bool:
             or "broadcastComponents" in attack_surface or attack_surface.get("targetType") == "receiver")
 
 
+def _is_service_event(method, attack_surface: dict) -> bool:
+    return (method in {"startService", "startForegroundService", "bindService", "getService", "onStartCommand", "onBind"}
+            or "serviceComponents" in attack_surface or attack_surface.get("targetType") == "service")
+
+
+def _has_component_metadata(attack_surface: dict) -> bool:
+    return any(key in attack_surface for key in ("activityComponents", "broadcastComponents", "serviceComponents"))
+
+
+def _is_component_event(method, attack_surface: dict) -> bool:
+    return (_is_activity_event(method, attack_surface) or _is_broadcast_event(method, attack_surface)
+            or _is_service_event(method, attack_surface))
+
+
 def _broadcast_call_lines(method, attack_surface: dict, *, row=_row) -> list[str]:
     if method not in {"sendBroadcast", "sendOrderedBroadcast"}:
         return []
@@ -522,9 +536,12 @@ def _broadcast_call_lines(method, attack_surface: dict, *, row=_row) -> list[str
 def _captured_component_info(component, attack_surface: dict, slot: str) -> dict | None:
     if not component:
         return None
-    metadata_key = "broadcastComponents" if "broadcastComponents" in attack_surface else "activityComponents"
-    components = attack_surface.get(metadata_key)
-    if isinstance(components, dict):
+    for metadata_key in ("activityComponents", "broadcastComponents", "serviceComponents"):
+        if metadata_key not in attack_surface:
+            continue
+        components = attack_surface[metadata_key]
+        if not isinstance(components, dict):
+            return None
         details = components.get(slot)
         return details if isinstance(details, dict) and details.get("component") == component else None
     # Older captures stored details only for the selected target. Reuse them only
@@ -548,7 +565,7 @@ def _component_lines(component, details, *, row=_row, indent=_TREE_INDENT) -> li
 
 def _routing_lines(info: dict, attack_surface: dict, *, method=None, row=_row, include_target=True) -> list[str]:
     """Captured routing metadata, not Intent fields or proof of delivery."""
-    if _is_activity_event(method, attack_surface) or _is_broadcast_event(method, attack_surface):
+    if _is_component_event(method, attack_surface):
         return []
     lines = []
     if "intentExplicit" in attack_surface:
@@ -968,7 +985,7 @@ def _edit_context_row(label: str, value: str) -> str:
 
 def render_edit_context(info: dict, attack_surface: dict, method=None) -> dict[str, str]:
     """Reuse bounded, read-only trees; editable outer grant flags live in the form."""
-    named_components = _is_activity_event(method, attack_surface) or _is_broadcast_event(method, attack_surface)
+    named_components = _is_component_event(method, attack_surface)
     selector_info = info.get("selector")
     selector_details = _captured_component_info(
         selector_info.get("component"), attack_surface, "selector",
@@ -986,7 +1003,7 @@ def render_edit_context(info: dict, attack_surface: dict, method=None) -> dict[s
     call = _broadcast_call_lines(method, attack_surface, row=_edit_context_row)
     if call:
         sections["call"] = "\n".join(call)
-    if named_components and (info.get("component") or "activityComponents" in attack_surface or "broadcastComponents" in attack_surface):
+    if named_components and (info.get("component") or _has_component_metadata(attack_surface)):
         sections["component"] = "\n".join(_component_lines(
             info.get("component"), _captured_component_info(info.get("component"), attack_surface, "base"),
             row=_edit_context_row, indent=" " * 16,
@@ -1012,7 +1029,7 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     """The shared section stack: caller context, payload, pending intent, extras."""
     out = [_section("HOOK")]
     out += _hook_caller_lines(class_name, method, attack_surface)
-    named_components = _is_activity_event(method, attack_surface) or _is_broadcast_event(method, attack_surface)
+    named_components = _is_component_event(method, attack_surface)
     routing = _routing_lines(info, attack_surface, method=method)
     if routing:
         out += [""] + routing
@@ -1020,7 +1037,7 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     out.append(_section("CAPTURED INTENT PAYLOAD"))
     out += _payload_lines(
         info, component_details=_captured_component_info(info.get("component"), attack_surface, "base") if named_components else None,
-        show_component=named_components and ("activityComponents" in attack_surface or "broadcastComponents" in attack_surface),
+        show_component=named_components and _has_component_metadata(attack_surface),
     )
     selector_info = info.get("selector")
     selector_details = _captured_component_info(

@@ -881,8 +881,7 @@ var RECEIVING_METHODS = {
   "onReceive": true, "onStartCommand": true, "onBind": true
 };
 
-// Sending methods — the exposed component is the intent's target. Maps to the
-// PackageManager component type used to resolve/query that target.
+// Known sending methods and the PackageManager type of their named components.
 var SENDING_TARGET_TYPE = {
   "startActivity": "activity", "startActivityForResult": "activity", "getActivity": "activity",
   "startService": "service", "startForegroundService": "service", "bindService": "service", "getService": "service",
@@ -945,11 +944,6 @@ function componentInfoFor(pm, targetType, cn) {
   return pm.getActivityInfo(cn, 0);
 }
 
-function fillTargetFromInfo(result, info, pm) {
-  result.targetExported = info.exported.value;
-  result.targetPermission = describePermission(pm, effectiveComponentPermission(info));
-}
-
 function componentIdentity(component) {
   if (component === null) return null;
   return String(component.getPackageName()) + "/" + String(component.getClassName());
@@ -991,76 +985,6 @@ function describeIntentComponents(intent, context, targetType) {
   return components;
 }
 
-// Match Android's resolver precedence. A base component wins. The selector is
-// consulted only when the base Intent has no component; it is not a fallback if
-// that explicit base component cannot be resolved.
-function describeIntentRouting(intent) {
-  var baseComponent = null;
-  var selector = null;
-  try { baseComponent = intent.getComponent(); } catch (e) {}
-  try { selector = intent.getSelector(); } catch (e) {}
-  var routingIntent = intent;
-  var routingComponent = baseComponent;
-  var source = "base";
-  var selectorRole = null;
-
-  if (baseComponent !== null) {
-    if (selector !== null) {
-      selectorRole = "ignored";
-      try {
-        var selectorComponent = selector.getComponent();
-        if (selectorComponent !== null && componentIdentity(selectorComponent) === componentIdentity(baseComponent)) {
-          selectorRole = "redundant";
-        }
-      } catch (e) {}
-    }
-  } else if (selector !== null) {
-    routingIntent = selector;
-    source = "selector";
-    selectorRole = "active";
-    try { routingComponent = selector.getComponent(); } catch (e) { routingComponent = null; }
-  }
-
-  var packageName = null;
-  try { packageName = routingIntent.getPackage() || null; } catch (e) {}
-  return {
-    intent: routingIntent,
-    component: routingComponent,
-    packageName: packageName,
-    source: source,
-    selectorRole: selectorRole
-  };
-}
-
-// Populate target fields on `result`: the resolved component, its exported flag and
-// required permission, plus flags for implicit resolution / unreadable / multi-receiver.
-function resolveSendTarget(pm, targetType, intent, routing, result) {
-  var cn = routing.component;
-  if (cn !== null) {
-    result.targetComponent = cn.getPackageName() + "/" + cn.getClassName();
-    try {
-      fillTargetFromInfo(result, componentInfoFor(pm, targetType, cn), pm);
-    } catch (e) {
-      // Explicit target in another, non-visible app (Android 11+ package visibility).
-      result.targetUnreadable = true;
-    }
-    return;
-  }
-  try {
-    if (targetType === "service") {
-      var ris = pm.resolveService(intent, 0);
-      if (ris !== null) fillTargetFromResolveInfo(result, ris, "serviceInfo", pm);
-    }
-  } catch (e) {}
-}
-
-function fillTargetFromResolveInfo(result, resolveInfo, infoField, pm) {
-  var info = resolveInfo[infoField].value;
-  result.targetComponent = info.packageName.value + "/" + info.name.value;
-  result.targetResolved = true;
-  fillTargetFromInfo(result, info, pm);
-}
-
 function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) {
   var result = {};
   try {
@@ -1068,12 +992,16 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
     var activityEvent = targetType === "activity" ||
       ["getIntent", "onNewIntent", "onActivityResult", "setResult"].indexOf(methodName) !== -1;
     var broadcastEvent = targetType === "receiver" || methodName === "onReceive";
+    var serviceEvent = targetType === "service" || methodName === "onStartCommand" || methodName === "onBind";
     var sendContext = (self && self.getPackageManager) ? self : firstArg;
     if (activityEvent && intent !== null) {
       result.activityComponents = describeIntentComponents(intent, sendContext, "activity");
     }
     if (broadcastEvent && intent !== null) {
       result.broadcastComponents = describeIntentComponents(intent, sendContext, "receiver");
+    }
+    if (serviceEvent && intent !== null) {
+      result.serviceComponents = describeIntentComponents(intent, sendContext, "service");
     }
     if (methodName === "sendBroadcast" || methodName === "sendOrderedBroadcast") {
       // Preserve the actual argument even when component/permission lookups fail.
@@ -1101,20 +1029,6 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
       }
       result.callerExported = info.exported.value;
       result.callerPermission = describePermission(pm, effectiveComponentPermission(info));
-    } else if (intent !== null) {
-      if (activityEvent || broadcastEvent) return result;
-      var routing = describeIntentRouting(intent);
-      result.routingSource = routing.source;
-      if (routing.selectorRole !== null) result.selectorRoutingRole = routing.selectorRole;
-      result.intentExplicit = routing.component !== null;
-      result.routingPackage = routing.packageName;
-      if (targetType) result.targetType = targetType;
-      // 'this' is the Context for ContextWrapper sends; the Context is the first
-      // argument for the static PendingIntent factories.
-      var sendPm = getPackageManagerSafe(sendContext);
-      if (sendPm && targetType) {
-        resolveSendTarget(sendPm, targetType, intent, routing, result);
-      }
     }
   } catch(e) {
     // Dynamic receiver, inner class, or component not in manifest — leave result empty

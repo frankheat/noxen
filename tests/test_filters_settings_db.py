@@ -217,6 +217,28 @@ class HistoryColumnWidthTests(unittest.TestCase):
 
 
 class ProjectDBTests(unittest.TestCase):
+    def test_service_component_metadata_roundtrip(self):
+        surface = {"serviceComponents": {
+            "base": {"component": "example/.Work", "exported": False,
+                     "permission": {"name": "example.SERVICE", "level": "signature"}},
+            "selector": {"component": "example/.Missing", "unavailable": True},
+        }}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "service.noxen")
+            db = ProjectDB(path)
+            db.create("service")
+            db.save_intent({"timestamp": "2026-10-18T08:00:00+00:00", "method": "getService",
+                            "intent": {"component": "example/.Work"}, "attackSurface": surface,
+                            "pendingIntentFlags": 0x04000000})
+            db.close()
+            reopened = ProjectDB(path)
+            try:
+                entry = reopened.open_existing()[0]
+                self.assertEqual(entry["attackSurface"], surface)
+                self.assertEqual(entry["pendingIntentFlags"], 0x04000000)
+            finally:
+                reopened.close()
+
     def test_broadcast_metadata_roundtrip_preserves_permission_null_and_absence(self):
         surfaces = [
             {"broadcastComponents": {}, "broadcastPermission": None},

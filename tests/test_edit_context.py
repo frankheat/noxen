@@ -39,6 +39,22 @@ def widget_context(app):
 
 
 class EditContextRenderingTests(unittest.TestCase):
+    def test_service_editor_has_only_readonly_components_and_nested_context(self):
+        info = example_info()
+        info["component"] = "example/.Work"
+        surface = {"serviceComponents": {"base": {
+            "component": "example/.Work", "exported": False,
+        }}, "intentExplicit": True, "selectorRoutingRole": "active"}
+        original = copy.deepcopy(info)
+        for method in ("startService", "startForegroundService", "bindService", "getService", "onStartCommand", "onBind"):
+            context = render_edit_context(info, surface, method)
+            self.assertNotIn("routing", context)
+            self.assertNotIn("call", context)
+            self.assertIn("false", Text.from_markup(context["component"]).plain)
+            self.assertIn("selector", context)
+            self.assertIn("clipData", context)
+        self.assertEqual(info, original)
+
     def test_broadcast_editor_has_readonly_call_and_components_without_routing(self):
         info = example_info()
         surface = {"broadcastComponents": {}, "broadcastPermission": {
@@ -147,6 +163,37 @@ class EditContextRenderingTests(unittest.TestCase):
 
 
 class EditContextUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_service_context_is_readonly_and_resets_in_both_themes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = NoxenApp(SimpleNamespace(new_project=str(Path(directory) / "service.noxen"),
+                                         project=None, skip_device_scan=True))
+            async with app.run_test(size=(100, 45)) as pilot:
+                app.query_one("#main_tabs").active = "tab_intercept"
+                info = example_info()
+                info["component"] = "example/.Work"
+                for theme in ("noxen-dark", "noxen-light"):
+                    app.theme = theme
+                    app._exit_edit_mode()
+                    app._current_intercepted_entry = {"id": 1, "method": "startService", "intent": info,
+                        "attackSurface": {"serviceComponents": {"base": {
+                            "component": "example/.Work", "exported": False,
+                        }}}}
+                    app._enter_edit_mode()
+                    await pilot.pause()
+                    self.assertFalse(app.query_one("#ef_routing_section").display)
+                    self.assertFalse(app.query_one("#ef_call_body").display)
+                    component = app.query_one("#ef_component_body", Static)
+                    self.assertTrue(component.display)
+                    self.assertIn("example/.Work", str(component.render()))
+                    self.assertIn("false", str(component.render()))
+                    self.assertEqual(component.content_region.x, app.query_one("#ef_selector_body").content_region.x)
+                    app._current_intercepted_entry = {"method": "startService",
+                                                       "attackSurface": {"serviceComponents": {}}}
+                    app._populate_edit_form({"component": None})
+                    await pilot.pause()
+                    self.assertIn("None", str(component.render()))
+                    self.assertNotIn("example/.Work", str(component.render()))
+
     async def test_activity_editor_hides_routing_and_resets_component_context(self):
         with tempfile.TemporaryDirectory() as directory:
             app = NoxenApp(SimpleNamespace(
@@ -175,7 +222,7 @@ class EditContextUITests(unittest.IsolatedAsyncioTestCase):
                 app._populate_edit_form(example_info())
                 await pilot.pause()
                 self.assertFalse(component.display)
-                self.assertTrue(app.query_one("#ef_routing_section").display)
+                self.assertFalse(app.query_one("#ef_routing_section").display)
                 app._current_intercepted_entry = {
                     "method": "sendBroadcast", "attackSurface": {
                         "broadcastComponents": {}, "broadcastPermission": None,

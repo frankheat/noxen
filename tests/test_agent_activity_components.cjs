@@ -103,13 +103,8 @@ test('unavailable PackageManager preserves both named components', () => {
   assert.equal(surface.activityComponents.selector.unavailable, true);
 });
 
-test('services retain their existing resolution path', () => {
-  for (const [method, query] of [['startService', 'resolveService']]) {
-    const { capture, queries } = agent();
-    const surface = capture(method, intent());
-    assert.equal(surface.routingSource, 'base');
-    assert.equal(surface.intentExplicit, false);
-    assert.equal('activityComponents' in surface, false);
-    assert.deepEqual(queries, [[query]]);
-  }
+test('unknown custom methods do not acquire a routing interpretation', () => {
+  const { capture, queries } = agent();
+  assert.deepEqual(capture('customMethod', intent('Base', intent('Selector'))), {});
+  assert.deepEqual(queries, []);
 });
