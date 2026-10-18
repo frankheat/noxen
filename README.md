@@ -17,15 +17,20 @@ then lets you inspect, modify, forward, or drop them from a terminal UI.
 - Helps map component communication and attack-surface behavior at runtime.
 - Intercepts common Android runtime entry points such as `getIntent`, `startActivity`,
   `sendBroadcast`, `startService`, and `PendingIntent` creation paths.
-- Shows action, component, data URI, flags, categories, extras, PendingIntent flags,
+- Shows action, component, data URI, MIME type, selector, ClipData, flags, categories,
+  structured extras, PendingIntent flags,
   and optional Java stack traces in a plain, section-based detail layout.
 - Attaches each exposed component's `Exported` flag and required permission (with its
-  protection level) to the component that matters: the receiver for inbound events or
-  the resolved target for outbound ones. It also shows any broadcast `receiverPermission`.
+  protection level) to the component that matters: the hooked Class for receiving events or
+  each explicitly named Component in the base Intent or selector for supported
+  Activity, broadcast, and service events. It does not predict implicit targets or
+  classify a selector as active or ignored. It also shows the captured broadcast
+  `receiverPermission` argument separately.
 - Shows an **Info app** tab: a snapshot of the hooked app (identity, build flags, signing,
   permissions, and a searchable roster of all components with their exported flag,
   required permission, and access class classified as `open`, `weak`, or `protected`).
-- Lets you modify intent action, data, categories, flags, and extras before forwarding.
+- Lets you modify the base Intent's action, data, MIME type, categories, flags, and
+  supported extras before forwarding. Selector and ClipData remain read-only.
 - Lets you drop intercepted intents.
 - Stores captured history, outcomes, filters, columns, and modified intent snapshots
   in `.noxen` project files.
@@ -34,7 +39,8 @@ then lets you inspect, modify, forward, or drop them from a terminal UI.
   focused on input-dispatch ANRs while noxen intentionally holds a target thread.
 - Uses a structured Log tab with aligned source/level columns and optional
   `Verbose logs` for detailed hook and bypass diagnostics.
-- Analyzes APKs with androguard to generate hook configuration.
+- Optionally analyzes APKs with androguard to generate additional receiver and
+  service hooks; custom hooks complement rather than replace the bundled defaults.
 
 ## Quick Start
 
@@ -68,6 +74,8 @@ noxen
 
 Select the device, mode, and target app from the Home tab. Use `noxen --project session.noxen`
 to open an existing project or `noxen --new-project session` to create one.
+Without either option, noxen creates a persistent timestamped `.noxen` project in
+the current working directory.
 
 If you also want the `noxen-analyze` command for generating app-specific hook
 definitions from an APK, install the optional analysis extra:
