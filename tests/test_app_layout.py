@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from textual.containers import Horizontal
 from textual.widgets import Label, Switch
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import (
     HISTORY_COMMAND_OUTPUT_HEIGHT,
     INTERCEPT_COMMAND_OUTPUT_HEIGHT,
@@ -89,7 +91,7 @@ class AppLayoutTests(unittest.TestCase):
         ])
 
 
-class SwitchControlLayoutTests(unittest.IsolatedAsyncioTestCase):
+class SwitchControlLayoutTests(IsolatedAppTestCase):
     async def test_log_verbose_matches_info_exposed_control_structure(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:

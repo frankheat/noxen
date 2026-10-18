@@ -3,10 +3,13 @@ import os
 import tempfile
 import threading
 import unittest
+
 from unittest.mock import patch
 from types import SimpleNamespace
 
 from textual.widgets import Button, Input, Label, Select
+
+from tests.ui_test_case import IsolatedAppTestCase
 
 from noxen.app import NoxenApp
 from noxen.frida_session import SessionConfig
@@ -78,7 +81,7 @@ class _DelayedSuccessfulSession:
         pass
 
 
-class ConnectionFeedbackTests(unittest.IsolatedAsyncioTestCase):
+class ConnectionFeedbackTests(IsolatedAppTestCase):
     async def test_partial_hook_setup_stays_visibly_degraded(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:

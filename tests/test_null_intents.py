@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from rich.text import Text
 from textual.widgets import Button
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import NoxenApp
 from noxen.db import ProjectDB
 from noxen.frida_session import FridaSession
@@ -83,7 +85,7 @@ class NullIntentTests(unittest.TestCase):
                 self.assertNotIn("intentPresent", entries[-1]["attackSurface"])
 
 
-class NullIntentUITests(unittest.IsolatedAsyncioTestCase):
+class NullIntentUITests(IsolatedAppTestCase):
     async def test_null_disables_editor_and_commands_but_not_forward_or_drop(self):
         with tempfile.TemporaryDirectory() as directory:
             app = NoxenApp(SimpleNamespace(new_project=str(Path(directory) / "ui.noxen"),

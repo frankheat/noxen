@@ -1,17 +1,18 @@
 import asyncio
 import copy
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from textual.widgets import Button, Input, TextArea
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import ExtraKeyLabel, NoxenApp
 from noxen.modals import ExtraKeyModal
 
 
-class ExtraKeyTests(unittest.IsolatedAsyncioTestCase):
+class ExtraKeyTests(IsolatedAppTestCase):
     async def test_key_dialog_buttons_never_reverse_text_on_focus_or_press(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0
         with tempfile.TemporaryDirectory() as directory:

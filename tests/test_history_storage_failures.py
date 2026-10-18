@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from textual.widgets import DataTable, Input
 
+from tests.ui_test_case import IsolatedAppTestCase, SettingsIsolationMixin
+
 from noxen.app import NoxenApp
 from noxen.exporting import write_history_export
 from noxen.frida_session import ModificationResume, SessionConfig
@@ -26,8 +28,9 @@ def payload(action, decision="decision-current", required=True):
     }
 
 
-class HistoryStorageFailureTests(unittest.TestCase):
+class HistoryStorageFailureTests(SettingsIsolationMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.app = NoxenApp(SimpleNamespace(
@@ -129,6 +132,7 @@ class HistoryStorageFailureTests(unittest.TestCase):
             (self.app.db.update_outcome, ("dropped",)),
             (self.app.db.update_modification_error, ("test warning",)),
             (self.app.db.update_modified_intent, (original, {**original, "action": "MODIFIED"})),
+            (self.app.db.update_capture_metadata, ({"extrasMeta": {"omitted": 20}},)),
         ):
             with self.subTest(update=update.__name__):
                 self.app._persist_history_update(entry_id, update, *args)
@@ -138,6 +142,7 @@ class HistoryStorageFailureTests(unittest.TestCase):
                 self.assertIsNone(stored["modification_error"])
                 self.assertIsNone(stored["original_intent"])
                 self.assertEqual(stored["intent"]["action"], "CURRENT")
+                self.assertNotIn("extrasMeta", stored["intent"])
 
     def test_failed_updates_do_not_prevent_forward_finalization(self):
         entry_id = self.capture("CURRENT")
@@ -166,8 +171,37 @@ class HistoryStorageFailureTests(unittest.TestCase):
                 forward.assert_called_once_with("decision-current", -2)
         self.assertEqual(self.app._all_intents[0]["outcome"], "forwarded")
 
+    def test_incomplete_result_metadata_is_saved_without_confirmed_field_changes(self):
+        entry_id = self.capture("CURRENT")
+        entry = self.app._all_intents[-1]
+        self.app._on_intercept_display("", entry_id, "decision-current")
+        actual = {**copy.deepcopy(entry["intent"]), "extras": {"partial": {}},
+                  "extrasMeta": {"count": 70, "capturedCount": 50, "omitted": 20}}
+        result = ModificationResume(True, {"ok": True, "infoIntent": actual})
+        self.app._finalize_forward(entry_id, entry, [("extra_add", "new", "value", "string")], result)
+        stored = self.app.db._load_all()[0]
+        self.assertEqual(stored["intent"]["extrasMeta"], actual["extrasMeta"])
+        self.assertEqual(stored["intent"]["extras"], {})
+        self.assertEqual(stored["outcome"], "forwarded")
+        self.assertIsNone(stored["original_intent"])
+        self.assertIn("fully verified", stored["modification_error"])
+        self.assertIn("20 additional extras omitted", render_intent_detail(stored))
 
-class HistoryStorageFailureUITests(unittest.IsolatedAsyncioTestCase):
+    def test_failed_metadata_update_still_finishes_forward_and_warns_about_storage(self):
+        entry_id = self.capture("CURRENT")
+        entry = self.app._all_intents[-1]
+        self.app._on_intercept_display("", entry_id, "decision-current")
+        actual = {**copy.deepcopy(entry["intent"]), "extrasMeta": {"error": "Unreadable"}}
+        result = ModificationResume(True, {"ok": True, "infoIntent": actual})
+        with patch.object(self.app.db, "update_capture_metadata", side_effect=sqlite3.OperationalError("disk full")):
+            self.app._finalize_forward(entry_id, entry, [("extra_add", "new", "value", "string")], result)
+        self.assertIn("outdated", entry["persistence_error"])
+        self.assertEqual(entry["intent"]["extrasMeta"], actual["extrasMeta"])
+        self.assertEqual(entry["outcome"], "forwarded")
+        self.assertIsNone(self.app._current_decision_id)
+
+
+class HistoryStorageFailureUITests(IsolatedAppTestCase):
     async def test_editor_forward_and_drop_use_the_unsaved_capture(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0
         with tempfile.TemporaryDirectory() as directory:

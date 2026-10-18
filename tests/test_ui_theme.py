@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import NoxenApp, markup_renderable
 from noxen.ui_theme import (
     DARK_COLORS,
@@ -63,7 +65,7 @@ class ThemePaletteTests(unittest.TestCase):
         self.assertNotIn("💿", rendered.plain)
 
 
-class ThemeRuntimeTests(unittest.IsolatedAsyncioTestCase):
+class ThemeRuntimeTests(IsolatedAppTestCase):
     async def test_theme_action_uses_paired_noxen_palettes(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:

@@ -16,7 +16,16 @@ _MIGRATED_INTENT_COLUMNS = {
     "clip_data": "TEXT",
     "modification_error": "TEXT",
     "intent_package": "TEXT",
+    "capture_metadata": "TEXT",
 }
+
+_CAPTURE_METADATA_KEYS = ("extrasMeta", "categoriesTruncated", "categoriesReadError")
+
+
+def _stored_capture_metadata(info: dict):
+    """Persist capture completeness separately from the captured Intent fields."""
+    metadata = {key: info[key] for key in _CAPTURE_METADATA_KEYS if key in info}
+    return json.dumps(metadata) if metadata else None
 
 
 def _stored_mime_type(info: dict):
@@ -194,6 +203,12 @@ class ProjectDB:
                 intent["clipData"] = self._load_json_field(
                     row_id, "clip_data", row["clip_data"], None, (dict, type(None))
                 )
+            if row["capture_metadata"] is not None:
+                metadata = self._load_json_field(
+                    row_id, "capture_metadata", row["capture_metadata"],
+                    {"extrasMeta": {"error": "Capture metadata unavailable in project"}}, dict,
+                )
+                intent.update({key: metadata[key] for key in _CAPTURE_METADATA_KEYS if key in metadata})
             entries.append({
                 "id": row_id,
                 "timestamp": row["timestamp"],
@@ -258,8 +273,9 @@ class ProjectDB:
             cur = self._conn.execute(
                 """INSERT INTO intents
                    (timestamp, class, method, action, component, data, mime_type, selector, clip_data, flags,
-                    categories, extras, stack_trace, pending_intent_flags, attack_surface, intent_package)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    categories, extras, stack_trace, pending_intent_flags, attack_surface, intent_package,
+                    capture_metadata)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     entry.get("timestamp"),
                     entry.get("class"),
@@ -277,6 +293,7 @@ class ProjectDB:
                     entry.get("pendingIntentFlags"),
                     json.dumps(entry.get("attackSurface")) if entry.get("attackSurface") else None,
                     _stored_package(info),
+                    _stored_capture_metadata(info),
                 ),
             )
             return cur.lastrowid
@@ -358,7 +375,8 @@ class ProjectDB:
         with self._lock, self._conn:
             self._conn.execute(
                 """UPDATE intents SET
-                   action=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?, intent_package=?
+                   action=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?, intent_package=?,
+                   capture_metadata=?
                    WHERE id=?""",
                 (
                     modified_info.get("action"),
@@ -369,8 +387,19 @@ class ProjectDB:
                     json.dumps(modified_info.get("extras") or {}),
                     json.dumps(original_info),
                     _stored_package(modified_info),
+                    _stored_capture_metadata(modified_info),
                     intent_id,
                 ),
+            )
+
+    def update_capture_metadata(self, intent_id: int, info: dict) -> None:
+        """Refresh completeness markers without claiming the Intent was modified."""
+        if self._conn is None or intent_id is None:
+            return
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE intents SET capture_metadata=? WHERE id=?",
+                (_stored_capture_metadata(info), intent_id),
             )
 
     def update_modification_error(self, intent_id: int, error: str | None) -> None:

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 from textual.widgets import Button, Input, Select
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import NoxenApp
 
 
@@ -13,7 +15,7 @@ def project_args(path: str) -> SimpleNamespace:
     return SimpleNamespace(project=None, new_project=path, skip_device_scan=True)
 
 
-class InterceptExtraEditorTests(unittest.IsolatedAsyncioTestCase):
+class InterceptExtraEditorTests(IsolatedAppTestCase):
     async def asyncSetUp(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0
 

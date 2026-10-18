@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from rich.text import Text
 from textual.widgets import Input, Static
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import NoxenApp
 from noxen.rendering import format_uri_grant_flags, render_edit_context
 
@@ -162,7 +164,7 @@ class EditContextRenderingTests(unittest.TestCase):
         self.assertLess(len(result.splitlines()), 300)
 
 
-class EditContextUITests(unittest.IsolatedAsyncioTestCase):
+class EditContextUITests(IsolatedAppTestCase):
     async def test_service_context_is_readonly_and_resets_in_both_themes(self):
         with tempfile.TemporaryDirectory() as directory:
             app = NoxenApp(SimpleNamespace(new_project=str(Path(directory) / "service.noxen"),

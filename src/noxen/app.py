@@ -887,6 +887,8 @@ class NoxenApp(App):
                     entry["original_intent"] = before
                     if self.db and intent_id:
                         self._persist_history_update(intent_id, self.db.update_modified_intent, before, actual)
+                elif self.db and intent_id:
+                    self._persist_history_update(intent_id, self.db.update_capture_metadata, actual)
                 self._history_search_index[id(entry)] = history_search_text(entry)
 
         outcome = "modified_forwarded" if changed else "forwarded"

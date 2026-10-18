@@ -5,6 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import NoxenApp
 from noxen.frida_devices import enumerate_preferred_devices
 from noxen.textual_compat import SELECT_EMPTY
@@ -48,7 +50,7 @@ class FakeDeviceManager:
         return self._usb_device
 
 
-class ConnectDeviceLoadingTests(unittest.IsolatedAsyncioTestCase):
+class ConnectDeviceLoadingTests(IsolatedAppTestCase):
     async def test_connect_mount_schedules_scan_without_frida_on_ui_thread(self):
         scheduled_generations = []
 

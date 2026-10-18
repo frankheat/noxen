@@ -127,8 +127,15 @@ keeps the repository root separate from the installed package and avoids shell
 ambiguity between the `noxen` command and a local package directory.
 
 After changing Python code, run the unit tests. When validating Frida compatibility,
-repeat the same checks with the Frida environments you support. For example, this
-repository is commonly tested with local Frida 16 and Frida 17 virtual environments:
+repeat the same checks with the Frida environments you support.
+
+UI tests use a fresh temporary settings file for each test. They exercise real
+settings loading and saving without reading or changing your personal noxen
+preferences. The temporary settings and path override are cleaned up even when a
+test fails; platform-specific config-path tests remain separate.
+
+For example, this repository is commonly tested with local Frida 16 and Frida 17
+virtual environments:
 
 ```bash
 ../frida-16.6.6/bin/python -m compileall -q src/noxen

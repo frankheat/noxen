@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 from textual.widgets import Label
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import NoxenApp
 from noxen.commands import HELP_MENU
 from noxen.modals import HelpModal
@@ -15,7 +17,7 @@ def project_args(path: str) -> SimpleNamespace:
     return SimpleNamespace(project=None, new_project=path, skip_device_scan=True)
 
 
-class HelpModalTests(unittest.IsolatedAsyncioTestCase):
+class HelpModalTests(IsolatedAppTestCase):
     async def asyncSetUp(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0
 

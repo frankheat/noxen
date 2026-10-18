@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from textual.widgets import ContentSwitcher, DataTable, Input, Label, RichLog, Switch
 from textual.widgets.data_table import ColumnKey
 
+from tests.ui_test_case import IsolatedAppTestCase
+
 from noxen.app import NoxenApp, markup_renderable
 
 
@@ -49,7 +51,7 @@ class MarkupRenderableTests(unittest.TestCase):
         self.assertEqual(rendered.plain, "[SIGNING]")
 
 
-class InfoTabTests(unittest.IsolatedAsyncioTestCase):
+class InfoTabTests(IsolatedAppTestCase):
     async def test_refresh_keeps_disabled_components_visible_under_search_and_exposed_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = NoxenApp(project_args(os.path.join(tmp, "disabled.noxen")))

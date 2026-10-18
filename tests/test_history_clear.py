@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 from textual.widgets import DataTable, RichLog
 
+from tests.ui_test_case import IsolatedAppTestCase, SettingsIsolationMixin
+
 from noxen.app import NoxenApp
 
 
@@ -33,8 +35,9 @@ class _ObservedLock:
         self.lock.release()
 
 
-class HistoryClearTests(unittest.TestCase):
+class HistoryClearTests(SettingsIsolationMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.app = NoxenApp(SimpleNamespace(
@@ -170,7 +173,7 @@ class HistoryClearTests(unittest.TestCase):
             self.capture("UNSAVED")
 
 
-class HistoryClearUITests(unittest.IsolatedAsyncioTestCase):
+class HistoryClearUITests(IsolatedAppTestCase):
     async def test_failed_clear_keeps_table_and_successful_clear_rejects_stale_appends(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0
         with tempfile.TemporaryDirectory() as directory:
