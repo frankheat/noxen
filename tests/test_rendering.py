@@ -26,6 +26,57 @@ def plain(rendered: str) -> str:
 
 
 class RenderingTests(unittest.TestCase):
+    def test_activity_component_metadata_stays_with_its_own_object(self):
+        info = {"component": "example/.Base", "selector": {
+            "kind": "intent", "component": "example/.Selector", "flags": 0,
+        }}
+        surface = {"activityComponents": {
+            "base": {"component": "example/.Base", "exported": True,
+                     "permission": {"name": "example.BASE_PERMISSION", "level": "normal"}},
+            "selector": {"component": "example/.Selector", "exported": False,
+                         "permission": {"name": "example.SELECTOR_PERMISSION", "level": "signature"}},
+        }}
+        for method in ("startActivity", "startActivityForResult", "getActivity", "getIntent",
+                       "onNewIntent", "onActivityResult", "setResult"):
+            for rendered in (
+                render_intent_detail({"id": 1, "method": method, "intent": info, "attackSurface": surface}),
+                render_intercept_block({"methodName": method, "infoIntent": info, "attackSurface": surface}, 1, False, 1),
+            ):
+                with self.subTest(method=method):
+                    text = plain(rendered)
+                    base, selector = text.split("[SELECTOR]", 1)
+                    self.assertIn("BASE_PERMISSION (normal)", base)
+                    self.assertIn("Exported            : true", base)
+                    self.assertNotIn("SELECTOR_PERMISSION", base)
+                    self.assertIn("SELECTOR_PERMISSION (signature)", selector)
+                    self.assertIn("Exported            : false", selector)
+                    self.assertNotIn("[ROUTING]", text)
+
+    def test_activity_unavailable_metadata_and_legacy_candidates_are_not_guessed(self):
+        entry = {"id": 1, "method": "startActivity", "intent": {"component": "example/.Missing"},
+                 "attackSurface": {"activityComponents": {"base": {
+                     "component": "example/.Missing", "unavailable": True,
+                 }}}}
+        text = plain(render_intent_detail(entry))
+        self.assertIn("Details             : unavailable", text)
+        self.assertNotIn("not visible", text)
+        entry["intent"]["component"] = None
+        text = plain(render_intent_detail(entry))
+        self.assertIn("Component     : None", text)
+        self.assertNotIn("unavailable", text)  # mismatched metadata is not reused
+
+        entry["attackSurface"] = {"intentExplicit": False, "targetType": "activity",
+                                  "targetComponent": "example/.Candidate", "targetResolved": True,
+                                  "targetExported": True}
+        text = plain(render_intent_detail(entry))
+        self.assertNotIn("Candidate", text)
+        self.assertNotIn("Exported", text)
+
+        entry["intent"]["component"] = "example/.Candidate"
+        self.assertIn("Exported            : true", plain(render_intent_detail(entry)))
+        entry["attackSurface"]["targetUnreadable"] = True
+        self.assertIn("Details             : unavailable", plain(render_intent_detail(entry)))
+
     def test_routing_is_separate_from_objects_in_history_and_intercept(self):
         info = {"component": "example/.Base", "action": "BASE", "selector": {
             "kind": "intent", "component": "example/.Other", "action": "OTHER", "flags": 0,
@@ -623,7 +674,7 @@ class RenderingTests(unittest.TestCase):
     def test_render_intent_detail_target_states(self):
         base = {
             "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",
-            "class": "com.example.MainActivity", "method": "startActivity", "stackTrace": [],
+            "class": "com.example.MainActivity", "method": "sendBroadcast", "stackTrace": [],
             "intent": {},
         }
         implicit_multi = dict(base, attackSurface={"intentExplicit": False, "targetReceiverCount": 3})
@@ -661,16 +712,19 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("  Mode          : IMPLICIT\n", legacy_text)  # no guess for old captures
         self.assertNotIn("  Source", legacy_text)
 
-    def test_explicit_intent_type_is_unqualified(self):
+    def test_activity_shows_component_instead_of_routing_classification(self):
         entry = {
             "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",
             "class": "com.example.MainActivity", "method": "startActivity", "stackTrace": [],
             "intent": {"component": "com.example/.A", "package": None},
             "attackSurface": {"intentExplicit": True, "targetComponent": "com.example/.A", "targetType": "activity"},
         }
-        self.assertIn("  Mode          : EXPLICIT\n", plain(render_intent_detail(entry)))
+        text = plain(render_intent_detail(entry))
+        self.assertIn("  Component     : com.example/.A", text)
+        self.assertNotIn("[ROUTING]", text)
+        self.assertNotIn("  Target", text)
 
-    def test_selector_controls_routing_when_base_has_no_component(self):
+    def test_activity_selector_fields_do_not_imply_routing(self):
         selector = {
             "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
             "component": "com.example/.SelectorActivity", "action": "com.example.SELECT",
@@ -693,15 +747,11 @@ class RenderingTests(unittest.TestCase):
 
         visible = plain(render_intent_detail(entry))
 
-        self.assertIn("  Mode          : EXPLICIT", visible)
-        self.assertIn("  Source        : selector", visible)
-        self.assertIn("  Target        : com.example/.SelectorActivity", visible)
+        self.assertNotIn("[ROUTING]", visible)
+        self.assertNotIn("  Target", visible)
         self.assertNotIn("SelectorActivity (resolved)", visible)
         self.assertIn("[SELECTOR]", visible)
-        self.assertIn("  Selector      : ACTIVE", visible)
-        routing, payload = visible.split("[CAPTURED INTENT PAYLOAD]", 1)
-        self.assertIn("[ROUTING]", routing)
-        self.assertIn("  Target", routing)
+        payload = visible.split("[CAPTURED INTENT PAYLOAD]", 1)[1]
         self.assertNotIn("  Mode", payload)
         self.assertNotIn("  Selector      :", payload)
         self.assertNotIn("  Component", payload.split("[SELECTOR]")[0])
@@ -715,19 +765,14 @@ class RenderingTests(unittest.TestCase):
             "routingPackage": "com.example",
             "targetComponent": None,
         })
-        self.assertIn(
-            "  Mode          : IMPLICIT (package-scoped)",
-            plain(render_intent_detail(entry)),
-        )
+        self.assertNotIn("[ROUTING]", plain(render_intent_detail(entry)))
+        self.assertIn("  Package       : com.example", plain(render_intent_detail(entry)))
 
         selector["package"] = None
         entry["attackSurface"]["routingPackage"] = None
-        self.assertIn(
-            "  Mode          : IMPLICIT (any app)",
-            plain(render_intent_detail(entry)),
-        )
+        self.assertNotIn("[ROUTING]", plain(render_intent_detail(entry)))
 
-    def test_base_component_takes_precedence_over_different_selector(self):
+    def test_activity_keeps_different_base_and_selector_components_without_roles(self):
         selector = {
             "kind": "intent", "type": "android.content.Intent", "displayType": "Intent",
             "component": "com.example/.ActivityB", "action": None, "data": None,
@@ -746,17 +791,12 @@ class RenderingTests(unittest.TestCase):
 
         visible = plain(render_intent_detail(entry))
 
-        self.assertIn("  Mode          : EXPLICIT", visible)
-        self.assertIn("  Source        : base component", visible)
-        self.assertIn("  Target        : com.example/.ActivityA", visible)
-        self.assertIn("  Selector      : IGNORED (base component takes precedence)", visible)
+        self.assertNotIn("[ROUTING]", visible)
+        self.assertIn("  Component     : com.example/.ActivityA", visible)
         self.assertIn("  Component     : com.example/.ActivityB", visible)
 
         entry["attackSurface"]["selectorRoutingRole"] = "redundant"
-        self.assertIn(
-            "  Selector      : REDUNDANT (same component as base)",
-            plain(render_intent_detail(entry)),
-        )
+        self.assertNotIn("REDUNDANT", plain(render_intent_detail(entry)))
 
     def test_history_search_includes_recursive_selector_fields(self):
         entry = {
@@ -853,10 +893,10 @@ class RenderingTests(unittest.TestCase):
         text = plain(render_intent_detail(broadcast))
         self.assertIn("  Target        : (no manifest receiver) — dynamic receivers are not visible", text)
         self.assertNotIn("(unresolved)", text)
-        # activities have no runtime-registered handlers: "unresolved" stays accurate
+        # Activities no longer query or display an implicit candidate.
         activity = dict(base, method="startActivity",
                         attackSurface={"intentExplicit": False, "targetType": "activity"})
-        self.assertIn("  Target        : (unresolved)", plain(render_intent_detail(activity)))
+        self.assertNotIn("  Target", plain(render_intent_detail(activity)))
 
     def test_detail_grey_scale_dims_labels_not_values(self):
         entry = {

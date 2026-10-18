@@ -217,6 +217,25 @@ class HistoryColumnWidthTests(unittest.TestCase):
 
 
 class ProjectDBTests(unittest.TestCase):
+    def test_activity_component_metadata_roundtrip(self):
+        surface = {"activityComponents": {
+            "base": {"component": "example/example.Base", "exported": False, "permission": None},
+            "selector": {"component": "example/example.Selector", "unavailable": True},
+        }}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "activity.noxen")
+            db = ProjectDB(path)
+            db.create("activity")
+            db.save_intent({"timestamp": "2026-10-17T08:00:00+00:00", "method": "startActivity",
+                            "intent": {"component": "example/example.Base"}, "attackSurface": surface})
+            db.close()
+            reopened = ProjectDB(path)
+            try:
+                entry = reopened.open_existing()[0]
+                self.assertEqual(entry["attackSurface"], surface)
+            finally:
+                reopened.close()
+
     def test_open_existing_migrates_legacy_intents_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "legacy.noxen")

@@ -14379,6 +14379,41 @@ std_string_c_str (StdString * self)
     if (component === null) return null;
     return String(component.getPackageName()) + "/" + String(component.getClassName());
   }
+  function describeActivityComponents(intent, context) {
+    var components = {};
+    var pm = null;
+    var cached = {};
+    function describe(value) {
+      if (value === null) return null;
+      var cn = value.getComponent();
+      if (cn === null) return null;
+      var name = componentIdentity(cn);
+      if (cached[name]) return cached[name];
+      var details = { component: name };
+      cached[name] = details;
+      try {
+        if (pm === null) pm = getPackageManagerSafe(context);
+        if (pm === null) throw new Error("PackageManager unavailable");
+        var info = pm.getActivityInfo(cn, 0);
+        details.exported = info.exported.value;
+        details.permission = describePermission(pm, effectiveComponentPermission(info));
+      } catch (e) {
+        details.unavailable = true;
+      }
+      return details;
+    }
+    try {
+      var base = describe(intent);
+      if (base !== null) components.base = base;
+    } catch (e) {
+    }
+    try {
+      var selector = describe(intent.getSelector());
+      if (selector !== null) components.selector = selector;
+    } catch (e) {
+    }
+    return components;
+  }
   function describeIntentRouting(intent) {
     var baseComponent = null;
     var selector = null;
@@ -14440,13 +14475,10 @@ std_string_c_str (StdString * self)
       return;
     }
     try {
-      if (targetType === "activity") {
-        var ria = pm.resolveActivity(intent, 0);
-        if (ria !== null) fillTargetFromResolveInfo(result, ria, "activityInfo", pm);
-      } else if (targetType === "service") {
+      if (targetType === "service") {
         var ris = pm.resolveService(intent, 0);
         if (ris !== null) fillTargetFromResolveInfo(result, ris, "serviceInfo", pm);
-      } else {
+      } else if (targetType === "receiver") {
         var list = pm.queryBroadcastReceivers(intent, 0);
         if (list !== null && list.size() === 1) {
           fillTargetFromResolveInfo(result, list.get(0), "activityInfo", pm);
@@ -14466,6 +14498,12 @@ std_string_c_str (StdString * self)
   function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) {
     var result = {};
     try {
+      var targetType = SENDING_TARGET_TYPE[methodName];
+      var activityEvent = targetType === "activity" || ["getIntent", "onNewIntent", "onActivityResult", "setResult"].indexOf(methodName) !== -1;
+      var sendContext = self && self.getPackageManager ? self : firstArg;
+      if (activityEvent && intent !== null) {
+        result.activityComponents = describeActivityComponents(intent, sendContext);
+      }
       if (RECEIVING_METHODS[methodName]) {
         var context = methodName === "onReceive" ? firstArg : self;
         var pm = context.getPackageManager();
@@ -14484,14 +14522,13 @@ std_string_c_str (StdString * self)
         result.callerExported = info.exported.value;
         result.callerPermission = describePermission(pm, effectiveComponentPermission(info));
       } else if (intent !== null) {
+        if (activityEvent) return result;
         var routing = describeIntentRouting(intent);
         result.routingSource = routing.source;
         if (routing.selectorRole !== null) result.selectorRoutingRole = routing.selectorRole;
         result.intentExplicit = routing.component !== null;
         result.routingPackage = routing.packageName;
-        var targetType = SENDING_TARGET_TYPE[methodName];
         if (targetType) result.targetType = targetType;
-        var sendContext = self && self.getPackageManager ? self : firstArg;
         var sendPm = getPackageManagerSafe(sendContext);
         if (sendPm && targetType) {
           resolveSendTarget(sendPm, targetType, intent, routing, result);

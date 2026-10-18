@@ -509,7 +509,11 @@ class NoxenApp(App):
         except Exception:
             self.query_one("#ef_flags", Input).value = ""
 
-        context = render_edit_context(info, (self._current_intercepted_entry or {}).get("attackSurface") or {})
+        entry = self._current_intercepted_entry or {}
+        context = render_edit_context(info, entry.get("attackSurface") or {}, entry.get("method"))
+        component = self.query_one("#ef_component_body", Static)
+        component.display = "component" in context
+        component.update(self._render_markup(context.get("component", "")))
         for key, widget in (("routing", "routing"), ("selector", "selector"), ("clipData", "clip")):
             self.query_one(f"#ef_{widget}_section").display = key in context
             self.query_one(f"#ef_{widget}_body", Static).update(self._render_markup(context.get(key, "")))
@@ -1157,6 +1161,7 @@ class NoxenApp(App):
                     with Horizontal(classes="ef_section_header"):
                         yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
                         yield Label("Editable", classes="ef_section_meta")
+                    yield Static(id="ef_component_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_row"):
                         yield Label("Action", classes="ef_label")
                         yield Input(id="ef_action", placeholder="e.g. android.intent.action.VIEW")

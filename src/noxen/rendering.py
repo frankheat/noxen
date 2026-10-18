@@ -409,7 +409,7 @@ def _format_permission(perm: dict | None) -> str | None:
     return f"{name} ({_markup(level)})" if level else name
 
 
-def _subject_tree(exported, permission: dict | None) -> list[str]:
+def _subject_tree(exported, permission: dict | None, *, indent: str = _TREE_INDENT) -> list[str]:
     """Tree lines for a component's Exported flag and optional Required Permission.
 
     The permission line is omitted when the component has none, leaving only Exported.
@@ -423,7 +423,7 @@ def _subject_tree(exported, permission: dict | None) -> list[str]:
     lines = []
     for index, (label, value) in enumerate(children):
         branch = "└─" if index == len(children) - 1 else "├─"
-        lines.append(f"{_TREE_INDENT}[dim]{branch} {label:<{_CHILD_WIDTH}} :[/dim] {value}")
+        lines.append(f"{indent}[dim]{branch} {label:<{_CHILD_WIDTH}} :[/dim] {value}")
     return lines
 
 
@@ -497,8 +497,47 @@ def _intent_routing(info: dict, attack_surface: dict) -> str:
     return "IMPLICIT [dim](any app)[/dim]"
 
 
-def _routing_lines(info: dict, attack_surface: dict, *, row=_row, include_target=True) -> list[str]:
+_ACTIVITY_METHODS = frozenset({
+    "startActivity", "startActivityForResult", "getActivity", "getIntent",
+    "onNewIntent", "onActivityResult", "setResult",
+})
+
+
+def _is_activity_event(method, attack_surface: dict) -> bool:
+    return (method in _ACTIVITY_METHODS or "activityComponents" in attack_surface
+            or attack_surface.get("targetType") == "activity")
+
+
+def _activity_component_info(component, attack_surface: dict, slot: str) -> dict | None:
+    if not component:
+        return None
+    components = attack_surface.get("activityComponents")
+    if isinstance(components, dict):
+        details = components.get(slot)
+        return details if isinstance(details, dict) and details.get("component") == component else None
+    # Older captures stored details only for the selected target. Reuse them only
+    # when they name this exact component, never attach a resolved implicit target.
+    if attack_surface.get("targetComponent") == component:
+        return {"exported": attack_surface.get("targetExported"),
+                "permission": attack_surface.get("targetPermission"),
+                "unavailable": attack_surface.get("targetUnreadable", False)}
+    return None
+
+
+def _component_lines(component, details, *, row=_row, indent=_TREE_INDENT) -> list[str]:
+    lines = [row("Component", _markup(component) if component else "None")]
+    if details:
+        if details.get("unavailable"):
+            lines.append(f"{indent}[dim]└─ {'Details':<{_CHILD_WIDTH}} :[/dim] unavailable")
+        else:
+            lines += _subject_tree(details.get("exported"), details.get("permission"), indent=indent)
+    return lines
+
+
+def _routing_lines(info: dict, attack_surface: dict, *, method=None, row=_row, include_target=True) -> list[str]:
     """Captured routing metadata, not Intent fields or proof of delivery."""
+    if _is_activity_event(method, attack_surface):
+        return []
     lines = []
     if "intentExplicit" in attack_surface:
         lines.append(row("Mode", _intent_routing(info, attack_surface)))
@@ -520,10 +559,10 @@ def _routing_lines(info: dict, attack_surface: dict, *, row=_row, include_target
     return [_section("ROUTING"), *lines] if lines else []
 
 
-def _payload_lines(info: dict) -> list[str]:
+def _payload_lines(info: dict, *, component_details=None, show_component=False) -> list[str]:
     lines = []
-    if info.get("component"):
-        lines.append(_row("Component", _markup(info["component"])))
+    if info.get("component") or show_component:
+        lines += _component_lines(info.get("component"), component_details)
     lines.append(_row("Action", _markup(info.get("action")) if info.get("action") else "None"))
     lines.append(_row("Data (URI)", _markup(info.get("data")) if info.get("data") else "None"))
     # New captures always carry this key, including a null value. Older captures omit
@@ -862,7 +901,8 @@ def _selector_role(role: str | None) -> str | None:
     }.get(role)
 
 
-def _selector_lines(selector: dict | None, *, row=_row, indent="  ") -> list[str]:
+def _selector_lines(selector: dict | None, *, row=_row, indent="  ", component_details=None,
+                    component_indent=_TREE_INDENT) -> list[str]:
     """Render a top-level selector separately from the delivered base payload."""
     if not isinstance(selector, dict):
         return []
@@ -874,7 +914,8 @@ def _selector_lines(selector: dict | None, *, row=_row, indent="  ") -> list[str
         _render_extra_node(lines, None, selector, indent, True, context, 0)
         return lines
 
-    lines.append(row("Component", _markup(selector.get("component")) if selector.get("component") else "None"))
+    lines += _component_lines(selector.get("component"), component_details, row=row,
+                              indent=component_indent)
     lines.append(row("Action", _markup(selector.get("action")) if selector.get("action") else "None"))
     lines.append(row("Data (URI)", _markup(selector.get("data")) if selector.get("data") else "None"))
     if "mimeType" in selector:
@@ -916,17 +957,28 @@ def _edit_context_row(label: str, value: str) -> str:
     return f"[dim]{label:<16}[/dim]{value}"
 
 
-def render_edit_context(info: dict, attack_surface: dict) -> dict[str, str]:
+def render_edit_context(info: dict, attack_surface: dict, method=None) -> dict[str, str]:
     """Reuse bounded, read-only trees; editable outer grant flags live in the form."""
+    activity = _is_activity_event(method, attack_surface)
+    selector_info = info.get("selector")
+    selector_details = _activity_component_info(
+        selector_info.get("component"), attack_surface, "selector",
+    ) if activity and isinstance(selector_info, dict) else None
     selector = _selector_lines(
-        info.get("selector"), row=_edit_context_row, indent="",
+        selector_info, row=_edit_context_row, indent="", component_details=selector_details,
+        component_indent=" " * 16,
     )
-    routing = _routing_lines(info, attack_surface, row=_edit_context_row, include_target=False)
+    routing = _routing_lines(info, attack_surface, method=method, row=_edit_context_row, include_target=False)
     clip = info.get("clipData")
     clip_lines = _clip_data_lines(clip, None, include_grant_flags=False, row=_edit_context_row, indent="")
     if clip_lines and clip.get("kind") == "clipdata" and isinstance(clip.get("count"), int):
         clip_lines.insert(1, _edit_context_row("Items", str(clip["count"])))
     sections = {}
+    if activity and (info.get("component") or "activityComponents" in attack_surface):
+        sections["component"] = "\n".join(_component_lines(
+            info.get("component"), _activity_component_info(info.get("component"), attack_surface, "base"),
+            row=_edit_context_row, indent=" " * 16,
+        ))
     for key, lines in (("routing", routing), ("selector", selector), ("clipData", clip_lines)):
         if lines:
             sections[key] = "\n".join(lines[1:])
@@ -948,13 +1000,21 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     """The shared section stack: caller context, payload, pending intent, extras."""
     out = [_section("HOOK")]
     out += _hook_caller_lines(class_name, method, attack_surface)
-    routing = _routing_lines(info, attack_surface)
+    activity = _is_activity_event(method, attack_surface)
+    routing = _routing_lines(info, attack_surface, method=method)
     if routing:
         out += [""] + routing
     out.append("")
     out.append(_section("CAPTURED INTENT PAYLOAD"))
-    out += _payload_lines(info)
-    selector = _selector_lines(info.get("selector"))
+    out += _payload_lines(
+        info, component_details=_activity_component_info(info.get("component"), attack_surface, "base") if activity else None,
+        show_component=activity and "activityComponents" in attack_surface,
+    )
+    selector_info = info.get("selector")
+    selector_details = _activity_component_info(
+        selector_info.get("component"), attack_surface, "selector",
+    ) if activity and isinstance(selector_info, dict) else None
+    selector = _selector_lines(selector_info, component_details=selector_details)
     if selector:
         out += [""] + selector
     clip_data = _clip_data_lines(info.get("clipData"), info.get("flags"))

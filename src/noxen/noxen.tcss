@@ -603,6 +603,7 @@ Switch.-on > .switch--slider {
 #ef_readonly_context { height: auto; display: none; }
 .ef_readonly_section { height: auto; }
 .ef_context_body { height: auto; }
+#ef_component_body { margin-bottom: 1; }
 .ef_section_header { height: 1; align: left middle; margin-bottom: 1; }
 #ef_categories_header { margin-bottom: 0; }
 .ef_section { width: auto; text-style: bold; color: $foreground; }

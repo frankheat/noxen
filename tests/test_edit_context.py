@@ -39,6 +39,30 @@ def widget_context(app):
 
 
 class EditContextRenderingTests(unittest.TestCase):
+    def test_activity_context_contains_only_actual_components_and_no_routing(self):
+        info = example_info()
+        info["component"] = "dev.noxen.playground/.MainActivity"
+        surface = {
+            "intentExplicit": True, "selectorRoutingRole": "ignored",
+            "activityComponents": {
+                "base": {"component": info["component"], "exported": True},
+                "selector": {"component": info["selector"]["component"], "exported": False},
+            },
+        }
+        sections = render_edit_context(info, surface, "startActivity")
+        self.assertNotIn("routing", sections)
+        base = Text.from_markup(sections["component"]).plain
+        selector = Text.from_markup(sections["selector"]).plain
+        self.assertIn(info["component"], base)
+        self.assertIn("true", base)
+        self.assertIn(info["selector"]["component"], selector)
+        self.assertIn("false", selector)
+        self.assertNotIn("IGNORED", selector)
+        info["component"] = None
+        base = Text.from_markup(render_edit_context(info, surface, "startActivity")["component"]).plain
+        self.assertIn("None", base)
+        self.assertNotIn("Exported", base)
+
     def test_reuses_trees_without_stale_outer_grants_or_mutating_capture(self):
         info = example_info()
         original = copy.deepcopy(info)
@@ -110,6 +134,36 @@ class EditContextRenderingTests(unittest.TestCase):
 
 
 class EditContextUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_editor_hides_routing_and_resets_component_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = NoxenApp(SimpleNamespace(
+                new_project=str(Path(directory) / "activity.noxen"), project=None, skip_device_scan=True,
+            ))
+            async with app.run_test(size=(100, 45)) as pilot:
+                app.query_one("#main_tabs").active = "tab_intercept"
+                info = example_info()
+                info["component"] = "dev.noxen.playground/.MainActivity"
+                app._current_intercepted_entry = {
+                    "id": 1, "method": "startActivity", "intent": info,
+                    "attackSurface": {"activityComponents": {"base": {
+                        "component": info["component"], "exported": True,
+                    }}},
+                }
+                app._enter_edit_mode()
+                await pilot.pause()
+                self.assertFalse(app.query_one("#ef_routing_section").display)
+                component = app.query_one("#ef_component_body", Static)
+                self.assertTrue(component.display)
+                self.assertIn(info["component"], str(component.render()))
+                self.assertIn("Exported", str(component.render()))
+                app._current_intercepted_entry = {
+                    "method": "sendBroadcast", "attackSurface": {"intentExplicit": False},
+                }
+                app._populate_edit_form(example_info())
+                await pilot.pause()
+                self.assertFalse(component.display)
+                self.assertTrue(app.query_one("#ef_routing_section").display)
+
     async def test_section_spacing_with_empty_populated_and_removed_rows(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0
         with tempfile.TemporaryDirectory() as directory:
