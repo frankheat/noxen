@@ -103,8 +103,8 @@ test('unavailable PackageManager preserves both named components', () => {
   assert.equal(surface.activityComponents.selector.unavailable, true);
 });
 
-test('broadcasts and services retain their existing resolution path', () => {
-  for (const [method, query] of [['sendBroadcast', 'queryBroadcastReceivers'], ['startService', 'resolveService']]) {
+test('services retain their existing resolution path', () => {
+  for (const [method, query] of [['startService', 'resolveService']]) {
     const { capture, queries } = agent();
     const surface = capture(method, intent());
     assert.equal(surface.routingSource, 'base');

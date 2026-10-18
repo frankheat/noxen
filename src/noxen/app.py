@@ -511,9 +511,10 @@ class NoxenApp(App):
 
         entry = self._current_intercepted_entry or {}
         context = render_edit_context(info, entry.get("attackSurface") or {}, entry.get("method"))
-        component = self.query_one("#ef_component_body", Static)
-        component.display = "component" in context
-        component.update(self._render_markup(context.get("component", "")))
+        for key in ("call", "component"):
+            body = self.query_one(f"#ef_{key}_body", Static)
+            body.display = key in context
+            body.update(self._render_markup(context.get(key, "")))
         for key, widget in (("routing", "routing"), ("selector", "selector"), ("clipData", "clip")):
             self.query_one(f"#ef_{widget}_section").display = key in context
             self.query_one(f"#ef_{widget}_body", Static).update(self._render_markup(context.get(key, "")))
@@ -1158,6 +1159,7 @@ class NoxenApp(App):
                             yield Label("Derived from capture", classes="ef_section_meta")
                         yield Static(id="ef_routing_body", classes="ef_context_body", markup=False)
                         yield Rule()
+                    yield Static(id="ef_call_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_section_header"):
                         yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
                         yield Label("Editable", classes="ef_section_meta")

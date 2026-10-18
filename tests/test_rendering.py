@@ -26,6 +26,44 @@ def plain(rendered: str) -> str:
 
 
 class RenderingTests(unittest.TestCase):
+    def test_broadcast_component_metadata_and_call_permission_are_separate(self):
+        surface = {"broadcastComponents": {
+            "base": {"component": "example/.Base", "exported": True,
+                     "permission": {"name": "example.SEND", "level": "signature"}},
+            "selector": {"component": "example/.Selector", "unavailable": True},
+        }, "broadcastPermission": {"name": "example.RECEIVE[raw]", "level": "unresolved"},
+            "intentExplicit": True, "selectorRoutingRole": "active", "targetComponent": "wrong/.Candidate"}
+        info = {"component": "example/.Base", "selector": {"kind": "intent", "component": "example/.Selector"}}
+        for method in ("sendBroadcast", "sendOrderedBroadcast", "getBroadcast", "onReceive"):
+            for rendered in (
+                render_intent_detail({"id": 1, "method": method, "intent": info, "attackSurface": surface}),
+                render_intercept_block({"methodName": method, "infoIntent": info, "attackSurface": surface}, 1, False, 1),
+            ):
+                text = plain(rendered)
+                hook, payload = text.split("[CAPTURED INTENT PAYLOAD]", 1)
+                self.assertEqual("Receiver Perm" in hook, method in {"sendBroadcast", "sendOrderedBroadcast"})
+                self.assertNotIn("Receiver Perm", payload)
+                self.assertIn("Required Permission : example.SEND (signature)", payload)
+                self.assertIn("Details             : unavailable", payload)
+                for forbidden in ("[ROUTING]", "wrong/.Candidate", "ACTIVE", "not visible"):
+                    self.assertNotIn(forbidden, text)
+
+    def test_broadcast_permission_null_and_legacy_absence_stay_distinct(self):
+        entry = {"id": 1, "method": "sendBroadcast", "intent": {"component": None},
+                 "attackSurface": {"broadcastComponents": {}, "broadcastPermission": None}}
+        text = plain(render_intent_detail(entry))
+        self.assertIn("Receiver Perm : None", text)
+        self.assertIn("Component     : None", text)
+        entry["attackSurface"]["broadcastPermission"] = {"name": "", "level": "unresolved"}
+        self.assertIn('Receiver Perm : "" (empty permission name)', plain(render_intent_detail(entry)))
+        del entry["attackSurface"]["broadcastPermission"]
+        self.assertNotIn("Receiver Perm", plain(render_intent_detail(entry)))
+        entry["attackSurface"] = {"targetComponent": "example/.Candidate", "targetResolved": True,
+                                  "targetExported": True, "intentExplicit": False}
+        text = plain(render_intent_detail(entry))
+        self.assertNotIn("Candidate", text)
+        self.assertNotIn("Exported", text)
+
     def test_activity_component_metadata_stays_with_its_own_object(self):
         info = {"component": "example/.Base", "selector": {
             "kind": "intent", "component": "example/.Selector", "flags": 0,
@@ -92,7 +130,7 @@ class RenderingTests(unittest.TestCase):
                 text = plain(rendered)
                 self.assertEqual(text.count("[ROUTING]"), 1)
                 routing, objects = text.split("[CAPTURED INTENT PAYLOAD]", 1)
-                for label in ("Mode", "Source", "Selector", "Target", "Enforced Perm"):
+                for label in ("Mode", "Source", "Selector", "Target"):
                     self.assertIn(f"  {label:<13} :", routing)
                     self.assertNotIn(f"  {label:<13} :", objects)
                 payload, selector = objects.split("[SELECTOR]", 1)
@@ -646,11 +684,11 @@ class RenderingTests(unittest.TestCase):
         rendered = render_intent_detail(entry, show_stack=False, stack_depth=1)
 
         Text.from_markup(rendered)
-        self.assertIn("  Mode          : EXPLICIT", plain(rendered))
-        self.assertIn("  Target        : com.example/.Receiver2", plain(rendered))
+        self.assertNotIn("[ROUTING]", plain(rendered))
+        self.assertIn("  Component     : com.example/.Receiver2", plain(rendered))
         self.assertIn("                  ├─ Exported            : true", plain(rendered))
         self.assertIn("                  └─ Required Permission : com.x.PERM (normal)", plain(rendered))
-        self.assertIn("  Enforced Perm : com.x.PERM (normal)", plain(rendered))
+        self.assertIn("  Receiver Perm : com.x.PERM (normal)", plain(rendered))
 
     def test_render_intent_detail_shows_mime_type_for_new_captures(self):
         entry = {
@@ -674,12 +712,9 @@ class RenderingTests(unittest.TestCase):
     def test_render_intent_detail_target_states(self):
         base = {
             "id": 1, "timestamp": "2026-04-27T12:34:56+00:00",
-            "class": "com.example.MainActivity", "method": "sendBroadcast", "stackTrace": [],
+            "class": "com.example.MainActivity", "method": "startService", "stackTrace": [],
             "intent": {},
         }
-        implicit_multi = dict(base, attackSurface={"intentExplicit": False, "targetReceiverCount": 3})
-        self.assertIn("  Target        : (resolved) 3 receivers", plain(render_intent_detail(implicit_multi)))
-
         unresolved = dict(base, attackSurface={"intentExplicit": False})
         self.assertIn("  Target        : (unresolved)", plain(render_intent_detail(unresolved)))
 
@@ -704,12 +739,12 @@ class RenderingTests(unittest.TestCase):
         scoped = dict(base, intent={"action": "com.example.PING", "package": "com.example"})
         legacy = dict(base, intent={"action": "com.example.PING"})  # captured before the package was recorded
 
-        self.assertIn("  Mode          : IMPLICIT (any app)", plain(render_intent_detail(open_to_all)))
+        self.assertNotIn("[ROUTING]", plain(render_intent_detail(open_to_all)))
         self.assertNotIn("Package", plain(render_intent_detail(open_to_all)))
-        self.assertIn("  Mode          : IMPLICIT (package-scoped)", plain(render_intent_detail(scoped)))
+        self.assertNotIn("[ROUTING]", plain(render_intent_detail(scoped)))
         self.assertIn("  Package       : com.example", plain(render_intent_detail(scoped)))
         legacy_text = plain(render_intent_detail(legacy))
-        self.assertIn("  Mode          : IMPLICIT\n", legacy_text)  # no guess for old captures
+        self.assertNotIn("[ROUTING]", legacy_text)
         self.assertNotIn("  Source", legacy_text)
 
     def test_activity_shows_component_instead_of_routing_classification(self):
@@ -891,7 +926,7 @@ class RenderingTests(unittest.TestCase):
         broadcast = dict(base, method="sendBroadcast",
                          attackSurface={"intentExplicit": False, "targetType": "receiver"})
         text = plain(render_intent_detail(broadcast))
-        self.assertIn("  Target        : (no manifest receiver) — dynamic receivers are not visible", text)
+        self.assertNotIn("  Target", text)
         self.assertNotIn("(unresolved)", text)
         # Activities no longer query or display an implicit candidate.
         activity = dict(base, method="startActivity",
@@ -902,14 +937,14 @@ class RenderingTests(unittest.TestCase):
         entry = {
             "id": 3, "timestamp": "2026-04-27T12:34:56+00:00",
             "class": "com.example.MainActivity", "method": "sendBroadcast", "stackTrace": [],
-            "intent": {"action": "a.B", "extras": {"k": {"type": "java.lang.String", "value": "v"}}},
+            "intent": {"component": "com.example/.R", "action": "a.B", "extras": {"k": {"type": "java.lang.String", "value": "v"}}},
             "attackSurface": {"intentExplicit": True, "targetComponent": "com.example/.R",
                               "targetExported": True, "targetResolved": True},
         }
         rendered = render_intent_detail(entry)
         self.assertIn("  [dim]Action        :[/dim] a.B", rendered)
         self.assertIn("[dim]└─ Exported            :[/dim] true", rendered)
-        self.assertIn("com.example/.R [dim](resolved)[/dim]", rendered)
+        self.assertNotIn("(resolved)", rendered)
         self.assertIn("k [String] : \"v\"", plain(rendered))
         self.assertIn('"v"', rendered)
         dim_text = "".join(

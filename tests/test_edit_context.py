@@ -39,6 +39,19 @@ def widget_context(app):
 
 
 class EditContextRenderingTests(unittest.TestCase):
+    def test_broadcast_editor_has_readonly_call_and_components_without_routing(self):
+        info = example_info()
+        surface = {"broadcastComponents": {}, "broadcastPermission": {
+            "name": "example.RECEIVE", "level": "signature"}, "intentExplicit": True}
+        original = copy.deepcopy(info)
+        sections = render_edit_context(info, surface, "sendBroadcast")
+        self.assertNotIn("routing", sections)
+        self.assertIn("Receiver Perm", Text.from_markup(sections["call"]).plain)
+        self.assertIn("example.RECEIVE", Text.from_markup(sections["call"]).plain)
+        self.assertIn("None", Text.from_markup(sections["component"]).plain)
+        self.assertNotIn("call", render_edit_context(info, surface, "getBroadcast"))
+        self.assertEqual(info, original)
+
     def test_activity_context_contains_only_actual_components_and_no_routing(self):
         info = example_info()
         info["component"] = "dev.noxen.playground/.MainActivity"
@@ -157,12 +170,27 @@ class EditContextUITests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(info["component"], str(component.render()))
                 self.assertIn("Exported", str(component.render()))
                 app._current_intercepted_entry = {
-                    "method": "sendBroadcast", "attackSurface": {"intentExplicit": False},
+                    "method": "startService", "attackSurface": {"intentExplicit": False},
                 }
                 app._populate_edit_form(example_info())
                 await pilot.pause()
                 self.assertFalse(component.display)
                 self.assertTrue(app.query_one("#ef_routing_section").display)
+                app._current_intercepted_entry = {
+                    "method": "sendBroadcast", "attackSurface": {
+                        "broadcastComponents": {}, "broadcastPermission": None,
+                    },
+                }
+                app._populate_edit_form(example_info())
+                await pilot.pause()
+                self.assertFalse(app.query_one("#ef_routing_section").display)
+                call = app.query_one("#ef_call_body", Static)
+                self.assertTrue(call.display)
+                self.assertIn("Receiver Perm", str(call.render()))
+                app._current_intercepted_entry = {"method": "startActivity", "attackSurface": {}}
+                app._populate_edit_form(example_info())
+                await pilot.pause()
+                self.assertFalse(call.display)
 
     async def test_section_spacing_with_empty_populated_and_removed_rows(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0

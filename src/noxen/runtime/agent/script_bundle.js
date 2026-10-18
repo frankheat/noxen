@@ -14379,7 +14379,7 @@ std_string_c_str (StdString * self)
     if (component === null) return null;
     return String(component.getPackageName()) + "/" + String(component.getClassName());
   }
-  function describeActivityComponents(intent, context) {
+  function describeIntentComponents(intent, context, targetType) {
     var components = {};
     var pm = null;
     var cached = {};
@@ -14394,7 +14394,7 @@ std_string_c_str (StdString * self)
       try {
         if (pm === null) pm = getPackageManagerSafe(context);
         if (pm === null) throw new Error("PackageManager unavailable");
-        var info = pm.getActivityInfo(cn, 0);
+        var info = componentInfoFor(pm, targetType, cn);
         details.exported = info.exported.value;
         details.permission = describePermission(pm, effectiveComponentPermission(info));
       } catch (e) {
@@ -14478,13 +14478,6 @@ std_string_c_str (StdString * self)
       if (targetType === "service") {
         var ris = pm.resolveService(intent, 0);
         if (ris !== null) fillTargetFromResolveInfo(result, ris, "serviceInfo", pm);
-      } else if (targetType === "receiver") {
-        var list = pm.queryBroadcastReceivers(intent, 0);
-        if (list !== null && list.size() === 1) {
-          fillTargetFromResolveInfo(result, list.get(0), "activityInfo", pm);
-        } else if (list !== null && list.size() > 1) {
-          result.targetReceiverCount = list.size();
-        }
       }
     } catch (e) {
     }
@@ -14500,9 +14493,16 @@ std_string_c_str (StdString * self)
     try {
       var targetType = SENDING_TARGET_TYPE[methodName];
       var activityEvent = targetType === "activity" || ["getIntent", "onNewIntent", "onActivityResult", "setResult"].indexOf(methodName) !== -1;
+      var broadcastEvent = targetType === "receiver" || methodName === "onReceive";
       var sendContext = self && self.getPackageManager ? self : firstArg;
       if (activityEvent && intent !== null) {
-        result.activityComponents = describeActivityComponents(intent, sendContext);
+        result.activityComponents = describeIntentComponents(intent, sendContext, "activity");
+      }
+      if (broadcastEvent && intent !== null) {
+        result.broadcastComponents = describeIntentComponents(intent, sendContext, "receiver");
+      }
+      if (methodName === "sendBroadcast" || methodName === "sendOrderedBroadcast") {
+        result.broadcastPermission = sendPermission === null ? null : sendPermission === "" ? { name: "", level: "unresolved", definedBy: null } : describePermission(getPackageManagerSafe(sendContext), sendPermission);
       }
       if (RECEIVING_METHODS[methodName]) {
         var context = methodName === "onReceive" ? firstArg : self;
@@ -14522,7 +14522,7 @@ std_string_c_str (StdString * self)
         result.callerExported = info.exported.value;
         result.callerPermission = describePermission(pm, effectiveComponentPermission(info));
       } else if (intent !== null) {
-        if (activityEvent) return result;
+        if (activityEvent || broadcastEvent) return result;
         var routing = describeIntentRouting(intent);
         result.routingSource = routing.source;
         if (routing.selectorRole !== null) result.selectorRoutingRole = routing.selectorRole;
@@ -14532,7 +14532,6 @@ std_string_c_str (StdString * self)
         var sendPm = getPackageManagerSafe(sendContext);
         if (sendPm && targetType) {
           resolveSendTarget(sendPm, targetType, intent, routing, result);
-          if (sendPermission) result.broadcastPermission = describePermission(sendPm, sendPermission);
         }
       }
     } catch (e) {
@@ -14719,7 +14718,7 @@ std_string_c_str (StdString * self)
       var sendPermission = null;
       if (broadcastPermIndex >= 0 && arguments.length > broadcastPermIndex) {
         var permArg = arguments[broadcastPermIndex];
-        if (permArg) sendPermission = String(permArg);
+        if (permArg !== null && permArg !== void 0) sendPermission = String(permArg);
       }
       var as = buildAttackSurface(methodName, intent, this, firstArg, sendPermission);
       var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as);

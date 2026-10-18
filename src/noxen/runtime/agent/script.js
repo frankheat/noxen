@@ -955,9 +955,9 @@ function componentIdentity(component) {
   return String(component.getPackageName()) + "/" + String(component.getClassName());
 }
 
-// Read only the Activity components actually named by the two objects. Never
+// Read only the components actually named by the two objects. Never
 // resolve an implicit Intent or choose which of these components will receive it.
-function describeActivityComponents(intent, context) {
+function describeIntentComponents(intent, context, targetType) {
   var components = {};
   var pm = null;
   var cached = {};
@@ -972,7 +972,7 @@ function describeActivityComponents(intent, context) {
     try {
       if (pm === null) pm = getPackageManagerSafe(context);
       if (pm === null) throw new Error("PackageManager unavailable");
-      var info = pm.getActivityInfo(cn, 0);
+      var info = componentInfoFor(pm, targetType, cn);
       details.exported = info.exported.value;
       details.permission = describePermission(pm, effectiveComponentPermission(info));
     } catch (e) {
@@ -1050,13 +1050,6 @@ function resolveSendTarget(pm, targetType, intent, routing, result) {
     if (targetType === "service") {
       var ris = pm.resolveService(intent, 0);
       if (ris !== null) fillTargetFromResolveInfo(result, ris, "serviceInfo", pm);
-    } else if (targetType === "receiver") {
-      var list = pm.queryBroadcastReceivers(intent, 0);
-      if (list !== null && list.size() === 1) {
-        fillTargetFromResolveInfo(result, list.get(0), "activityInfo", pm);
-      } else if (list !== null && list.size() > 1) {
-        result.targetReceiverCount = list.size();
-      }
     }
   } catch (e) {}
 }
@@ -1074,9 +1067,20 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
     var targetType = SENDING_TARGET_TYPE[methodName];
     var activityEvent = targetType === "activity" ||
       ["getIntent", "onNewIntent", "onActivityResult", "setResult"].indexOf(methodName) !== -1;
+    var broadcastEvent = targetType === "receiver" || methodName === "onReceive";
     var sendContext = (self && self.getPackageManager) ? self : firstArg;
     if (activityEvent && intent !== null) {
-      result.activityComponents = describeActivityComponents(intent, sendContext);
+      result.activityComponents = describeIntentComponents(intent, sendContext, "activity");
+    }
+    if (broadcastEvent && intent !== null) {
+      result.broadcastComponents = describeIntentComponents(intent, sendContext, "receiver");
+    }
+    if (methodName === "sendBroadcast" || methodName === "sendOrderedBroadcast") {
+      // Preserve the actual argument even when component/permission lookups fail.
+      result.broadcastPermission = sendPermission === null ? null : (
+        sendPermission === "" ? { name: "", level: "unresolved", definedBy: null }
+          : describePermission(getPackageManagerSafe(sendContext), sendPermission)
+      );
     }
     if (RECEIVING_METHODS[methodName]) {
       // onReceive: Context is the first argument; all other methods: 'this' is the Context
@@ -1098,7 +1102,7 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
       result.callerExported = info.exported.value;
       result.callerPermission = describePermission(pm, effectiveComponentPermission(info));
     } else if (intent !== null) {
-      if (activityEvent) return result;
+      if (activityEvent || broadcastEvent) return result;
       var routing = describeIntentRouting(intent);
       result.routingSource = routing.source;
       if (routing.selectorRole !== null) result.selectorRoutingRole = routing.selectorRole;
@@ -1110,7 +1114,6 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
       var sendPm = getPackageManagerSafe(sendContext);
       if (sendPm && targetType) {
         resolveSendTarget(sendPm, targetType, intent, routing, result);
-        if (sendPermission) result.broadcastPermission = describePermission(sendPm, sendPermission);
       }
     }
   } catch(e) {
@@ -1331,7 +1334,7 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
     var sendPermission = null;
     if (broadcastPermIndex >= 0 && arguments.length > broadcastPermIndex) {
       var permArg = arguments[broadcastPermIndex];
-      if (permArg) sendPermission = String(permArg);
+      if (permArg !== null && permArg !== undefined) sendPermission = String(permArg);
     }
 
     var as = buildAttackSurface(methodName, intent, this, firstArg, sendPermission);

@@ -217,6 +217,27 @@ class HistoryColumnWidthTests(unittest.TestCase):
 
 
 class ProjectDBTests(unittest.TestCase):
+    def test_broadcast_metadata_roundtrip_preserves_permission_null_and_absence(self):
+        surfaces = [
+            {"broadcastComponents": {}, "broadcastPermission": None},
+            {"broadcastComponents": {"base": {"component": "example/.R", "unavailable": True}},
+             "broadcastPermission": {"name": "example.RECEIVE", "level": "unresolved"}},
+            {"intentExplicit": False},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "broadcast.noxen")
+            db = ProjectDB(path)
+            db.create("broadcast")
+            for surface in surfaces:
+                db.save_intent({"timestamp": "2026-10-18T08:00:00+00:00", "method": "sendBroadcast",
+                                "intent": {}, "attackSurface": surface})
+            db.close()
+            reopened = ProjectDB(path)
+            try:
+                self.assertEqual([entry["attackSurface"] for entry in reopened.open_existing()], surfaces)
+            finally:
+                reopened.close()
+
     def test_activity_component_metadata_roundtrip(self):
         surface = {"activityComponents": {
             "base": {"component": "example/example.Base", "exported": False, "permission": None},

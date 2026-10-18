@@ -455,12 +455,6 @@ def _target_lines(attack_surface: dict) -> list[str]:
         lines = [_row("Target", f"{_markup(component)}{suffix}")]
         lines += _subject_tree(attack_surface.get("targetExported"), attack_surface.get("targetPermission"))
         return lines
-    if attack_surface.get("targetReceiverCount"):
-        return [_row("Target", f"(resolved) {attack_surface['targetReceiverCount']} receivers")]
-    if attack_surface.get("targetType") == "receiver":
-        # PackageManager only knows manifest receivers: runtime-registered ones may still
-        # receive the broadcast, so "unresolved" would wrongly suggest that nobody does.
-        return [_row("Target", "(no manifest receiver) [dim]— dynamic receivers are not visible[/dim]")]
     return [_row("Target", "(unresolved)")]
 
 
@@ -470,6 +464,7 @@ def _hook_caller_lines(class_name, method, attack_surface: dict) -> list[str]:
     if "callerExported" in attack_surface:
         lines += _subject_tree(attack_surface.get("callerExported"), attack_surface.get("callerPermission"))
     lines.append(_row("Method", f"{_markup(method)}()"))
+    lines += _broadcast_call_lines(method, attack_surface)
     return lines
 
 
@@ -508,10 +503,27 @@ def _is_activity_event(method, attack_surface: dict) -> bool:
             or attack_surface.get("targetType") == "activity")
 
 
-def _activity_component_info(component, attack_surface: dict, slot: str) -> dict | None:
+def _is_broadcast_event(method, attack_surface: dict) -> bool:
+    return (method in {"sendBroadcast", "sendOrderedBroadcast", "getBroadcast", "onReceive"}
+            or "broadcastComponents" in attack_surface or attack_surface.get("targetType") == "receiver")
+
+
+def _broadcast_call_lines(method, attack_surface: dict, *, row=_row) -> list[str]:
+    if method not in {"sendBroadcast", "sendOrderedBroadcast"}:
+        return []
+    if "broadcastPermission" not in attack_surface:
+        return []  # Older captures did not distinguish null from unavailable.
+    raw = attack_surface["broadcastPermission"]
+    permission = ('"" [dim](empty permission name)[/dim]' if isinstance(raw, dict) and raw.get("name") == ""
+                  else _format_permission(raw))
+    return [row("Receiver Perm", permission or "None")]
+
+
+def _captured_component_info(component, attack_surface: dict, slot: str) -> dict | None:
     if not component:
         return None
-    components = attack_surface.get("activityComponents")
+    metadata_key = "broadcastComponents" if "broadcastComponents" in attack_surface else "activityComponents"
+    components = attack_surface.get(metadata_key)
     if isinstance(components, dict):
         details = components.get(slot)
         return details if isinstance(details, dict) and details.get("component") == component else None
@@ -536,7 +548,7 @@ def _component_lines(component, details, *, row=_row, indent=_TREE_INDENT) -> li
 
 def _routing_lines(info: dict, attack_surface: dict, *, method=None, row=_row, include_target=True) -> list[str]:
     """Captured routing metadata, not Intent fields or proof of delivery."""
-    if _is_activity_event(method, attack_surface):
+    if _is_activity_event(method, attack_surface) or _is_broadcast_event(method, attack_surface):
         return []
     lines = []
     if "intentExplicit" in attack_surface:
@@ -553,9 +565,6 @@ def _routing_lines(info: dict, attack_surface: dict, *, method=None, row=_row, i
             lines.append(row("Selector", role))
     if include_target and "intentExplicit" in attack_surface:
         lines += _target_lines(attack_surface)
-        enforced = _format_permission(attack_surface.get("broadcastPermission"))
-        if enforced:
-            lines.append(row("Enforced Perm", enforced))
     return [_section("ROUTING"), *lines] if lines else []
 
 
@@ -959,11 +968,11 @@ def _edit_context_row(label: str, value: str) -> str:
 
 def render_edit_context(info: dict, attack_surface: dict, method=None) -> dict[str, str]:
     """Reuse bounded, read-only trees; editable outer grant flags live in the form."""
-    activity = _is_activity_event(method, attack_surface)
+    named_components = _is_activity_event(method, attack_surface) or _is_broadcast_event(method, attack_surface)
     selector_info = info.get("selector")
-    selector_details = _activity_component_info(
+    selector_details = _captured_component_info(
         selector_info.get("component"), attack_surface, "selector",
-    ) if activity and isinstance(selector_info, dict) else None
+    ) if named_components and isinstance(selector_info, dict) else None
     selector = _selector_lines(
         selector_info, row=_edit_context_row, indent="", component_details=selector_details,
         component_indent=" " * 16,
@@ -974,9 +983,12 @@ def render_edit_context(info: dict, attack_surface: dict, method=None) -> dict[s
     if clip_lines and clip.get("kind") == "clipdata" and isinstance(clip.get("count"), int):
         clip_lines.insert(1, _edit_context_row("Items", str(clip["count"])))
     sections = {}
-    if activity and (info.get("component") or "activityComponents" in attack_surface):
+    call = _broadcast_call_lines(method, attack_surface, row=_edit_context_row)
+    if call:
+        sections["call"] = "\n".join(call)
+    if named_components and (info.get("component") or "activityComponents" in attack_surface or "broadcastComponents" in attack_surface):
         sections["component"] = "\n".join(_component_lines(
-            info.get("component"), _activity_component_info(info.get("component"), attack_surface, "base"),
+            info.get("component"), _captured_component_info(info.get("component"), attack_surface, "base"),
             row=_edit_context_row, indent=" " * 16,
         ))
     for key, lines in (("routing", routing), ("selector", selector), ("clipData", clip_lines)):
@@ -1000,20 +1012,20 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
     """The shared section stack: caller context, payload, pending intent, extras."""
     out = [_section("HOOK")]
     out += _hook_caller_lines(class_name, method, attack_surface)
-    activity = _is_activity_event(method, attack_surface)
+    named_components = _is_activity_event(method, attack_surface) or _is_broadcast_event(method, attack_surface)
     routing = _routing_lines(info, attack_surface, method=method)
     if routing:
         out += [""] + routing
     out.append("")
     out.append(_section("CAPTURED INTENT PAYLOAD"))
     out += _payload_lines(
-        info, component_details=_activity_component_info(info.get("component"), attack_surface, "base") if activity else None,
-        show_component=activity and "activityComponents" in attack_surface,
+        info, component_details=_captured_component_info(info.get("component"), attack_surface, "base") if named_components else None,
+        show_component=named_components and ("activityComponents" in attack_surface or "broadcastComponents" in attack_surface),
     )
     selector_info = info.get("selector")
-    selector_details = _activity_component_info(
+    selector_details = _captured_component_info(
         selector_info.get("component"), attack_surface, "selector",
-    ) if activity and isinstance(selector_info, dict) else None
+    ) if named_components and isinstance(selector_info, dict) else None
     selector = _selector_lines(selector_info, component_details=selector_details)
     if selector:
         out += [""] + selector
