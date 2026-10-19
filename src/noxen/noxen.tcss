@@ -613,6 +613,8 @@ Switch.-on > .switch--slider {
 .ef_section_spacer { width: 1fr; }
 .ef_x_row { height: auto; min-height: 1; align: left top; }
 .ef_x_row Input { height: 1; }
+.ef_value_cell { width: 1fr; height: auto; }
+.ef_value_note { height: auto; padding-left: 2; color: $foreground-muted; }
 .ef_x_key_cell, .ef_x_key_input, .ef_x_key_header {
     width: 30%; min-width: 18; max-width: 40;
 }

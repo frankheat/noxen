@@ -63,6 +63,7 @@ from noxen.exporting import (
     write_filter_export,
     write_history_export,
 )
+from noxen.extra_value_input import ExtraValueInput, extra_value_preview, needs_value_preview
 from noxen.filters import FilterManager
 from noxen.frida_devices import enumerate_preferred_devices
 from noxen.frida_session import FridaSession, SessionConfig
@@ -718,25 +719,33 @@ class NoxenApp(App):
         self._edit_extra_counter += 1
         n = self._edit_extra_counter
         self._edit_extra_rows[n] = {"key": key, "is_new": is_new, "type": simple_type or "string"}
+        if simple_type == "null":
+            value = ""
+        preview_only = needs_value_preview(value)
+        self._edit_extra_rows[n]["value_read_only"] = preview_only
+        value_input = ExtraValueInput(
+            id=f"ef_xv_{n}",
+            value=extra_value_preview(value) if preview_only else value,
+            disabled=preview_only or (simple_type is None and not is_new) or simple_type == "null",
+            placeholder=EXTRA_VALUE_PLACEHOLDERS.get(simple_type or "string", "value") if is_new else "",
+        )
+        value_cell = Vertical(
+            value_input,
+            Label("Read-only · escaped value", classes="ef_value_note"),
+            classes="ef_value_cell",
+        ) if preview_only else value_input
 
         if is_new:
             selected_type = simple_type or "string"
-            is_null = selected_type == "null"
             row = Horizontal(
-                Input(id=f"ef_xk_{n}", value=key, placeholder="key", classes="ef_x_key_input"),
+                Input(id=f"ef_xk_{n}", value=key, placeholder="key", classes="ef_x_key_input", disabled=preview_only),
                 Select(EXTRA_TYPE_OPTIONS, id=f"ef_xt_{n}", value=selected_type,
-                       allow_blank=False, classes="ef_x_type_select"),
-                Input(
-                    id=f"ef_xv_{n}",
-                    value="" if is_null else value,
-                    placeholder=EXTRA_VALUE_PLACEHOLDERS[selected_type],
-                    disabled=is_null,
-                ),
+                       allow_blank=False, classes="ef_x_type_select", disabled=preview_only),
+                value_cell,
                 Button(Text("[×]"), id=f"ef_xrm_{n}", classes="ef_x_rm"),
                 id=f"ef_x_{n}", classes="ef_x_row",
             )
         else:
-            editable = simple_type is not None and simple_type != "null"
             type_label = simple_type or java_type_display(java_type)
             key_label = ExtraKeyLabel(key)
             key_widgets = [key_label]
@@ -745,7 +754,7 @@ class NoxenApp(App):
             row = Horizontal(
                 Vertical(*key_widgets, classes="ef_x_key_cell"),
                 Label(type_label, classes="ef_x_type_label"),
-                Input(id=f"ef_xv_{n}", value=value, disabled=not editable),
+                value_cell,
                 Button(Text("[×]"), id=f"ef_xrm_{n}", classes="ef_x_rm", disabled=not removable),
                 id=f"ef_x_{n}", classes="ef_x_row",
             )
@@ -814,7 +823,7 @@ class NoxenApp(App):
                 )
 
             snapshot = displayed_extras.get(key)
-            if snapshot is not None and snapshot.get("editable") is False:
+            if snapshot is not None and (snapshot.get("editable") is False or row_info.get("value_read_only")):
                 extras[key] = copy.deepcopy(snapshot)
                 continue
 
@@ -1565,7 +1574,7 @@ class NoxenApp(App):
                 value_input = self.query_one(f"#ef_xv_{n}", Input)
                 extra_type = str(event.value)
                 is_null = extra_type == "null"
-                value_input.disabled = is_null
+                value_input.disabled = is_null or self._edit_extra_rows.get(int(n), {}).get("value_read_only", False)
                 value_input.placeholder = EXTRA_VALUE_PLACEHOLDERS.get(extra_type, "value")
                 if is_null:
                     value_input.value = ""
