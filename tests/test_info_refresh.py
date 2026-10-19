@@ -13,6 +13,14 @@ from tests.test_info_tab import SNAPSHOT, project_args
 from tests.ui_test_case import IsolatedAppTestCase
 
 
+async def wait_until(predicate):
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(.01)
+
+    await asyncio.wait_for(poll(), timeout=5)
+
+
 class SnapshotSession:
     def __init__(self, *responses, blocked=False):
         self.responses = iter(responses)
@@ -54,9 +62,7 @@ class DeferredUI:
             raise TimeoutError("test UI gate timed out")
 
     async def take(self):
-        async with asyncio.timeout(5):
-            while self.pending.empty():
-                await asyncio.sleep(.01)
+        await wait_until(lambda: not self.pending.empty())
         return self.pending.get_nowait()
 
     def publish(self, request):
@@ -153,9 +159,7 @@ class InfoRefreshTests(IsolatedAppTestCase):
         async with self.rig() as (app, pilot, ui, sessions):
             session = self.attach(app, sessions, SNAPSHOT, blocked=True)
             app._fetch_app_info_worker()
-            async with asyncio.timeout(5):
-                while not session.entered.is_set():
-                    await asyncio.sleep(.01)
+            await wait_until(session.entered.is_set)
             app._do_disconnect()
             session.release.set()
             ui.publish(await ui.take())
@@ -220,9 +224,7 @@ class InfoRefreshTests(IsolatedAppTestCase):
             with patch("noxen.app.time", SimpleNamespace(sleep=backoff)):
                 worker = app._fetch_app_info_worker()
                 try:
-                    async with asyncio.timeout(5):
-                        while not sleeping.is_set():
-                            await asyncio.sleep(.01)
+                    await wait_until(sleeping.is_set)
                     replacement = self.attach(app, sessions, SNAPSHOT)
                 finally:
                     resume.set()
