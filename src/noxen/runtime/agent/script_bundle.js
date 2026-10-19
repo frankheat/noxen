@@ -14087,13 +14087,14 @@ std_string_c_str (StdString * self)
       "pid": Process.id
     });
   }
-  function dumpIntent(intent) {
+  function dumpIntent(intent, strictComponent) {
     var infoIntent = {};
     if (intent === null) return infoIntent;
     try {
       var component = intent.getComponent();
       infoIntent.component = component ? component.getPackageName() + "/" + component.getClassName() : null;
     } catch (e) {
+      if (strictComponent) throw e;
       infoIntent.component = null;
     }
     try {
@@ -14229,6 +14230,19 @@ std_string_c_str (StdString * self)
       modQueue.forEach(function(mod) {
         if (mod.type === "action") {
           intent.setAction(mod.val === "" ? null : mod.val);
+        } else if (mod.type === "component") {
+          if (mod.val === "") {
+            intent.setComponent(null);
+          } else {
+            var name = String(mod.val);
+            var separator = name.indexOf("/");
+            if (separator < 1 || separator === name.length - 1 || name.indexOf("/", separator + 1) !== -1 || /[\s\x00-\x1f\x7f]/.test(name) || name.slice(separator + 1) === ".") {
+              throw new Error("Component must use package/class syntax");
+            }
+            var component = Java.use("android.content.ComponentName").unflattenFromString(name);
+            if (component === null) throw new Error("Bad component name: " + name);
+            intent.setComponent(component);
+          }
         } else if (mod.type === "data" || mod.type === "mime") {
         } else if (mod.type === "cat_add") {
           intent.addCategory(mod.val);
@@ -14499,7 +14513,7 @@ std_string_c_str (StdString * self)
           var modificationResult = applyModifications(intent);
           var resultingIntent = null;
           try {
-            resultingIntent = dumpIntent(intent);
+            resultingIntent = dumpIntent(intent, true);
           } catch (snapshotError) {
             modificationResult.ok = false;
             modificationResult.error = (modificationResult.error || "") + " (resulting Intent could not be captured: " + String(snapshotError).slice(0, 150) + ")";
@@ -14532,6 +14546,7 @@ std_string_c_str (StdString * self)
   function normalizeRpcMods(mods) {
     if (!Array.isArray(mods)) throw new Error("modifications must be an array");
     var supported = {
+      component: true,
       action: true,
       data: true,
       mime: true,

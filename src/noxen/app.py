@@ -76,6 +76,7 @@ from noxen.intent_mods import (
     confirmed_modification,
     diff_intents,
     java_type_display,
+    normalize_component,
     parse_flag_value,
     parse_intent_mod_command,
     validate_extra_value,
@@ -523,6 +524,7 @@ class NoxenApp(App):
     def _populate_edit_form(self, info: dict) -> None:
         self._edit_display_info = info
 
+        self.query_one("#ef_component", Input).value = info.get("component") or ""
         self.query_one("#ef_action", Input).value = info.get("action", "") or ""
         self.query_one("#ef_data", Input).value = info.get("data", "") or ""
         self.query_one("#ef_mime", Input).value = info.get("mimeType", "") or ""
@@ -569,13 +571,33 @@ class NoxenApp(App):
         context = render_edit_context(info, entry.get("attackSurface") or {}, entry.get("method"))
         for key in ("call", "component"):
             body = self.query_one(f"#ef_{key}_body", Static)
-            body.display = key in context
-            body.update(self._render_markup(context.get(key, "")))
+            text = context.get(key, "")
+            if key == "component":
+                text = text.partition("\n")[2]  # The name is already in its editable Input.
+            body.display = bool(text)
+            body.update(self._render_markup(text))
         for key, widget in (("routing", "routing"), ("selector", "selector"), ("clipData", "clip")):
             self.query_one(f"#ef_{widget}_section").display = key in context
             self.query_one(f"#ef_{widget}_body", Static).update(self._render_markup(context.get(key, "")))
         self.query_one("#ef_readonly_context").display = any(key in context for key in ("selector", "clipData"))
         self._update_edit_grant_flags()
+
+    def _update_edit_component_context(self) -> None:
+        value = self.query_one("#ef_component", Input).value.strip()
+        text = ""
+        try:
+            normalize_component(value)
+        except ValueError:
+            pass  # Do not show stale permissions while an incomplete name is typed.
+        else:
+            entry = self._current_intercepted_entry or {}
+            # Only this field is changing; do not re-render nested trees per keypress.
+            info = {"component": value or None}
+            context = render_edit_context(info, entry.get("attackSurface") or {}, entry.get("method"))
+            text = context.get("component", "").partition("\n")[2]
+        body = self.query_one("#ef_component_body", Static)
+        body.display = bool(text)
+        body.update(self._render_markup(text))
 
     def _update_edit_grant_flags(self) -> None:
         text = self.query_one("#ef_flags", Input).value.strip()
@@ -661,11 +683,11 @@ class NoxenApp(App):
         if error := self._mod_safety_error(mod):
             return error
         try:
-            draft = self._collect_edit_draft()
+            draft = self._collect_edit_draft(mod)
         except _EditValidationError as error:
             self._show_edit_validation_error(error)
-            return f"Fix the invalid editor field first: {error}"
-        self._populate_edit_form(apply_mods_to_intent(draft, [mod]))
+            return f"Command not applied: {error}"
+        self._populate_edit_form(draft)
         return None
 
     def _add_edit_category_row(self, value: str):
@@ -727,9 +749,16 @@ class NoxenApp(App):
 
         self.query_one("#ef_extras").mount(row)
 
-    def _collect_edit_draft(self) -> dict:
+    def _collect_edit_draft(self, pending_mod: tuple | None = None) -> dict:
+        """Validate the resulting draft, including an optional command, before publishing it."""
+        mod_type, mod_key, mod_value, mod_extra_type = pending_mod or ("", "", "", "")
         original = (self._current_intercepted_entry or {}).get("intent", {}) or {}
         draft = apply_mods_to_intent(original, [])
+        component = mod_value if mod_type == "component" else self.query_one("#ef_component", Input).value
+        try:
+            draft["component"] = normalize_component(component) or None
+        except ValueError as error:
+            raise _EditValidationError(str(error), "#ef_component", title="Invalid component") from None
         draft["action"] = self.query_one("#ef_action", Input).value or None
         draft["data"] = self.query_one("#ef_data", Input).value or None
         draft["mimeType"] = self.query_one("#ef_mime", Input).value or None
@@ -737,7 +766,7 @@ class NoxenApp(App):
         categories = []
         for n in self._edit_cat_rows:
             value = self.query_one(f"#ef_cv_{n}", Input).value.strip()
-            if not value:
+            if not value or (mod_type == "cat_rem" and value == mod_value):
                 continue
             if value in categories:
                 raise _EditValidationError(
@@ -766,6 +795,13 @@ class NoxenApp(App):
                 key = row_info["key"]
                 extra_type = row_info["type"]
                 value = self.query_one(f"#ef_xv_{n}", Input).value
+
+            # The command removes/replaces every row with this key, so its old
+            # invalid values or duplicates are not part of the resulting draft.
+            if mod_type in {"extra_add", "extra_rem"} and key == mod_key:
+                if mod_type == "extra_add":
+                    extras.setdefault(key, {})  # Preserve the first row's position until replacement.
+                continue
 
             if key in extras:
                 raise _EditValidationError(
@@ -809,7 +845,11 @@ class NoxenApp(App):
                 title="Invalid flags",
             )
         draft["flags"] = flags
-        return draft
+        if mod_type == "extra_add":
+            error = validate_extra_value(mod_extra_type, mod_value)
+            if error:
+                raise _EditValidationError(f"{mod_key}: {error}", "#ef_add_extra")
+        return apply_mods_to_intent(draft, [pending_mod]) if pending_mod else draft
 
     def _collect_edit_mods(self) -> list:
         original = (self._current_intercepted_entry or {}).get("intent", {}) or {}
@@ -881,7 +921,9 @@ class NoxenApp(App):
         if mods:
             report = getattr(result, "report", None)
             before = copy.deepcopy(entry.get("intent") or {}) if entry else {}
-            actual, changed, error = confirmed_modification(before, report)
+            actual, changed, error = confirmed_modification(
+                before, report, require_component=any(mod[0] == "component" for mod in mods)
+            )
             if actual is not None and entry is not None:
                 entry["intent"] = actual
                 if changed:
@@ -1228,6 +1270,9 @@ class NoxenApp(App):
                     yield Static(id="ef_call_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_section_header"):
                         yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
+                    with Horizontal(classes="ef_row"):
+                        yield Label("Component", classes="ef_label")
+                        yield Input(id="ef_component", placeholder="e.g. com.example/.MainActivity")
                     yield Static(id="ef_component_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_row"):
                         yield Label("Action", classes="ef_label")
@@ -2743,6 +2788,9 @@ class NoxenApp(App):
     def on_input_changed(self, event: Input.Changed):
         inp_id = event.input.id
         text = event.value.strip()
+        if inp_id == "ef_component":
+            self._update_edit_component_context()
+            return
         if inp_id == "ef_flags":
             self._update_edit_grant_flags()
             return

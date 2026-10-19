@@ -375,11 +375,12 @@ class ProjectDB:
         with self._lock, self._conn:
             self._conn.execute(
                 """UPDATE intents SET
-                   action=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?, intent_package=?,
+                   action=?, component=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?, intent_package=?,
                    capture_metadata=?
                    WHERE id=?""",
                 (
                     modified_info.get("action"),
+                    modified_info.get("component"),
                     modified_info.get("data"),
                     _stored_mime_type(modified_info),
                     modified_info.get("flags"),

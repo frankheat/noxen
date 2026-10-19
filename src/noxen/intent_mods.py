@@ -231,11 +231,31 @@ def _decode_android_int(value: str) -> int:
     return number
 
 
+def normalize_component(value: str) -> str:
+    """Validate flattened syntax and expand Android's leading-dot class form."""
+    value = value.strip()
+    if not value:
+        return ""
+    package, separator, name = value.partition("/")
+    if (not separator or not package or not name or name == "." or "/" in name
+            or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise ValueError("Component must use package/class syntax, e.g. com.example/.MainActivity")
+    return package + "/" + (package + name if name.startswith(".") else name)
+
+
 def parse_intent_mod_command(parts: list[str]) -> IntentModParseResult:
     if not parts:
         return None, None
 
     command = parts[0].lower()
+    if command == "component":
+        if len(parts) != 2:
+            return None, "[red]Usage: component <package/class> | component clear[/red]"
+        try:
+            value = "" if parts[1].lower() == "clear" else normalize_component(parts[1])
+        except ValueError as error:
+            return None, f"[red]{error}[/red]"
+        return ("component", "", value, ""), None
     if command == "action":
         return _single_value_mod(parts, "action", "[red]Usage: action <val>[/red]")
     if command == "data":
@@ -274,15 +294,19 @@ def apply_mods_to_entry(entry: dict, mods: list[IntentMod]) -> None:
     entry["intent"] = apply_mods_to_intent(entry["original_intent"], mods)
 
 
-def confirmed_modification(original: dict, report: dict | None) -> tuple[dict | None, bool, str | None]:
+def confirmed_modification(original: dict, report: dict | None, *, require_component=False) -> tuple[dict | None, bool, str | None]:
     """Return the agent-observed Intent, actual change flag, and any warning.
 
     A missing result is never replaced by a prediction from the requested mods.
     """
     actual = report.get("infoIntent") if isinstance(report, dict) else None
     required = {"action", "data", "mimeType", "flags", "categories", "extras"}
+    if require_component or "component" in original:
+        required.add("component")
     if not isinstance(actual, dict) or not required.issubset(actual):
         return None, False, "Resulting Intent could not be verified; requested changes are not shown as applied"
+    if actual.get("component") is not None and not isinstance(actual["component"], str):
+        return None, False, "Resulting Component could not be verified; requested changes are not shown as applied"
 
     actual = copy.deepcopy(actual)
     extras_meta = actual.get("extrasMeta")
@@ -310,7 +334,7 @@ def confirmed_modification(original: dict, report: dict | None) -> tuple[dict | 
 
     changed = any(
         comparable(original, field) != comparable(actual, field)
-        for field in ("action", "data", "mimeType", "flags", "categories", "extras")
+        for field in ("component", "action", "data", "mimeType", "flags", "categories", "extras")
     )
     if not report.get("ok"):
         detail = str(report.get("error") or "unknown agent error")
@@ -327,7 +351,9 @@ def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
     info["extras"] = dict(info.get("extras") or {})
 
     for mod_type, key, value, extra_type in mods:
-        if mod_type == "action":
+        if mod_type == "component":
+            info["component"] = normalize_component(value) or None
+        elif mod_type == "action":
             info["action"] = value or None
         elif mod_type == "data":
             info["data"] = value or None
@@ -365,6 +391,15 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
     before = original or {}
     after = draft or {}
     mods: list[IntentMod] = []
+
+    old_component = before.get("component") or ""
+    new_component = normalize_component(after.get("component") or "")
+    try:
+        old_component = normalize_component(old_component)
+    except ValueError:
+        pass  # A malformed legacy value can still be cleared or replaced.
+    if old_component != new_component:
+        mods.append(("component", "", new_component, ""))
 
     for field, mod_type in (("action", "action"), ("data", "data"), ("mimeType", "mime")):
         old_value = before.get(field) or ""

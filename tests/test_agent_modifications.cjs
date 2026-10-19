@@ -16,6 +16,12 @@ function runIntercept(mods, floatParser = value => Number(value)) {
   const java = {
     synchronized(_lock, callback) { callback(); },
     use(className) {
+      if (className === 'android.content.ComponentName') {
+        return { unflattenFromString(value) {
+          const [pkg, name] = value.split('/');
+          return pkg + '/' + (name.startsWith('.') ? pkg + name : name);
+        } };
+      }
       if (className === 'java.lang.Float') {
         return { valueOf(value) {
           floatValues.push(value);
@@ -31,6 +37,7 @@ function runIntercept(mods, floatParser = value => Number(value)) {
   context.beginHold = () => 'hold-1';
   context.endHold = () => {};
   context.dumpIntent = intent => ({
+    component: intent.component,
     action: intent.action, data: intent.data, mimeType: intent.mimeType,
     flags: intent.flags, categories: [...intent.categories], extras: { ...intent.extras },
   });
@@ -38,9 +45,12 @@ function runIntercept(mods, floatParser = value => Number(value)) {
   context.lock = { wait() { context.modQueue = mods; context.resumeMode = 'forward'; } };
 
   const intent = {
+    component: 'example/example.Old',
+    selector: { component: 'example/example.Selector' }, clipData: { text: 'keep' },
     action: 'original', data: 'content://old', mimeType: 'text/plain',
     flags: 0x10, categories: new Set(['old.category']), extras: { stale: 'old' },
     setAction(value) { this.action = value; },
+    setComponent(value) { this.component = value; },
     getData() { return this.data; },
     getType() { return this.mimeType; },
     setDataAndType(data, mimeType) { this.data = data; this.mimeType = mimeType; },
@@ -96,6 +106,43 @@ test('lowercase special floating values are normalized before Java parsing', () 
 test('an unmodified forward does not send a modification result', () => {
   const result = runIntercept([]);
   assert.equal(result.messages.some(message => message.noxenEvent === 'modification_result'), false);
+});
+
+test('component replacement expands a relative class and leaves nested objects untouched', () => {
+  const result = runIntercept([{ type: 'component', val: 'other/.Target' }]);
+  const report = result.messages.find(message => message.noxenEvent === 'modification_result');
+  assert.equal(report.ok, true);
+  assert.equal(report.infoIntent.component, 'other/other.Target');
+  assert.equal(result.intent.selector.component, 'example/example.Selector');
+  assert.equal(result.intent.clipData.text, 'keep');
+  assert.equal(result.intent.action, 'original');
+});
+
+test('component removal sets null without deleting selector or package restrictions', () => {
+  const result = runIntercept([{ type: 'component', val: '' }]);
+  const report = result.messages.find(message => message.noxenEvent === 'modification_result');
+  assert.equal(report.ok, true);
+  assert.equal(report.infoIntent.component, null);
+  assert.equal(result.intent.selector.component, 'example/example.Selector');
+});
+
+test('malformed component values fail without applying a later modification', () => {
+  for (const value of ['missingSlash', '/Class', 'pkg/', 'pkg/A/B', 'pkg/.', 'pkg/A B', 'pkg/A\u0000B']) {
+    const result = runIntercept([{ type: 'component', val: value }, { type: 'action', val: 'later' }]);
+    const report = result.messages.find(message => message.noxenEvent === 'modification_result');
+    assert.equal(report.ok, false, value);
+    assert.equal(report.infoIntent.component, 'example/example.Old');
+    assert.equal(report.infoIntent.action, 'original');
+  }
+});
+
+test('confirmation cannot confuse an unreadable Component with an observed null', () => {
+  const context = vm.createContext({ Java: {}, rpc: {}, send() {} });
+  vm.runInContext(agentSource, context, { filename: agentPath });
+  const unreadable = { getComponent() { throw new Error('component read failed'); } };
+  assert.throws(() => context.dumpIntent(unreadable, true), /component read failed/);
+  assert.equal(context.dumpIntent(unreadable).component, null); // Passive capture fallback unchanged.
+  assert.equal(context.dumpIntent({ getComponent() { return null; } }, true).component, null);
 });
 
 test('data and MIME changes preserve each other and the result includes flags and categories', () => {

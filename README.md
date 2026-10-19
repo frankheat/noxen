@@ -29,8 +29,9 @@ then lets you inspect, modify, forward, or drop them from a terminal UI.
 - Shows an **Info app** tab: a snapshot of the hooked app (identity, build flags, signing,
   permissions, and a searchable roster of all components with their exported flag,
   required permission, and access class classified as `open`, `weak`, or `protected`).
-- Lets you modify the base Intent's action, data, MIME type, categories, flags, and
-  supported extras before forwarding. Selector and ClipData remain read-only.
+- Lets you modify or clear the base Intent's component, and edit action, data,
+  MIME type, categories, flags, and supported extras before forwarding. Selector
+  and ClipData remain read-only.
 - Lets you drop intercepted intents.
 - Stores captured history, outcomes, filters, columns, and modified intent snapshots
   in `.noxen` project files.

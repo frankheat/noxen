@@ -11,6 +11,8 @@ HELP_MENU = {
         ("d", "Drop/block the intercepted intent"),
     ],
     "Intent Modifications": [
+        ("component <package/class>", "Set base Intent Component"),
+        ("component clear", "Clear base Intent Component"),
         ("action <val>", "Set Intent Action"),
         ("data <uri>", "Set Intent Data URI"),
         ("mime <type>", "Set Intent MIME type"),
@@ -103,7 +105,7 @@ SUGGESTION_TEMPLATE_WIDTH = 32
 
 INTENT_COMMAND_BASES = frozenset({
     "forward", "f", "drop", "d",
-    "action", "data", "mime",
+    "component", "action", "data", "mime",
     "+cat", "-cat", "+flag", "-flag", "+x", "-x",
 })
 

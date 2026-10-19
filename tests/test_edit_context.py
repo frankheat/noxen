@@ -186,14 +186,15 @@ class EditContextUITests(IsolatedAppTestCase):
                     self.assertFalse(app.query_one("#ef_call_body").display)
                     component = app.query_one("#ef_component_body", Static)
                     self.assertTrue(component.display)
-                    self.assertIn("example/.Work", str(component.render()))
+                    self.assertEqual(app.query_one("#ef_component", Input).value, "example/.Work")
                     self.assertIn("false", str(component.render()))
                     self.assertEqual(component.content_region.x, app.query_one("#ef_selector_body").content_region.x)
                     app._current_intercepted_entry = {"method": "startService",
                                                        "attackSurface": {"serviceComponents": {}}}
                     app._populate_edit_form({"component": None})
                     await pilot.pause()
-                    self.assertIn("None", str(component.render()))
+                    self.assertEqual(app.query_one("#ef_component", Input).value, "")
+                    self.assertFalse(component.display)
                     self.assertNotIn("example/.Work", str(component.render()))
 
     async def test_activity_editor_hides_routing_and_resets_component_context(self):
@@ -216,7 +217,7 @@ class EditContextUITests(IsolatedAppTestCase):
                 self.assertFalse(app.query_one("#ef_routing_section").display)
                 component = app.query_one("#ef_component_body", Static)
                 self.assertTrue(component.display)
-                self.assertIn(info["component"], str(component.render()))
+                self.assertEqual(app.query_one("#ef_component", Input).value, info["component"])
                 self.assertIn("Exported", str(component.render()))
                 app._current_intercepted_entry = {
                     "method": "startService", "attackSurface": {"intentExplicit": False},

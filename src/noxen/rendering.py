@@ -555,7 +555,7 @@ def _captured_component_info(component, attack_surface: dict, slot: str) -> dict
         if not isinstance(components, dict):
             return None
         details = components.get(slot)
-        return details if isinstance(details, dict) and details.get("component") == component else None
+        return details if isinstance(details, dict) and details.get("component") == component else {"unavailable": True}
     # Older captures stored details only for the selected target. Reuse them only
     # when they name this exact component, never attach a resolved implicit target.
     if attack_surface.get("targetComponent") == component:
@@ -1111,6 +1111,12 @@ def _changes_lines(original: dict, info: dict) -> list[str]:
     """The [CHANGES] diff for a modified-then-forwarded intent (History detail)."""
     out = ["", _section("CHANGES")]
     has_changes = False
+
+    orig_component = original.get("component") or ""
+    mod_component = info.get("component") or ""
+    if orig_component != mod_component:
+        has_changes = True
+        out.append(_row("Component", f"[dim]{_markup(orig_component or '(none)')}[/dim] → {_markup(mod_component or '(none)')}"))
 
     orig_action = original.get("action") or ""
     mod_action = info.get("action") or ""
