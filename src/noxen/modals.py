@@ -236,8 +236,9 @@ class ColumnSelectModal(ModalScreen):
         background: transparent;
         color: $foreground;
         text-style: bold;
-        margin-left: 1;
+        margin-left: 0;
     }
+    #csm_width_actions #csm_btn_apply_widths { margin-left: 2; }
     #csm_btn_apply_widths:hover,
     #csm_btn_apply_widths:focus {
         border: round $success;
