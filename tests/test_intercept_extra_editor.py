@@ -19,6 +19,45 @@ class InterceptExtraEditorTests(IsolatedAppTestCase):
     async def asyncSetUp(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0
 
+    async def test_editor_buttons_remain_readable_when_focused_and_pressed(self):
+        app = NoxenApp(project_args(str(self.settings_path.parent / "buttons.noxen")))
+        self.addCleanup(app.db.close)
+        async with app.run_test(size=(120, 60)) as pilot:
+            app.query_one("#main_tabs").active = "tab_intercept"
+            app._current_intercepted_entry = {
+                "intent": {"categories": ["example.category"], "extras": {
+                    "message": {"type": "java.lang.String", "value": "hello"},
+                }},
+            }
+            app._enter_edit_mode()
+            app._add_edit_extra_row("new", "string", "value", is_new=True)
+            await pilot.pause()
+            for theme in ("noxen-dark", "noxen-light"):
+                app.theme = theme
+                await pilot.pause()
+                for button in app.query("#ef_add_cat, #ef_add_extra, .ef_x_rm"):
+                    button.focus()
+                    button.add_class("-active")
+                    await pilot.pause()
+                    self.assertFalse(button.rich_style.reverse)
+                    self.assertTrue(button.rich_style.bold)
+                    self.assertEqual(button.styles.background.a, 0)
+                    if button.has_class("ef_x_rm"):
+                        self.assertEqual(button.label.plain, "[×]")
+                        self.assertEqual(button.region.height, 1)
+                        self.assertEqual(button.region.width, 5)
+                    button.remove_class("-active")
+                categories = len(app._edit_cat_rows)
+                await pilot.click("#ef_add_cat")
+                self.assertEqual(len(app._edit_cat_rows), categories + 1)
+                await pilot.click(f"#ef_crm_{max(app._edit_cat_rows)}")
+                self.assertEqual(len(app._edit_cat_rows), categories)
+                extras = len(app._edit_extra_rows)
+                await pilot.click("#ef_add_extra")
+                self.assertEqual(len(app._edit_extra_rows), extras + 1)
+                await pilot.click(f"#ef_xrm_{max(app._edit_extra_rows)}")
+                self.assertEqual(len(app._edit_extra_rows), extras)
+
     async def test_null_disables_value_and_invalid_collection_blocks_forward(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_cwd = os.getcwd()

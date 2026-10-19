@@ -605,7 +605,9 @@ Switch.-on > .switch--slider {
 .ef_context_body { height: auto; }
 #ef_component_body, #ef_call_body { margin-bottom: 1; }
 .ef_section_header { height: 1; align: left middle; margin-bottom: 1; }
-#ef_categories_header { margin-bottom: 0; }
+.ef_add_header { height: 3; }
+.ef_add_header .ef_section { height: 3; content-align: left middle; }
+#ef_categories_header, #ef_extras_header { margin-bottom: 0; }
 .ef_section { width: auto; text-style: bold; color: $foreground; }
 .ef_section_meta { width: auto; margin-left: 2; color: $foreground-muted; }
 .ef_section_spacer { width: 1fr; }
@@ -633,23 +635,27 @@ Switch.-on > .switch--slider {
 .ef_x_columns { height: 1; color: $foreground-muted; text-style: bold; }
 .ef_x_type_header { width: 25; }
 .ef_x_value_header { width: 1fr; padding-left: 2; }
-.ef_x_remove_header { width: 3; margin-right: 2; }
+.ef_x_remove_header { width: 5; margin-right: 2; }
 .ef_x_key_input { padding: 0; }
 .ef_x_type_select { width: 25; height: 1; }
-.ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
+.ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1 0 0; }
 .ef_x_rm {
-    width: 3;
+    width: 5;
     height: 1;
     border: none;
-    min-width: 3;
+    min-width: 5;
     padding: 0;
     margin-right: 2;
-    color: $foreground-muted;
+    color: $foreground;
+    text-style: bold;
     background: transparent;
+    tint: transparent;
+    background-tint: $surface 0%;
 }
-.ef_x_rm:hover, .ef_x_rm:focus {
+.ef_x_rm:hover, .ef_x_rm:focus, .ef_x_rm.-active {
     color: $error;
-    background: $boost;
+    text-style: bold;
+    background: transparent;
     background-tint: $surface 0%;
 }
 #ef_extras {
@@ -660,23 +666,34 @@ Switch.-on > .switch--slider {
     grid-gutter: 1 0;
 }
 #ef_categories { height: auto; }
+#ef_categories.has-rows, #ef_extras.has-rows { padding: 0 0 1 0; }
 #ef_add_extra, #ef_add_cat {
     width: auto;
-    height: 1;
-    border: none;
+    min-width: 0;
+    height: 3;
+    border: round $foreground-muted;
     padding: 0 1;
     color: $foreground;
+    text-style: bold;
     background: transparent;
+    tint: transparent;
+    background-tint: $surface 0%;
 }
 #ef_add_extra:hover, #ef_add_extra:focus,
-#ef_add_cat:hover, #ef_add_cat:focus {
+#ef_add_extra.-active,
+#ef_add_cat:hover, #ef_add_cat:focus, #ef_add_cat.-active {
     color: $success;
-    background: $boost;
+    text-style: bold;
+    border: round $success;
+    background: transparent;
     background-tint: $surface 0%;
 }
 .ef_cat_row { height: 1; align: left middle; margin-top: 1; }
-.ef_cat_input { padding: 0; }
+.ef_cat_input { height: 1; padding: 0; }
 #edit_form Rule { margin: 1 0; color: $foreground-muted; }
+#edit_form Rule.ef_add_separator { margin-bottom: 0; }
+#ef_readonly_context Rule { margin: 0 0 1 0; }
+#ef_selector_body, #ef_clip_body { padding-bottom: 1; }
 #app_footer {
     dock: bottom;
     height: 1;

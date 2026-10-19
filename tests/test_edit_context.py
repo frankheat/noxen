@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from rich.text import Text
-from textual.widgets import Input, Static
+from textual.widgets import Button, Input, Static
 
 from tests.ui_test_case import IsolatedAppTestCase
 
@@ -269,9 +269,10 @@ class EditContextUITests(IsolatedAppTestCase):
                                 extras = list(app.query(".ef_x_row"))
                                 category_end = categories[-1] if categories else app.query_one("#ef_categories_header")
                                 extra_end = extras[-1] if extras else app.query_one(".ef_x_columns")
-                                for last, rule in ((app.query_one("#ef_grant_row"), rules[0]),
-                                                   (category_end, rules[1]), (extra_end, rules[2])):
-                                    self.assertEqual(rule.region.y - last.region.bottom, 1)
+                                self.assertEqual(rules[0].region.y - app.query_one("#ef_grant_row").region.bottom, 1)
+                                for rows, last, rule in ((categories, category_end, rules[1]),
+                                                         (extras, extra_end, rules[2])):
+                                    self.assertEqual(rule.region.y - last.region.bottom, int(bool(rows)))
                                 for rows in (categories, extras):
                                     for previous, following in zip(rows, rows[1:]):
                                         self.assertEqual(following.region.y - previous.region.bottom, 1)
@@ -286,9 +287,13 @@ class EditContextUITests(IsolatedAppTestCase):
                                 for selector in (".ef_cat_row", ".ef_x_row"):
                                     rows = list(app.query(selector))
                                     if rows:
-                                        await rows[0 if len(rows) % 2 else -1].remove()
+                                        rows[0 if len(rows) % 2 else -1].query_one(".ef_x_rm", Button).press()
                                 await pilot.pause()
                                 assert_spacing()
+                            app._add_edit_category_row("")
+                            app._add_edit_extra_row("", "string", "", True)
+                            await pilot.pause()
+                            assert_spacing()
 
     async def test_headers_columns_and_section_order_in_both_themes_and_narrow_layout(self):
         asyncio.get_running_loop().slow_callback_duration = 1.0
@@ -325,7 +330,7 @@ class EditContextUITests(IsolatedAppTestCase):
                             remove_buttons = list(app.query(".ef_x_rm"))
                             self.assertEqual(len(remove_buttons), 3)
                             for button in remove_buttons:
-                                self.assertEqual(button.region.width, 3)
+                                self.assertEqual(button.region.width, 5)
                                 self.assertEqual(button.parent.content_region.right - button.region.right, 2)
                             remove_header = app.query_one(".ef_x_remove_header")
                             self.assertEqual(remove_header.region.x, remove_buttons[-1].region.x)

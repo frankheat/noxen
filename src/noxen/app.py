@@ -530,11 +530,13 @@ class NoxenApp(App):
         self.query_one("#ef_mime", Input).value = info.get("mimeType", "") or ""
 
         self.query_one("#ef_categories").remove_children()
+        self.query_one("#ef_categories").remove_class("has-rows")
         self._edit_cat_rows = {}
         for cat in (info.get("categories", []) or []):
             self._add_edit_category_row(cat)
 
         self.query_one("#ef_extras").remove_children()
+        self.query_one("#ef_extras").remove_class("has-rows")
         self._edit_extra_rows = {}
         original_extras = (
             (self._current_intercepted_entry or {}).get("intent", {}).get("extras", {}) or {}
@@ -698,10 +700,11 @@ class NoxenApp(App):
             Input(id=f"ef_cv_{n}", value=value,
                   placeholder="e.g. android.intent.category.DEFAULT",
                   classes="ef_cat_input"),
-            Button("✕", id=f"ef_crm_{n}", classes="ef_x_rm"),
+            Button(Text("[×]"), id=f"ef_crm_{n}", classes="ef_x_rm"),
             id=f"ef_cat_{n}", classes="ef_cat_row",
         )
         self.query_one("#ef_categories").mount(row)
+        self.query_one("#ef_categories").add_class("has-rows")
 
     def _add_edit_extra_row(
         self,
@@ -729,7 +732,7 @@ class NoxenApp(App):
                     placeholder=EXTRA_VALUE_PLACEHOLDERS[selected_type],
                     disabled=is_null,
                 ),
-                Button("✕", id=f"ef_xrm_{n}", classes="ef_x_rm"),
+                Button(Text("[×]"), id=f"ef_xrm_{n}", classes="ef_x_rm"),
                 id=f"ef_x_{n}", classes="ef_x_row",
             )
         else:
@@ -743,11 +746,12 @@ class NoxenApp(App):
                 Vertical(*key_widgets, classes="ef_x_key_cell"),
                 Label(type_label, classes="ef_x_type_label"),
                 Input(id=f"ef_xv_{n}", value=value, disabled=not editable),
-                Button("✕", id=f"ef_xrm_{n}", classes="ef_x_rm", disabled=not removable),
+                Button(Text("[×]"), id=f"ef_xrm_{n}", classes="ef_x_rm", disabled=not removable),
                 id=f"ef_x_{n}", classes="ef_x_row",
             )
 
         self.query_one("#ef_extras").mount(row)
+        self.query_one("#ef_extras").add_class("has-rows")
 
     def _collect_edit_draft(self, pending_mod: tuple | None = None) -> dict:
         """Validate the resulting draft, including an optional command, before publishing it."""
@@ -1012,6 +1016,7 @@ class NoxenApp(App):
         elif (event.button.id or "").startswith("ef_crm_"):
             n = int(event.button.id.split("_")[-1])
             self._edit_cat_rows.pop(n, None)
+            self.query_one("#ef_categories").set_class(bool(self._edit_cat_rows), "has-rows")
             try:
                 self.query_one(f"#ef_cat_{n}").remove()
             except Exception:
@@ -1020,6 +1025,7 @@ class NoxenApp(App):
         elif (event.button.id or "").startswith("ef_xrm_"):
             n = int(event.button.id.split("_")[-1])
             self._edit_extra_rows.pop(n, None)
+            self.query_one("#ef_extras").set_class(bool(self._edit_extra_rows), "has-rows")
             try:
                 self.query_one(f"#ef_x_{n}").remove()
             except Exception:
@@ -1289,14 +1295,14 @@ class NoxenApp(App):
                     with Horizontal(id="ef_grant_row"):
                         yield Label("URI grants", classes="ef_label")
                         yield Static(id="ef_grant_flags", markup=False)
-                    yield Rule()
-                    with Horizontal(id="ef_categories_header", classes="ef_section_header"):
+                    yield Rule(classes="ef_add_separator")
+                    with Horizontal(id="ef_categories_header", classes="ef_section_header ef_add_header"):
                         yield Label("Categories", classes="ef_section")
                         yield Label("", classes="ef_section_spacer")
                         yield Button("+ Add", id="ef_add_cat")
                     yield Vertical(id="ef_categories")
-                    yield Rule()
-                    with Horizontal(classes="ef_section_header"):
+                    yield Rule(classes="ef_add_separator")
+                    with Horizontal(id="ef_extras_header", classes="ef_section_header ef_add_header"):
                         yield Label("Extras", classes="ef_section")
                         yield Label("", classes="ef_section_spacer")
                         yield Button("+ Add", id="ef_add_extra")
