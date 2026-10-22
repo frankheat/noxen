@@ -370,6 +370,8 @@ class NoxenApp(App):
         self._history_command_bar_visible = self._settings["history_command_bar"]
         self._home_devices = []
         self._connect_scan_generation = 0
+        self._target_scan_generation = 0
+        self._target_scan_context = None
         self._connection_generation = 0
         self._connection_state = "disconnected"
         self._session_device_id = ""
@@ -1535,6 +1537,20 @@ class NoxenApp(App):
             return
         target = str(target_val)
 
+        attach_pid = None
+        if mode == "p":
+            try:
+                attach_pid = int(target)
+                if attach_pid <= 0:
+                    raise ValueError
+            except ValueError:
+                self.query_one("#home_error", Label).update("Select a valid positive PID")
+                return
+        if (self._target_scan_context != (device_id, mode)
+                or self.query_one("#home_target_select", Select).disabled):
+            self.query_one("#home_error", Label).update("Refresh targets for the selected device and mode")
+            return
+
         self.query_one("#home_error", Label).update("")
 
         hooks_path_raw = self.query_one("#home_hooks_path", Input).value.strip()
@@ -1573,7 +1589,7 @@ class NoxenApp(App):
         self._init_session(SessionConfig(
             spawn_package=target if mode == "f" else None,
             attach_name=target if mode == "n" else None,
-            attach_pid=int(target) if mode == "p" else None,
+            attach_pid=attach_pid,
             custom_hooks=hooks_path,
             validated_hooks=validated_hooks,
             extra_script=script_path,
@@ -1709,7 +1725,9 @@ class NoxenApp(App):
     def _populate_home_devices(self):
         self._connect_scan_generation += 1
         generation = self._connect_scan_generation
+        self._home_devices = []
         try:
+            self._clear_home_targets()
             self.query_one("#home_error", Label).update("Scanning devices...")
         except Exception:
             pass
@@ -1728,13 +1746,18 @@ class NoxenApp(App):
                 self._home_devices = candidates
                 try:
                     select = self.query_one("#home_device", Select)
-                    select.set_options(options)
+                    previous = select.value
                     option_values = {value for _label, value in options}
-                    if select.value not in option_values:
-                        usb = next((d for d in candidates if getattr(d, "type", None) == "usb"), None)
-                        default = usb or (candidates[0] if candidates else None)
-                        select.value = default.id if default else SELECT_EMPTY
+                    with select.prevent(Select.Changed):
+                        select.set_options(options)
+                        if previous in option_values:
+                            select.value = previous
+                        else:
+                            usb = next((d for d in candidates if getattr(d, "type", None) == "usb"), None)
+                            default = usb or (candidates[0] if candidates else None)
+                            select.value = default.id if default else SELECT_EMPTY
                     self.query_one("#home_error", Label).update("")
+                    self._populate_target_apps()
                 except Exception:
                     pass
 
@@ -1753,15 +1776,34 @@ class NoxenApp(App):
 
             self.call_from_thread(_err)
 
+    def _clear_home_targets(self):
+        self._target_scan_generation += 1
+        self._target_scan_context = None
+        target = self.query_one("#home_target_select", Select)
+        target.set_options([])
+        target.disabled = True
+
+    def _target_scan_is_current(self, generation, device_id, mode, devices):
+        return (
+            generation == self._target_scan_generation
+            and devices is self._home_devices
+            and device_id == self.query_one("#home_device", Select).value
+            and mode == self.query_one("#home_mode", Select).value
+        )
+
     def _populate_target_apps(self):
+        self._clear_home_targets()
         device_id = self.query_one("#home_device", Select).value
         mode = self.query_one("#home_mode", Select).value
-        if is_select_empty(device_id) or is_select_empty(mode):
+        if not self._home_devices or is_select_empty(device_id) or is_select_empty(mode):
             return
-        self._populate_target_apps_worker(str(device_id), str(mode), self._home_devices)
+        self.query_one("#home_error", Label).update("Loading targets...")
+        self._populate_target_apps_worker(
+            str(device_id), str(mode), self._home_devices, self._target_scan_generation,
+        )
 
     @work(thread=True)
-    def _populate_target_apps_worker(self, device_id: str, mode: str, devices):
+    def _populate_target_apps_worker(self, device_id: str, mode: str, devices, generation: int):
         try:
             import frida
             resolver = getattr(devices, "get_device", None) or frida.get_device
@@ -1786,10 +1828,14 @@ class NoxenApp(App):
                     )
 
             def _update():
-                if devices is not self._home_devices:
+                if not self._target_scan_is_current(generation, device_id, mode, devices):
                     return
                 try:
-                    self.query_one("#home_target_select", Select).set_options(options)
+                    target = self.query_one("#home_target_select", Select)
+                    target.set_options(options)
+                    target.disabled = not options
+                    self._target_scan_context = (device_id, mode)
+                    self.query_one("#home_error", Label).update("" if options else "No targets found")
                 except Exception:
                     pass
 
@@ -1797,7 +1843,7 @@ class NoxenApp(App):
         except Exception as e:
             error = str(e)
             def _err():
-                if devices is not self._home_devices:
+                if not self._target_scan_is_current(generation, device_id, mode, devices):
                     return
                 try:
                     self.query_one("#home_error", Label).update(f"Apps: {error}")

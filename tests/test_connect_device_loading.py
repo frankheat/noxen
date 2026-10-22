@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -34,6 +35,9 @@ class FakeSelect:
 
     def set_options(self, options):
         self.options = options
+
+    def prevent(self, *_args):
+        return nullcontext()
 
 
 class FakeDeviceManager:
@@ -220,8 +224,9 @@ class ConnectDeviceLoadingTests(IsolatedAppTestCase):
             query_one=lambda *_: selected,
             call_from_thread=lambda callback: callback(),
         )
+        app._target_scan_is_current = lambda *_args: True
         with patch.dict(sys.modules, {"frida": SimpleNamespace()}):
-            NoxenApp._populate_target_apps_worker.__wrapped__(app, "emulator-5554", "f", scan)
+            NoxenApp._populate_target_apps_worker.__wrapped__(app, "emulator-5554", "f", scan, 1)
         self.assertEqual(calls, ["emulator-5554"])
         self.assertEqual(selected.options, [("dev.noxen.playground", "dev.noxen.playground")])
 
@@ -241,8 +246,9 @@ class ConnectDeviceLoadingTests(IsolatedAppTestCase):
                     _home_devices=scan, query_one=lambda *_: selected,
                     call_from_thread=callbacks.append,
                 )
+                app._target_scan_is_current = lambda _gen, _id, _mode, devices: devices is app._home_devices
                 with patch.dict(sys.modules, {"frida": SimpleNamespace()}):
-                    NoxenApp._populate_target_apps_worker.__wrapped__(app, "old", "f", scan)
+                    NoxenApp._populate_target_apps_worker.__wrapped__(app, "old", "f", scan, 1)
                 app._home_devices = []
                 for callback in callbacks:
                     callback()

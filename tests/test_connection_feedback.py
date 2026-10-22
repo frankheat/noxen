@@ -145,6 +145,8 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                     target = app.query_one("#home_target_select", Select)
                     target.set_options([("Example", "dev.example")])
                     target.value = "dev.example"
+                    app._target_scan_context = ("device-1", "f")
+                    target.disabled = False
                     app.query_one("#home_hooks_path", Input).value = hook_path
                     await pilot.pause()
 
@@ -176,6 +178,8 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                 target = app.query_one("#home_target_select", Select)
                 target.set_options([("Example", "dev.example")])
                 target.value = "dev.example"
+                app._target_scan_context = ("device-1", "f")
+                target.disabled = False
                 app.query_one("#home_script_path", Input).value = os.path.join(tmp, "missing.js")
                 await pilot.pause()
                 app.frida_session = current_session
@@ -223,6 +227,8 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                     target = app.query_one("#home_target_select", Select)
                     target.set_options([("Example", "dev.example")])
                     target.value = "dev.example"
+                    app._target_scan_context = ("device-1", "f")
+                    target.disabled = False
                     await pilot.pause()
 
                     def init_session(config):
@@ -301,6 +307,8 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                     target = app.query_one("#home_target_select", Select)
                     target.set_options([("Example", "dev.example")])
                     target.value = "dev.example"
+                    app._target_scan_context = ("device-1", "f")
+                    target.disabled = False
                     await pilot.pause()
 
                     def init_session(config):
