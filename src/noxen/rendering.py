@@ -601,23 +601,30 @@ def _routing_lines(info: dict, attack_surface: dict, *, method=None, row=_row, i
     return [_section("ROUTING"), *lines] if lines else []
 
 
+def _intent_string(value) -> str:
+    """An observed empty string is not an absent Intent field."""
+    if value is None:
+        return "None"
+    return '""' if value == "" else _markup(value)
+
+
 def _payload_lines(info: dict, *, component_details=None, show_component=False, intent_present=None) -> list[str]:
     if intent_present is False:
         return [_row("Intent", "null [dim](no Intent object)[/dim]")]
     lines = []
     if info.get("component") or show_component:
         lines += _component_lines(info.get("component"), component_details)
-    lines.append(_row("Action", _markup(info.get("action")) if info.get("action") else "None"))
-    lines.append(_row("Data (URI)", _markup(info.get("data")) if info.get("data") else "None"))
+    lines.append(_row("Action", _intent_string(info.get("action"))))
+    lines.append(_row("Data (URI)", _intent_string(info.get("data"))))
     # New captures always carry this key, including a null value. Older captures omit
     # it, so do not imply that a MIME type was inspected when it was not recorded.
     if "mimeType" in info:
-        lines.append(_row("MIME Type", _markup(info.get("mimeType")) if info.get("mimeType") else "None"))
-    if info.get("package"):
-        lines.append(_row("Package", _markup(info.get("package"))))
+        lines.append(_row("MIME Type", _intent_string(info.get("mimeType"))))
+    if info.get("package") is not None:
+        lines.append(_row("Package", _intent_string(info.get("package"))))
     lines.append(_row("Flags", _format_intent_flags(info.get("flags") or 0)))
     for category in info.get("categories") or []:
-        lines.append(_row("Category", _markup(category)))
+        lines.append(_row("Category", _intent_string(category)))
     for error in info.get("errors") or []:
         lines.append(_row("Read warning", _markup(error)))
     return lines
@@ -679,13 +686,13 @@ def _legacy_extra_node(extra: dict) -> dict:
 
 def _intent_extra_children(node: dict) -> list[tuple[str | None, dict]]:
     children: list[tuple[str | None, dict]] = [
-        ("Action", {"kind": "field", "value": node.get("action") or "None"}),
-        ("Data (URI)", {"kind": "field", "value": node.get("data") or "None"}),
+        ("Action", {"kind": "field", "value": node.get("action")}),
+        ("Data (URI)", {"kind": "field", "value": node.get("data")}),
     ]
     if "mimeType" in node:
-        children.append(("MIME Type", {"kind": "field", "value": node.get("mimeType") or "None"}))
-    children.append(("Component", {"kind": "field", "value": node.get("component") or "None"}))
-    if node.get("package"):
+        children.append(("MIME Type", {"kind": "field", "value": node.get("mimeType")}))
+    children.append(("Component", {"kind": "field", "value": node.get("component")}))
+    if node.get("package") is not None:
         children.append(("Package", {"kind": "field", "value": node.get("package")}))
     children.append(("Flags", {"kind": "field", "markup": _format_intent_flags(node.get("flags") or 0)}))
     for category in node.get("categories") or []:
@@ -759,7 +766,9 @@ def _extra_node_header(label: str | None, node: dict) -> str:
     if kind == "status":
         return f"[dim]{_extra_display_text(node.get('value'))}[/dim]"
     if kind == "field":
-        value = node.get("markup") if node.get("markup") is not None else _extra_display_text(node.get("value"))
+        value = node.get("markup") if node.get("markup") is not None else (
+            '""' if node.get("value") == "" else _extra_display_text(node.get("value"))
+        )
         return f"[dim]{_markup(label or ''):<13} :[/dim] {value}"
 
     type_name = _extra_type_name(node)
@@ -962,15 +971,15 @@ def _selector_lines(selector: dict | None, *, row=_row, indent="  ", component_d
 
     lines += _component_lines(selector.get("component"), component_details, row=row,
                               indent=component_indent)
-    lines.append(row("Action", _markup(selector.get("action")) if selector.get("action") else "None"))
-    lines.append(row("Data (URI)", _markup(selector.get("data")) if selector.get("data") else "None"))
+    lines.append(row("Action", _intent_string(selector.get("action"))))
+    lines.append(row("Data (URI)", _intent_string(selector.get("data"))))
     if "mimeType" in selector:
-        lines.append(row("MIME Type", _markup(selector.get("mimeType")) if selector.get("mimeType") else "None"))
-    if selector.get("package"):
-        lines.append(row("Package", _markup(selector.get("package"))))
+        lines.append(row("MIME Type", _intent_string(selector.get("mimeType"))))
+    if selector.get("package") is not None:
+        lines.append(row("Package", _intent_string(selector.get("package"))))
     lines.append(row("Flags", _format_intent_flags(selector.get("flags") or 0)))
     for category in selector.get("categories") or []:
-        lines.append(row("Category", _markup(category)))
+        lines.append(row("Category", _intent_string(category)))
     if selector.get("categoriesTruncated"):
         lines.append("  [dim]additional categories omitted[/dim]")
 
@@ -1136,23 +1145,13 @@ def _changes_lines(original: dict, info: dict) -> list[str]:
         has_changes = True
         out.append(_row("Component", f"[dim]{_markup(orig_component or '(none)')}[/dim] → {_markup(mod_component or '(none)')}"))
 
-    orig_action = original.get("action") or ""
-    mod_action = info.get("action") or ""
-    if orig_action != mod_action:
-        has_changes = True
-        out.append(_row("Action", f"[dim]{_markup(orig_action or '(none)')}[/dim] → {_markup(mod_action or '(none)')}"))
-
-    orig_data = original.get("data") or ""
-    mod_data = info.get("data") or ""
-    if orig_data != mod_data:
-        has_changes = True
-        out.append(_row("Data (URI)", f"[dim]{_markup(orig_data or '(none)')}[/dim] → {_markup(mod_data or '(none)')}"))
-
-    orig_mime = original.get("mimeType") or ""
-    mod_mime = info.get("mimeType") or ""
-    if orig_mime != mod_mime:
-        has_changes = True
-        out.append(_row("MIME Type", f"[dim]{_markup(orig_mime or '(none)')}[/dim] → {_markup(mod_mime or '(none)')}"))
+    for field, label in (("action", "Action"), ("data", "Data (URI)"), ("mimeType", "MIME Type")):
+        before, after = original.get(field), info.get(field)
+        if before != after:
+            has_changes = True
+            shown_before = "(none)" if before is None else _intent_string(before)
+            shown_after = "(none)" if after is None else _intent_string(after)
+            out.append(_row(label, f"[dim]{shown_before}[/dim] → {shown_after}"))
 
     orig_categories = list(original.get("categories") or [])
     mod_categories = list(info.get("categories") or [])
@@ -1162,9 +1161,9 @@ def _changes_lines(original: dict, info: dict) -> list[str]:
         has_changes = True
         out += ["", _section("CATEGORIES")]
         for category in removed_categories:
-            out.append(f"  \\[-] [dim]{_markup(category)}[/dim]")
+            out.append(f"  \\[-] [dim]{_intent_string(category)}[/dim]")
         for category in added_categories:
-            out.append(f"  \\[+] {_markup(category)}")
+            out.append(f"  \\[+] {_intent_string(category)}")
 
     orig_extras = original.get("extras") or {}
     mod_extras = info.get("extras") or {}

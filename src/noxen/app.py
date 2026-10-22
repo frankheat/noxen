@@ -542,7 +542,7 @@ class NoxenApp(App):
         self.query_one("#ef_categories").remove_class("has-rows")
         self._edit_cat_rows = {}
         for cat in (info.get("categories", []) or []):
-            self._add_edit_category_row(cat)
+            self._add_edit_category_row(cat, is_new=False)
 
         self.query_one("#ef_extras").remove_children()
         self.query_one("#ef_extras").remove_class("has-rows")
@@ -701,15 +701,15 @@ class NoxenApp(App):
         self._populate_edit_form(draft)
         return None
 
-    def _add_edit_category_row(self, value: str):
+    def _add_edit_category_row(self, value: str, *, is_new: bool = True):
         self._edit_cat_counter += 1
         n = self._edit_cat_counter
         preview_only = needs_value_preview(value)
-        self._edit_cat_rows[n] = {"original": value, "read_only": preview_only}
+        self._edit_cat_rows[n] = {"original": value, "read_only": preview_only, "is_new": is_new}
         row = Horizontal(
             ExtraValueInput(id=f"ef_cv_{n}", value=extra_value_preview(value) if preview_only else value,
                   disabled=preview_only,
-                  placeholder="e.g. android.intent.category.DEFAULT",
+                  placeholder='"" (empty category)' if not is_new and value == "" else "e.g. android.intent.category.DEFAULT",
                   classes="ef_cat_input"),
             Button(Text("[×]"), id=f"ef_crm_{n}", classes="ef_x_rm"),
             id=f"ef_cat_{n}", classes="ef_cat_row",
@@ -788,15 +788,20 @@ class NoxenApp(App):
             raise _EditValidationError(str(error), "#ef_component", title="Invalid component") from None
         for field, widget in (("action", "action"), ("data", "data"), ("mimeType", "mime")):
             control = self.query_one(f"#ef_{widget}", Input)
-            draft[field] = self._edit_display_info.get(field) if control.disabled else control.value or None
+            captured = self._edit_display_info.get(field)
+            if control.disabled or control.value == (captured or ""):
+                draft[field] = captured
+            else:
+                draft[field] = control.value or None
 
         categories = []
         for n, category_info in self._edit_cat_rows.items():
             value = (
                 category_info["original"] if category_info.get("read_only")
-                else self.query_one(f"#ef_cv_{n}", Input).value.strip()
+                else self.query_one(f"#ef_cv_{n}", Input).value
             )
-            if not value or (mod_type == "cat_rem" and value == mod_value):
+            unchanged = not category_info.get("is_new") and value == category_info["original"]
+            if (value == "" and not unchanged) or (mod_type == "cat_rem" and value == mod_value):
                 continue
             if value in categories:
                 raise _EditValidationError(
@@ -1033,7 +1038,7 @@ class NoxenApp(App):
             self._add_edit_extra_row("", None, "", is_new=True)
             return
         elif event.button.id == "ef_add_cat":
-            self._add_edit_category_row("")
+            self._add_edit_category_row("", is_new=True)
             return
         elif (event.button.id or "").startswith("ef_xview_"):
             n = int(event.button.id.split("_")[-1])

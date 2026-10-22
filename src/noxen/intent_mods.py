@@ -340,6 +340,8 @@ def confirmed_modification(original: dict, report: dict | None, *, require_compo
             return info.get(field) or []
         if field == "extras":
             return info.get(field) or {}
+        if field in {"action", "data", "mimeType"}:
+            return info.get(field)
         return info.get(field) or None
 
     changed = any(
@@ -370,7 +372,7 @@ def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
         elif mod_type == "mime":
             info["mimeType"] = value or None
         elif mod_type == "cat_add":
-            if value and value not in info["categories"]:
+            if value not in info["categories"]:
                 info["categories"].append(value)
         elif mod_type == "cat_rem":
             info["categories"] = [category for category in info["categories"] if category != value]
@@ -412,10 +414,10 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
         mods.append(("component", "", new_component, ""))
 
     for field, mod_type in (("action", "action"), ("data", "data"), ("mimeType", "mime")):
-        old_value = before.get(field) or ""
-        new_value = after.get(field) or ""
+        old_value = before.get(field)
+        new_value = after.get(field)
         if new_value != old_value:
-            mods.append((mod_type, "", str(new_value), ""))
+            mods.append((mod_type, "", "" if new_value is None else str(new_value), ""))
 
     old_categories = list(before.get("categories") or [])
     new_categories = list(after.get("categories") or [])

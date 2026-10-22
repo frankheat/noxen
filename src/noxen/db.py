@@ -26,8 +26,12 @@ _CAPTURE_METADATA_KEYS = (
 
 
 def _stored_capture_metadata(info: dict):
-    """Persist capture completeness separately from the captured Intent fields."""
+    """Persist capture completeness and lossless field-encoding metadata."""
     metadata = {key: info[key] for key in _CAPTURE_METADATA_KEYS if key in info}
+    # Keep the legacy MIME column convention (empty = observed null). Only new
+    # captures of a real empty string need this marker; old rows stay unchanged.
+    if info.get("mimeType") == "":
+        metadata["emptyMimeType"] = True
     return json.dumps(metadata) if metadata else None
 
 
@@ -185,7 +189,8 @@ class ProjectDB:
                 "extras": self._load_json_field(row_id, "extras", row["extras"], {}, dict),
             }
             # NULL identifies captures made before MIME type recording. An empty string
-            # records a new capture whose Intent had no MIME type.
+            # means an observed absent type unless emptyMimeType below marks a real
+            # empty string. Rows without that marker retain their legacy meaning.
             if row["mime_type"] is not None:
                 intent["mimeType"] = row["mime_type"] or None
             if row["intent_package"] is not None:
@@ -212,6 +217,8 @@ class ProjectDB:
                     {"extrasMeta": {"error": "Capture metadata unavailable in project"}}, dict,
                 )
                 intent.update({key: metadata[key] for key in _CAPTURE_METADATA_KEYS if key in metadata})
+                if metadata.get("emptyMimeType") is True and row["mime_type"] == "":
+                    intent["mimeType"] = ""
             entries.append({
                 "id": row_id,
                 "timestamp": row["timestamp"],
