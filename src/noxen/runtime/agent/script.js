@@ -234,9 +234,16 @@ function boundedExtraText(value, isJavaString) {
     var string = isJavaString ? value : capturedJavaText(value, "java.lang.Object", "toString");
     var env = Java.vm.getEnv();
     // Bundle keys are untrusted too: never pass a non-String to JNI string APIs.
-    if (!string || !env.isInstanceOf(string.$h, Java.use("java.lang.String").class.$h)) {
-      throw new Error("Expected a Java String");
+    if (!string) throw new Error("Expected a Java String");
+    // Keep the wrapper alive while JNI uses its handle, including across GC.
+    var stringClass = Java.use("java.lang.String").class;
+    var isString;
+    try {
+      isString = env.isInstanceOf(string.$h, stringClass.$h);
+    } finally {
+      stringClass.$dispose();
     }
+    if (!isString) throw new Error("Expected a Java String");
     length = env.getStringLength(string.$h);
     var chars = env.getStringChars(string.$h);
     if (chars.isNull()) throw new Error("Java string is unavailable");

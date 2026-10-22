@@ -8,9 +8,13 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'agent', 'script.js'),
   .replace(/^import Java_bridge from 'frida-java-bridge';/, 'const Java_bridge = {};');
 
 function agent() {
-  const reads = [], releases = [];
+  const reads = [], releases = [], classOwners = [];
   const env = {
-    isInstanceOf(handle) { return !handle.nonString; },
+    isInstanceOf(handle, klass) {
+      const owner = classOwners.find(owner => owner.$h === klass);
+      assert.ok(owner && owner.disposals === 0, 'class reference must be live during JNI');
+      return !handle.nonString;
+    },
     getStringLength(handle) { return handle.text.length; },
     getStringChars(handle) {
       return {
@@ -29,7 +33,14 @@ function agent() {
     array(type, items) { return items; },
     use(name) {
       if (name === 'java.lang.String') return {
-        class: { $h: 'String.class' },
+        get class() {
+          const owner = {
+            $h: {}, disposals: 0,
+            $dispose() { assert.equal(this.disposals++, 0, 'class reference released twice'); },
+          };
+          classOwners.push(owner);
+          return owner;
+        },
         $new(chars) { return { $h: { text: chars.join('') } }; },
       };
       throw new Error(`Unexpected class ${name}`);
@@ -37,8 +48,40 @@ function agent() {
   };
   const context = vm.createContext({ Java: java, rpc: {}, send() {} });
   vm.runInContext(source, context);
-  return { context, reads, releases, env };
+  return { context, reads, releases, env, classOwners };
 }
+
+test('the JNI class wrapper is released once after a successful type check', () => {
+  const { context, env, classOwners } = agent();
+  const length = env.getStringLength;
+  env.getStringLength = handle => {
+    assert.equal(classOwners.at(-1).disposals, 1, 'release the class after checking, before reading');
+    return length(handle);
+  };
+  assert.equal(context.boundedExtraText({ $h: { text: 'a\0b' } }, true).value, 'a\0b');
+  assert.equal(classOwners.length, 1);
+  assert.equal(classOwners[0].disposals, 1);
+});
+
+test('the JNI class wrapper is released on a rejected type or a failed type check', () => {
+  for (const throws of [false, true]) {
+    const { context, env, reads, releases, classOwners } = agent();
+    if (throws) env.isInstanceOf = () => { throw new Error('Type check failed'); };
+    assert.throws(() => context.boundedExtraText({ $h: { nonString: true } }, true),
+      throws ? /Type check failed/ : /Expected a Java String/);
+    assert.equal(classOwners.length, 1);
+    assert.equal(classOwners[0].disposals, 1);
+    assert.deepEqual(reads, []);
+    assert.deepEqual(releases, []);
+  }
+});
+
+test('plain JS strings and null inputs do not allocate a JNI class wrapper', () => {
+  const { context, classOwners } = agent();
+  assert.equal(context.boundedExtraText('plain').value, 'plain');
+  assert.throws(() => context.boundedExtraText(null, true), /Expected a Java String/);
+  assert.deepEqual(classOwners, []);
+});
 
 test('well-formedness agrees with UTF-16 pairing, including adjacent pairs and controls', () => {
   const { context } = agent();

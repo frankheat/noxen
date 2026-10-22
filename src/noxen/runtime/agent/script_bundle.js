@@ -13642,9 +13642,15 @@ std_string_c_str (StdString * self)
     } else {
       var string = isJavaString ? value : capturedJavaText(value, "java.lang.Object", "toString");
       var env = Java.vm.getEnv();
-      if (!string || !env.isInstanceOf(string.$h, Java.use("java.lang.String").class.$h)) {
-        throw new Error("Expected a Java String");
+      if (!string) throw new Error("Expected a Java String");
+      var stringClass = Java.use("java.lang.String").class;
+      var isString;
+      try {
+        isString = env.isInstanceOf(string.$h, stringClass.$h);
+      } finally {
+        stringClass.$dispose();
       }
+      if (!isString) throw new Error("Expected a Java String");
       length = env.getStringLength(string.$h);
       var chars = env.getStringChars(string.$h);
       if (chars.isNull()) throw new Error("Java string is unavailable");
