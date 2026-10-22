@@ -633,14 +633,15 @@ Switch.-on > .switch--slider {
 .ef_x_key_view:hover, .ef_x_key_view:focus, .ef_x_key_view.-active {
     color: $accent; background: $boost;
 }
-.ef_x_type_label { width: 25; color: $foreground-muted; }
+.ef_x_type_label, .ef_x_type_header, .ef_x_type_select { width: 16; }
+.ef_x_type_label { color: $foreground-muted; }
 .ef_x_columns { height: 1; color: $foreground-muted; text-style: bold; }
-.ef_x_type_header { width: 25; }
 .ef_x_value_header { width: 1fr; padding-left: 2; }
 .ef_x_remove_header { width: 5; margin-right: 2; }
 .ef_x_key_input { padding: 0; }
-.ef_x_type_select { width: 25; height: 1; }
+.ef_x_type_select { height: 1; }
 .ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1 0 0; }
+.ef_x_type_select > SelectOverlay { width: 21; }
 .ef_x_rm {
     width: 5;
     height: 1;
