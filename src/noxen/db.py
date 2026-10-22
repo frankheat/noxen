@@ -19,7 +19,10 @@ _MIGRATED_INTENT_COLUMNS = {
     "capture_metadata": "TEXT",
 }
 
-_CAPTURE_METADATA_KEYS = ("extrasMeta", "categoriesTruncated", "categoriesReadError")
+_CAPTURE_METADATA_KEYS = (
+    "extrasMeta", "categoriesTruncated", "categoriesReadError",
+    "errors", "unreadableFields", "truncatedFields",
+)
 
 
 def _stored_capture_metadata(info: dict):

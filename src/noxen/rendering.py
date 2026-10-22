@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import unicodedata
 
 from rich.markup import escape
 from rich.text import Text
@@ -288,6 +289,9 @@ def history_search_text(entry: dict) -> str:
     if isinstance(categories, list):
         for category in categories:
             add(category)
+
+    for error in info.get("errors") or []:
+        add(error)
 
     extras = info.get("extras")
     if isinstance(extras, dict):
@@ -614,6 +618,8 @@ def _payload_lines(info: dict, *, component_details=None, show_component=False, 
     lines.append(_row("Flags", _format_intent_flags(info.get("flags") or 0)))
     for category in info.get("categories") or []:
         lines.append(_row("Category", _markup(category)))
+    for error in info.get("errors") or []:
+        lines.append(_row("Read warning", _markup(error)))
     return lines
 
 
@@ -1080,7 +1086,19 @@ def _event_body(class_name, method, info: dict, attack_surface: dict, pending_fl
 
 
 def _markup(value) -> str:
-    return "" if value is None else escape(str(value))
+    if value is None:
+        return ""
+    text = str(value)
+    if text.isprintable():
+        return escape(text)
+    # Payload fields and keys can contain terminal controls, not just extra values.
+    text = "".join(
+        char.encode("unicode_escape").decode("ascii")
+        if unicodedata.category(char) in {"Cc", "Cs", "Zl", "Zp"}
+        or unicodedata.bidirectional(char) in {"LRE", "LRO", "RLE", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
+        else char for char in text
+    )
+    return escape(text)
 
 
 def _parse_flag_int(raw_flags):

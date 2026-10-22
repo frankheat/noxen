@@ -525,10 +525,18 @@ class NoxenApp(App):
     def _populate_edit_form(self, info: dict) -> None:
         self._edit_display_info = info
 
-        self.query_one("#ef_component", Input).value = info.get("component") or ""
-        self.query_one("#ef_action", Input).value = info.get("action", "") or ""
-        self.query_one("#ef_data", Input).value = info.get("data", "") or ""
-        self.query_one("#ef_mime", Input).value = info.get("mimeType", "") or ""
+        for field, widget in (
+            ("component", "component"), ("action", "action"), ("data", "data"), ("mimeType", "mime"),
+        ):
+            value = info.get(field) or ""
+            preview_only = needs_value_preview(value)
+            control = self.query_one(f"#ef_{widget}", Input)
+            control.value = extra_value_preview(value) if preview_only else value
+            control.disabled = preview_only or field in info.get("truncatedFields", [])
+            control.tooltip = "Read-only captured value" if control.disabled else None
+        warnings = self.query_one("#ef_capture_errors", Static)
+        warnings.update(Text("\n".join(info.get("errors") or [])))
+        warnings.display = bool(info.get("errors"))
 
         self.query_one("#ef_categories").remove_children()
         self.query_one("#ef_categories").remove_class("has-rows")
@@ -696,9 +704,11 @@ class NoxenApp(App):
     def _add_edit_category_row(self, value: str):
         self._edit_cat_counter += 1
         n = self._edit_cat_counter
-        self._edit_cat_rows[n] = {}
+        preview_only = needs_value_preview(value)
+        self._edit_cat_rows[n] = {"original": value, "read_only": preview_only}
         row = Horizontal(
-            Input(id=f"ef_cv_{n}", value=value,
+            ExtraValueInput(id=f"ef_cv_{n}", value=extra_value_preview(value) if preview_only else value,
+                  disabled=preview_only,
                   placeholder="e.g. android.intent.category.DEFAULT",
                   classes="ef_cat_input"),
             Button(Text("[×]"), id=f"ef_crm_{n}", classes="ef_x_rm"),
@@ -767,18 +777,25 @@ class NoxenApp(App):
         mod_type, mod_key, mod_value, mod_extra_type = pending_mod or ("", "", "", "")
         original = (self._current_intercepted_entry or {}).get("intent", {}) or {}
         draft = apply_mods_to_intent(original, [])
-        component = mod_value if mod_type == "component" else self.query_one("#ef_component", Input).value
+        component_input = self.query_one("#ef_component", Input)
+        component = mod_value if mod_type == "component" else component_input.value
         try:
-            draft["component"] = normalize_component(component) or None
+            if component_input.disabled and mod_type != "component":
+                draft["component"] = self._edit_display_info.get("component")
+            else:
+                draft["component"] = normalize_component(component) or None
         except ValueError as error:
             raise _EditValidationError(str(error), "#ef_component", title="Invalid component") from None
-        draft["action"] = self.query_one("#ef_action", Input).value or None
-        draft["data"] = self.query_one("#ef_data", Input).value or None
-        draft["mimeType"] = self.query_one("#ef_mime", Input).value or None
+        for field, widget in (("action", "action"), ("data", "data"), ("mimeType", "mime")):
+            control = self.query_one(f"#ef_{widget}", Input)
+            draft[field] = self._edit_display_info.get(field) if control.disabled else control.value or None
 
         categories = []
-        for n in self._edit_cat_rows:
-            value = self.query_one(f"#ef_cv_{n}", Input).value.strip()
+        for n, category_info in self._edit_cat_rows.items():
+            value = (
+                category_info["original"] if category_info.get("read_only")
+                else self.query_one(f"#ef_cv_{n}", Input).value.strip()
+            )
             if not value or (mod_type == "cat_rem" and value == mod_value):
                 continue
             if value in categories:
@@ -1285,19 +1302,20 @@ class NoxenApp(App):
                     yield Static(id="ef_call_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_section_header"):
                         yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
+                    yield Static(id="ef_capture_errors", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_row"):
                         yield Label("Component", classes="ef_label")
-                        yield Input(id="ef_component", placeholder="e.g. com.example/.MainActivity")
+                        yield ExtraValueInput(id="ef_component", placeholder="e.g. com.example/.MainActivity")
                     yield Static(id="ef_component_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_row"):
                         yield Label("Action", classes="ef_label")
-                        yield Input(id="ef_action", placeholder="e.g. android.intent.action.VIEW")
+                        yield ExtraValueInput(id="ef_action", placeholder="e.g. android.intent.action.VIEW")
                     with Horizontal(classes="ef_row"):
                         yield Label("Data URI", classes="ef_label")
-                        yield Input(id="ef_data", placeholder="e.g. https://example.com")
+                        yield ExtraValueInput(id="ef_data", placeholder="e.g. https://example.com")
                     with Horizontal(classes="ef_row"):
                         yield Label("MIME Type", classes="ef_label")
-                        yield Input(id="ef_mime", placeholder="e.g. application/pdf")
+                        yield ExtraValueInput(id="ef_mime", placeholder="e.g. application/pdf")
                     with Horizontal(classes="ef_row"):
                         yield Label("Flags", classes="ef_label")
                         yield Input(id="ef_flags", placeholder="e.g. 0x10000000")

@@ -314,9 +314,19 @@ def confirmed_modification(original: dict, report: dict | None, *, require_compo
         extras_meta = {}
     incomplete_extras = bool(extras_meta.get("error") or extras_meta.get("omitted"))
     warning = None
+    incomplete_fields = set()
+    for key in ("unreadableFields", "truncatedFields"):
+        fields = actual.get(key)
+        if isinstance(fields, list):
+            incomplete_fields.update(field for field in fields if isinstance(field, str))
+    for field in incomplete_fields & {"component", "action", "data", "mimeType", "package"}:
+        actual[field] = copy.deepcopy(original.get(field))
+        warning = "Resulting string fields could not be fully verified"
     if incomplete_extras:
         actual["extras"] = copy.deepcopy(original.get("extras", {}))
-        warning = "Resulting extras could not be fully verified"
+        warning = "Resulting extras could not be fully verified" if warning is None else (
+            warning + "; resulting extras could not be fully verified"
+        )
     if actual.get("categoriesTruncated") or actual.get("categoriesReadError"):
         actual["categories"] = copy.deepcopy(original.get("categories", []))
         warning = "Resulting categories could not be fully verified" if warning is None else (

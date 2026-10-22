@@ -13573,13 +13573,12 @@ std_string_c_str (StdString * self)
     var LongJava = Java.use("java.lang.Long");
     var FloatJava = Java.use("java.lang.Float");
     var DoubleJava = Java.use("java.lang.Double");
-    var StringJava = Java.use("java.lang.String");
     return items.map(function(item) {
       if (elementType === "int") return IntegerJava.valueOf(parseAndroidInt(item));
       if (elementType === "long") return LongJava.valueOf(String(item));
       if (elementType === "float") return FloatJava.valueOf(normalizeFloatingExtra(item));
       if (elementType === "double") return DoubleJava.valueOf(normalizeFloatingExtra(item));
-      return StringJava.$new(String(item));
+      return javaStringArgument(String(item));
     });
   }
   function extraArrayValue(value, canonicalType) {
@@ -13593,7 +13592,7 @@ std_string_c_str (StdString * self)
       if (elementType === "long") return int64(String(item));
       if (elementType === "float") return FloatJava.valueOf(normalizeFloatingExtra(item)).floatValue();
       if (elementType === "double") return DoubleJava.valueOf(normalizeFloatingExtra(item)).doubleValue();
-      return String(item);
+      return javaStringArgument(String(item));
     });
   }
   var EXTRA_MAX_DEPTH = 8;
@@ -13608,16 +13607,61 @@ std_string_c_str (StdString * self)
       nodes: 0
     };
   }
-  function boundedExtraText(value) {
-    var text = String(value);
-    if (text.length <= EXTRA_MAX_STRING_LENGTH) {
-      return { value: text, truncated: false, originalLength: text.length };
+  function requireWellFormedText(text) {
+    var invalid = typeof text.isWellFormed === "function" ? !text.isWellFormed() : /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(text);
+    if (invalid) {
+      var error = new Error("String contains unpaired UTF-16 surrogates");
+      error.name = "InvalidUTF16";
+      throw error;
     }
-    return {
-      value: text.slice(0, EXTRA_MAX_STRING_LENGTH),
-      truncated: true,
-      originalLength: text.length
-    };
+    return text;
+  }
+  function javaStringArgument(value) {
+    if (value === null || typeof value !== "string") return value;
+    requireWellFormedText(value);
+    return value.indexOf("\0") === -1 ? value : Java.use("java.lang.String").$new(Java.array("char", value.split("")));
+  }
+  var capturedTextMethods = /* @__PURE__ */ Object.create(null);
+  function capturedJavaText(value, className, methodName, index) {
+    var indexed = index !== void 0;
+    var key = className + ":" + methodName + (indexed ? ":int" : "");
+    var method = capturedTextMethods[key];
+    if (!method) {
+      var types = indexed ? [Java.use("java.lang.Integer").TYPE.value] : [];
+      method = Java.use(className).class.getMethod(methodName, Java.array("java.lang.Class", types));
+      capturedTextMethods[key] = method;
+    }
+    var args = indexed ? [Java.use("java.lang.Integer").valueOf(index)] : [];
+    return method.invoke(value, Java.array("java.lang.Object", args));
+  }
+  function boundedExtraText(value, isJavaString) {
+    var text, length;
+    if (typeof value === "string") {
+      text = value;
+      length = text.length;
+    } else {
+      var string = isJavaString ? value : capturedJavaText(value, "java.lang.Object", "toString");
+      var env = Java.vm.getEnv();
+      if (!string || !env.isInstanceOf(string.$h, Java.use("java.lang.String").class.$h)) {
+        throw new Error("Expected a Java String");
+      }
+      length = env.getStringLength(string.$h);
+      var chars = env.getStringChars(string.$h);
+      if (chars.isNull()) throw new Error("Java string is unavailable");
+      try {
+        var units = new Uint16Array(chars.readByteArray(Math.min(length, EXTRA_MAX_STRING_LENGTH + 1) * 2));
+        text = String.fromCharCode.apply(null, units);
+      } finally {
+        env.releaseStringChars(string.$h, chars);
+      }
+    }
+    var end = Math.min(length, EXTRA_MAX_STRING_LENGTH);
+    if (end < length && text.charCodeAt(end - 1) >= 55296 && text.charCodeAt(end - 1) <= 56319 && text.charCodeAt(end) >= 56320 && text.charCodeAt(end) <= 57343) end -= 1;
+    return { value: requireWellFormedText(text.slice(0, end)), truncated: end < length, originalLength: length };
+  }
+  function capturedTextField(value, className, methodName, index) {
+    var text = capturedJavaText(value, className, methodName, index);
+    return text === null ? null : boundedExtraText(text, true).value;
   }
   function extraTypeName(value) {
     if (value === null || typeof value === "undefined") return null;
@@ -13679,7 +13723,8 @@ std_string_c_str (StdString * self)
     };
     var scalar = scalarTypes[typeName];
     if (scalar) {
-      var text = boundedExtraText(value);
+      var scalarValue = typeName === "java.lang.Character" ? Java.cast(value, Java.use("java.lang.Character")).charValue() : value;
+      var text = boundedExtraText(scalarValue, typeName === "java.lang.String");
       var node = {
         kind: "scalar",
         type: typeName,
@@ -13695,7 +13740,7 @@ std_string_c_str (StdString * self)
     }
     if (typeName === "android.content.ComponentName") {
       var component = Java.cast(value, Java.use("android.content.ComponentName"));
-      var componentText = boundedExtraText(component.flattenToString());
+      var componentText = boundedExtraText(capturedJavaText(component, "android.content.ComponentName", "flattenToString"), true);
       var componentNode = {
         kind: "scalar",
         type: typeName,
@@ -13791,7 +13836,7 @@ std_string_c_str (StdString * self)
       var errors2 = 0;
       while (iterator.hasNext() && captured < EXTRA_MAX_CONTAINER_ITEMS) {
         var javaKey = iterator.next();
-        var keyText = boundedExtraText(javaKey);
+        var keyText = boundedExtraText(javaKey, true);
         var child;
         try {
           child = serializeExtraNode(bundle.get(javaKey), context, depth + 1);
@@ -13841,23 +13886,19 @@ std_string_c_str (StdString * self)
     };
     readNestedIntent(intentValue, node, "component", function(intent) {
       var component = intent.getComponent();
-      return component ? String(component.getPackageName()) + "/" + String(component.getClassName()) : null;
+      return component ? capturedTextField(component, "android.content.ComponentName", "flattenToString") : null;
     });
     readNestedIntent(intentValue, node, "action", function(intent) {
-      var action = intent.getAction();
-      return action === null ? null : boundedExtraText(action).value;
+      return capturedTextField(intent, "android.content.Intent", "getAction");
     });
     readNestedIntent(intentValue, node, "data", function(intent) {
-      var data = intent.getDataString();
-      return data === null ? null : boundedExtraText(data).value;
+      return capturedTextField(intent, "android.content.Intent", "getDataString");
     });
     readNestedIntent(intentValue, node, "mimeType", function(intent) {
-      var mimeType = intent.getType();
-      return mimeType === null ? null : boundedExtraText(mimeType).value;
+      return capturedTextField(intent, "android.content.Intent", "getType");
     });
     readNestedIntent(intentValue, node, "package", function(intent) {
-      var packageName = intent.getPackage();
-      return packageName === null ? null : boundedExtraText(packageName).value;
+      return capturedTextField(intent, "android.content.Intent", "getPackage");
     });
     readNestedIntent(intentValue, node, "flags", function(intent) {
       return Number(intent.getFlags());
@@ -13868,7 +13909,7 @@ std_string_c_str (StdString * self)
       if (categorySet === null) return categories;
       var iterator = categorySet.iterator();
       while (iterator.hasNext() && categories.length < EXTRA_MAX_CONTAINER_ITEMS) {
-        categories.push(boundedExtraText(iterator.next()).value);
+        categories.push(boundedExtraText(iterator.next(), true).value);
       }
       if (iterator.hasNext()) node.categoriesTruncated = true;
       return categories;
@@ -13906,7 +13947,7 @@ std_string_c_str (StdString * self)
         if (label !== null) node.label = boundedExtraText(label).value;
         var mimeCount = Number(description.getMimeTypeCount());
         for (var m = 0; m < Math.min(mimeCount, EXTRA_MAX_CONTAINER_ITEMS); m++) {
-          node.mimeTypes.push(boundedExtraText(description.getMimeType(m)).value);
+          node.mimeTypes.push(capturedTextField(description, "android.content.ClipDescription", "getMimeType", m));
         }
         if (mimeCount > node.mimeTypes.length) node.mimeTypesOmitted = mimeCount - node.mimeTypes.length;
       }
@@ -13929,8 +13970,7 @@ std_string_c_str (StdString * self)
             return text === null ? null : boundedExtraText(text).value;
           });
           readNestedIntent(item, itemNode, "html", function(value2) {
-            var html = value2.getHtmlText();
-            return html === null ? null : boundedExtraText(html).value;
+            return capturedTextField(value2, "android.content.ClipData$Item", "getHtmlText");
           });
           readNestedIntent(item, itemNode, "uri", function(value2) {
             var uri = value2.getUri();
@@ -14092,32 +14132,37 @@ std_string_c_str (StdString * self)
     if (intent === null) return infoIntent;
     try {
       var component = intent.getComponent();
-      infoIntent.component = component ? component.getPackageName() + "/" + component.getClassName() : null;
+      var componentText = component === null ? null : boundedExtraText(capturedJavaText(component, "android.content.ComponentName", "flattenToString"), true);
+      infoIntent.component = componentText === null ? null : componentText.value;
+      if (componentText && componentText.truncated) {
+        infoIntent.truncatedFields = ["component"];
+        infoIntent.errors = ["component truncated (" + componentText.originalLength + " UTF-16 units)"];
+      }
     } catch (e) {
       if (strictComponent) throw e;
       infoIntent.component = null;
+      infoIntent.errors = ["component could not be read (" + extraErrorKind(e) + ")"];
+      infoIntent.unreadableFields = ["component"];
     }
-    try {
-      infoIntent.action = intent.getAction() || null;
-    } catch (e) {
-      infoIntent.action = null;
-    }
-    try {
-      infoIntent.data = intent.getDataString() || null;
-    } catch (e) {
-      infoIntent.data = null;
-    }
-    try {
-      var mimeType = intent.getType();
-      infoIntent.mimeType = mimeType === null ? null : boundedExtraText(mimeType).value;
-    } catch (e) {
-      infoIntent.mimeType = null;
-    }
-    try {
-      infoIntent.package = intent.getPackage() || null;
-    } catch (e) {
-      infoIntent.package = null;
-    }
+    [["action", "getAction"], ["data", "getDataString"], ["mimeType", "getType"], ["package", "getPackage"]].forEach(function(field) {
+      try {
+        var raw = capturedJavaText(intent, "android.content.Intent", field[1]);
+        var text = raw === null ? null : boundedExtraText(raw, true);
+        infoIntent[field[0]] = text === null ? null : text.value;
+        if (text && text.truncated) {
+          if (!infoIntent.truncatedFields) infoIntent.truncatedFields = [];
+          infoIntent.truncatedFields.push(field[0]);
+          if (!infoIntent.errors) infoIntent.errors = [];
+          infoIntent.errors.push(field[0] + " truncated (" + text.originalLength + " UTF-16 units)");
+        }
+      } catch (e) {
+        infoIntent[field[0]] = null;
+        if (!infoIntent.unreadableFields) infoIntent.unreadableFields = [];
+        infoIntent.unreadableFields.push(field[0]);
+        if (!infoIntent.errors) infoIntent.errors = [];
+        infoIntent.errors.push(field[0] + " could not be read (" + extraErrorKind(e) + ")");
+      }
+    });
     try {
       infoIntent.flags = intent.getFlags();
     } catch (e) {
@@ -14149,7 +14194,7 @@ std_string_c_str (StdString * self)
       if (cats !== null) {
         var catIterator = cats.iterator();
         while (catIterator.hasNext() && catList.length < EXTRA_MAX_CONTAINER_ITEMS) {
-          catList.push(boundedExtraText(catIterator.next()).value);
+          catList.push(boundedExtraText(catIterator.next(), true).value);
         }
         if (catIterator.hasNext()) infoIntent.categoriesTruncated = true;
       }
@@ -14216,20 +14261,20 @@ std_string_c_str (StdString * self)
         if (queued.type !== "data" && queued.type !== "mime") continue;
         if (!dataOrMimeChanged) {
           finalData = intent.getData();
-          finalMimeType = intent.getType();
+          finalMimeType = capturedJavaText(intent, "android.content.Intent", "getType");
           dataOrMimeChanged = true;
         }
         if (queued.type === "data") {
           if (!UriJava && queued.val !== "") throw new Error("android.net.Uri is unavailable");
-          finalData = queued.val === "" ? null : UriJava.parse(queued.val);
+          finalData = queued.val === "" ? null : UriJava.parse(javaStringArgument(queued.val));
         } else {
-          finalMimeType = queued.val === "" ? null : queued.val;
+          finalMimeType = queued.val === "" ? null : javaStringArgument(queued.val);
         }
       }
       if (dataOrMimeChanged) intent.setDataAndType(finalData, finalMimeType);
       modQueue.forEach(function(mod) {
         if (mod.type === "action") {
-          intent.setAction(mod.val === "" ? null : mod.val);
+          intent.setAction(mod.val === "" ? null : javaStringArgument(mod.val));
         } else if (mod.type === "component") {
           if (mod.val === "") {
             intent.setComponent(null);
@@ -14245,9 +14290,9 @@ std_string_c_str (StdString * self)
           }
         } else if (mod.type === "data" || mod.type === "mime") {
         } else if (mod.type === "cat_add") {
-          intent.addCategory(mod.val);
+          intent.addCategory(javaStringArgument(mod.val));
         } else if (mod.type === "cat_rem") {
-          intent.removeCategory(mod.val);
+          intent.removeCategory(javaStringArgument(mod.val));
         } else if (mod.type === "flag_add") {
           var f = intent.getFlags();
           intent.setFlags(f | parseInt(mod.val));
@@ -14255,9 +14300,9 @@ std_string_c_str (StdString * self)
           var f = intent.getFlags();
           intent.setFlags(f & ~parseInt(mod.val));
         } else if (mod.type === "extra_rem") {
-          intent.removeExtra(mod.key);
+          intent.removeExtra(javaStringArgument(mod.key));
         } else if (mod.type === "extra_add") {
-          var key = mod.key;
+          var key = javaStringArgument(mod.key);
           var val = mod.val;
           var eType = normalizeExtraType(mod.extraType);
           if (eType === "int") {
@@ -14275,7 +14320,7 @@ std_string_c_str (StdString * self)
           } else if (eType === "null") {
             intent.putExtra.overload("java.lang.String", "java.lang.String").call(intent, key, null);
           } else if (eType === "uri") {
-            intent.putExtra.overload("java.lang.String", "android.os.Parcelable").call(intent, key, UriJava.parse(String(val)));
+            intent.putExtra.overload("java.lang.String", "android.os.Parcelable").call(intent, key, UriJava.parse(javaStringArgument(String(val))));
           } else if (eType === "component") {
             var ComponentNameJava = Java.use("android.content.ComponentName");
             var component = ComponentNameJava.unflattenFromString(String(val));
@@ -14302,7 +14347,7 @@ std_string_c_str (StdString * self)
             });
             intent.putExtra.overload("java.lang.String", "java.io.Serializable").call(intent, key, list);
           } else {
-            intent.putExtra.overload("java.lang.String", "java.lang.String").call(intent, key, String(val));
+            intent.putExtra.overload("java.lang.String", "java.lang.String").call(intent, key, javaStringArgument(String(val)));
           }
         }
       });
@@ -14563,9 +14608,9 @@ std_string_c_str (StdString * self)
       }
       return {
         type: String(mod.type),
-        key: mod.key === null || mod.key === void 0 ? "" : String(mod.key),
-        val: mod.val === null || mod.val === void 0 ? "" : String(mod.val),
-        extraType: mod.extraType === null || mod.extraType === void 0 ? "" : String(mod.extraType)
+        key: requireWellFormedText(mod.key === null || mod.key === void 0 ? "" : String(mod.key)),
+        val: requireWellFormedText(mod.val === null || mod.val === void 0 ? "" : String(mod.val)),
+        extraType: mod.extraType === null || mod.extraType === void 0 ? "" : requireWellFormedText(String(mod.extraType))
       };
     });
   }
@@ -14763,8 +14808,14 @@ std_string_c_str (StdString * self)
     },
     stageMod: function(type, key, val, extraType, decisionId) {
       if (matchesActiveDecision(decisionId) && activeIntentPresent) {
-        modQueue.push({ type, key, val, extraType });
-        send("[+] Modification staged: " + type + (extraType ? " (" + extraType + ")" : ""));
+        try {
+          var mod = normalizeRpcMods([{ type, key, val, extraType }])[0];
+          modQueue.push(mod);
+          send("[+] Modification staged: " + mod.type);
+        } catch (e) {
+          send("[!] Invalid modification: " + e);
+          return false;
+        }
         return true;
       } else {
         send("[!] Error: No matching editable Intent is blocked.");

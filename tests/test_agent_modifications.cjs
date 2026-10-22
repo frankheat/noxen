@@ -42,6 +42,7 @@ function runIntercept(mods, floatParser = value => Number(value)) {
     flags: intent.flags, categories: [...intent.categories], extras: { ...intent.extras },
   });
   context.UriJava = { parse: value => value };
+  context.capturedJavaText = (value, _className, methodName) => value[methodName]();
   context.lock = { wait() { context.modQueue = mods; context.resumeMode = 'forward'; } };
 
   const intent = {
