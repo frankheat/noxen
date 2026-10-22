@@ -65,7 +65,7 @@ from noxen.exporting import (
 )
 from noxen.extra_value_input import ExtraValueInput, extra_value_preview, needs_value_preview
 from noxen.filters import FilterManager
-from noxen.frida_devices import enumerate_preferred_devices
+from noxen.frida_devices import scan_devices
 from noxen.frida_session import FridaSession, SessionConfig
 from noxen.history_columns import normalize_history_column_widths
 from noxen.history_table import HistoryTable
@@ -440,6 +440,7 @@ class NoxenApp(App):
             initial_intercept=self._intercept_mode,
             hold_start_cb=self._on_hold_start,
             hold_end_cb=self._on_hold_end,
+            device_resolver=getattr(self._home_devices, "get_device", None),
         )
 
     def action_clear_log(self):
@@ -1683,6 +1684,7 @@ class NoxenApp(App):
             self.system_server_session = SystemServerSession(
                 SystemServerConfig(),
                 log_cb=self.write_log,
+                device_resolver=getattr(self.frida_session, "device_resolver", None),
             )
         self.system_server_session.connect(device_id)
 
@@ -1717,12 +1719,13 @@ class NoxenApp(App):
     def _populate_home_devices_worker(self, generation: int):
         try:
             import frida
-            candidates = enumerate_preferred_devices(frida)
+            candidates = scan_devices(frida)
             options = [(f"{d.name}  ({d.type})", d.id) for d in candidates]
 
             def _update():
                 if generation != self._connect_scan_generation:
                     return
+                self._home_devices = candidates
                 try:
                     select = self.query_one("#home_device", Select)
                     select.set_options(options)
@@ -1734,7 +1737,6 @@ class NoxenApp(App):
                     self.query_one("#home_error", Label).update("")
                 except Exception:
                     pass
-                self._home_devices = candidates
 
             self.call_from_thread(_update)
         except Exception as e:
@@ -1756,13 +1758,14 @@ class NoxenApp(App):
         mode = self.query_one("#home_mode", Select).value
         if is_select_empty(device_id) or is_select_empty(mode):
             return
-        self._populate_target_apps_worker(str(device_id), str(mode))
+        self._populate_target_apps_worker(str(device_id), str(mode), self._home_devices)
 
     @work(thread=True)
-    def _populate_target_apps_worker(self, device_id: str, mode: str):
+    def _populate_target_apps_worker(self, device_id: str, mode: str, devices):
         try:
             import frida
-            device = frida.get_device(device_id)
+            resolver = getattr(devices, "get_device", None) or frida.get_device
+            device = resolver(device_id)
             if mode == "f":
                 items = device.enumerate_applications()
                 options = sorted(
@@ -1783,6 +1786,8 @@ class NoxenApp(App):
                     )
 
             def _update():
+                if devices is not self._home_devices:
+                    return
                 try:
                     self.query_one("#home_target_select", Select).set_options(options)
                 except Exception:
@@ -1792,6 +1797,8 @@ class NoxenApp(App):
         except Exception as e:
             error = str(e)
             def _err():
+                if devices is not self._home_devices:
+                    return
                 try:
                     self.query_one("#home_error", Label).update(f"Apps: {error}")
                 except Exception:

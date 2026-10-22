@@ -11,9 +11,10 @@ class SystemServerConfig:
 
 
 class SystemServerSession:
-    def __init__(self, config: SystemServerConfig, log_cb: callable):
+    def __init__(self, config: SystemServerConfig, log_cb: callable, device_resolver: callable = None):
         self.config = config
         self.log_cb = log_cb
+        self.device_resolver = device_resolver
         self._device_id = None
         self._session = None
         self._script = None
@@ -61,7 +62,8 @@ class SystemServerSession:
             import frida
             if not self._is_current(generation):
                 return
-            device = frida.get_device(device_id, timeout=5)
+            resolver = self.device_resolver or frida.get_device
+            device = resolver(device_id, timeout=5)
             if not self._is_current(generation):
                 return
             pid = self._find_system_server_pid(device)

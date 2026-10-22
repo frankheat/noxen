@@ -126,6 +126,18 @@ class SystemServerLifecycleTests(unittest.TestCase):
         old_callback("process-terminated", None)
         self.assert_new_ready()
 
+    def test_system_session_uses_the_connection_discovery_context(self):
+        resolver = self.fake_frida.get_device
+        calls = []
+        def resolve(device_id, timeout=0):
+            calls.append((device_id, timeout))
+            return resolver(device_id, timeout)
+        self.owner.device_resolver = resolve
+        self.fake_frida.get_device = lambda *_a, **_k: self.fail("Global manager used")
+        self.finish("new")
+        self.assert_new_ready()
+        self.assertEqual(calls, [("new", 5)])
+
     def test_old_initialization_failure_cannot_clean_up_new_connection(self):
         entered, release = self.pause(self.sessions["old"], "init", error=True)
         worker = self.start("old")

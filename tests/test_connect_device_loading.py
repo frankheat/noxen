@@ -38,6 +38,7 @@ class FakeSelect:
 
 class FakeDeviceManager:
     def __init__(self, devices, usb_device=None):
+        self._impl = SimpleNamespace(close=lambda: None)
         self._devices = devices
         self._usb_device = usb_device
 
@@ -48,6 +49,13 @@ class FakeDeviceManager:
         if self._usb_device is None:
             raise Exception("no usb device")
         return self._usb_device
+
+
+def fake_scan_module(devices):
+    return SimpleNamespace(
+        core=SimpleNamespace(DeviceManager=lambda impl: impl),
+        _frida=SimpleNamespace(DeviceManager=lambda: FakeDeviceManager(devices)),
+    )
 
 
 class ConnectDeviceLoadingTests(IsolatedAppTestCase):
@@ -81,7 +89,7 @@ class ConnectDeviceLoadingTests(IsolatedAppTestCase):
     def test_device_scan_worker_updates_connect_options_from_frida(self):
         fake_device = SimpleNamespace(name="Pixel", type="usb", id="device-1")
         local_device = SimpleNamespace(name="Local", type="local", id="local")
-        fake_frida = SimpleNamespace(enumerate_devices=lambda: [local_device, fake_device])
+        fake_frida = fake_scan_module([local_device, fake_device])
         label = FakeLabel()
         select = FakeSelect()
 
@@ -106,7 +114,7 @@ class ConnectDeviceLoadingTests(IsolatedAppTestCase):
     def test_device_scan_preserves_existing_device_when_still_available(self):
         selected_device = SimpleNamespace(name="Selected", type="usb", id="selected")
         other_device = SimpleNamespace(name="Other", type="remote", id="other")
-        fake_frida = SimpleNamespace(enumerate_devices=lambda: [selected_device, other_device])
+        fake_frida = fake_scan_module([selected_device, other_device])
         label = FakeLabel()
         select = FakeSelect()
         select.value = "selected"
@@ -129,7 +137,7 @@ class ConnectDeviceLoadingTests(IsolatedAppTestCase):
 
     def test_device_scan_replaces_stale_selection(self):
         fake_device = SimpleNamespace(name="Pixel", type="usb", id="device-1")
-        fake_frida = SimpleNamespace(enumerate_devices=lambda: [fake_device])
+        fake_frida = fake_scan_module([fake_device])
         label = FakeLabel()
         select = FakeSelect()
         select.value = "missing-device"
@@ -151,7 +159,7 @@ class ConnectDeviceLoadingTests(IsolatedAppTestCase):
         self.assertEqual(fake_app._home_devices, [fake_device])
 
     def test_device_scan_clears_selection_when_no_devices_exist(self):
-        fake_frida = SimpleNamespace(enumerate_devices=lambda: [])
+        fake_frida = fake_scan_module([])
         label = FakeLabel()
         select = FakeSelect()
         select.value = "missing-device"
@@ -182,6 +190,63 @@ class ConnectDeviceLoadingTests(IsolatedAppTestCase):
         devices = enumerate_preferred_devices(fake_frida, usb_timeout=1)
 
         self.assertEqual(devices, [socket_device, usb_device])
+
+    def test_stale_scan_cannot_replace_current_connection_context(self):
+        selected = FakeSelect()
+        label = FakeLabel()
+        current = [SimpleNamespace(id="new", name="New", type="usb")]
+        app = SimpleNamespace(
+            _connect_scan_generation=2, _home_devices=current,
+            query_one=lambda selector, *_: selected if selector == "#home_device" else label,
+            call_from_thread=lambda callback: callback(),
+        )
+        with patch.dict(sys.modules, {"frida": fake_scan_module([])}):
+            NoxenApp._populate_home_devices_worker.__wrapped__(app, 1)
+        self.assertIs(app._home_devices, current)
+        self.assertEqual(selected.options, [])
+
+    def test_app_listing_uses_the_scan_context_not_global_lookup(self):
+        calls = []
+        selected = FakeSelect()
+        device = SimpleNamespace(enumerate_applications=lambda: [
+            SimpleNamespace(identifier="dev.noxen.playground"),
+        ])
+        def resolve(device_id):
+            calls.append(device_id)
+            return device
+        scan = SimpleNamespace(get_device=resolve)
+        app = SimpleNamespace(
+            _home_devices=scan,
+            query_one=lambda *_: selected,
+            call_from_thread=lambda callback: callback(),
+        )
+        with patch.dict(sys.modules, {"frida": SimpleNamespace()}):
+            NoxenApp._populate_target_apps_worker.__wrapped__(app, "emulator-5554", "f", scan)
+        self.assertEqual(calls, ["emulator-5554"])
+        self.assertEqual(selected.options, [("dev.noxen.playground", "dev.noxen.playground")])
+
+    def test_old_app_list_and_error_are_ignored_after_a_device_refresh(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                def list_apps():
+                    if fail:
+                        raise RuntimeError("Old connection failed")
+                    return [SimpleNamespace(identifier="old.app")]
+                scan = SimpleNamespace(get_device=lambda _: SimpleNamespace(
+                    enumerate_applications=list_apps,
+                ))
+                callbacks = []
+                selected = FakeSelect()
+                app = SimpleNamespace(
+                    _home_devices=scan, query_one=lambda *_: selected,
+                    call_from_thread=callbacks.append,
+                )
+                with patch.dict(sys.modules, {"frida": SimpleNamespace()}):
+                    NoxenApp._populate_target_apps_worker.__wrapped__(app, "old", "f", scan)
+                app._home_devices = []
+                for callback in callbacks:
+                    callback()
+                self.assertEqual(selected.options, [])
 
 
 if __name__ == "__main__":

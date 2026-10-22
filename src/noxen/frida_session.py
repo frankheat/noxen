@@ -54,6 +54,7 @@ class FridaSession:
         initial_intercept: bool = True,
         hold_start_cb: callable = None,
         hold_end_cb: callable = None,
+        device_resolver: callable = None,
     ):
         self._config = config
         self.filter_manager = filter_manager
@@ -66,6 +67,7 @@ class FridaSession:
         self.initial_intercept = initial_intercept
         self.hold_start_cb = hold_start_cb
         self.hold_end_cb = hold_end_cb
+        self.device_resolver = device_resolver
         self.api_level_cb = None
         self.hook_warning_cb = None
         self.connected_cb = None
@@ -123,7 +125,8 @@ class FridaSession:
             if self._is_stale(generation):
                 return
             self.log_cb(log_info(f"Connecting to device {device_id}", "frida"))
-            device = frida.get_device(device_id, timeout=5)
+            resolver = self.device_resolver or frida.get_device
+            device = resolver(device_id, timeout=5)
             if self._is_stale(generation):
                 return
 
@@ -684,7 +687,8 @@ class FridaSession:
             self.hook_registration_count = None
             self._generation += 1
 
-        def perform_cleanup():
+        # Detach may outlive this owner: pin its discovery context until done.
+        def perform_cleanup(_device_resolver=self.device_resolver):
             if script:
                 try:
                     script.exports_sync.interceptoff()

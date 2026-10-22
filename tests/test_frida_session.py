@@ -494,7 +494,11 @@ class FridaSessionLifecycleTests(unittest.TestCase):
 
     def _run_hook_setup(self, setup, report=None, timeout=False):
         session, script, _native, device, _logs, _connected, _failures, _warnings = setup
-        fake_frida = SimpleNamespace(get_device=lambda _id, timeout=5: device)
+        def global_lookup(_id, timeout=5):
+            if session.device_resolver is not None:
+                self.fail("Global device manager used instead of discovery resolver")
+            return device
+        fake_frida = SimpleNamespace(get_device=global_lookup)
         with patch.dict(sys.modules, {"frida": fake_frida}), patch(
             "noxen.frida_session.load_agent_script",
             return_value=ScriptLoadResult("agent", []),
@@ -532,6 +536,24 @@ class FridaSessionLifecycleTests(unittest.TestCase):
         self.assertEqual(setup[5], [True])
         self.assertEqual(setup[6], [])
         self.assertTrue(setup[0].is_ready())
+
+    def test_connection_uses_discovery_resolver_instead_of_global_manager(self):
+        for spawn in (True, False):
+            with self.subTest(spawn=spawn):
+                setup = self._hook_setup(spawn=spawn)
+                session, _script, _native, device, *_rest = setup
+                calls = []
+                def resolve(device_id, timeout=0):
+                    calls.append((device_id, timeout))
+                    return device
+                session.device_resolver = resolve
+                # A global lookup is deliberately impossible in this test.
+                self._run_hook_setup(setup, {
+                    "installed": 1, "installedIndices": [0], "skipped": [], "failed": [],
+                })
+                self.assertEqual(calls, [("device-1", 5)])
+                self.assertTrue(session.is_ready())
+                session.cleanup()
 
     def test_fatal_report_never_marks_session_connected(self):
         setup = self._hook_setup()
