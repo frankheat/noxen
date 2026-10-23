@@ -48,7 +48,7 @@ test('intent events identify protocol and retain explicit blocking/passive decis
     context.dumpIntent = () => ({});
     context.beginHold = () => 'h1';
     context.endHold = () => {};
-    context.lock = { wait() {} };
+    context.lock = { wait() { context.resumeRequested = true; } };
     context.blockEnabled = state !== 'passive';
     context.waiting = state === 'busy';
     context.processIntercept('Example', 'onReceive', {}, null, null);
@@ -95,6 +95,7 @@ test('the exact current ID still permits each decision and cannot address a late
     assert.equal(notifications, 1);
     assert.equal(context.resumeMode, operation === 'drop' ? 'drop' : 'forward');
     context.activeDecisionId = 'decision-next';
+    context.resumeRequested = false;
     assert.equal(call('decision-current'), false);
     assert.equal(notifications, 1);
     context.waiting = false;
@@ -113,6 +114,133 @@ test('explicitly disabling interception remains a global operation', () => {
   assert.equal(notifications, 1);
   context.waiting = false;
   assert.equal(exports.interceptOffWithMods([], null), true);
+});
+
+test('decisions arriving before wait are retained, including Drop and the complete draft', () => {
+  for (const operation of ['forward', 'drop', 'forwardWithMods', 'interceptOffWithMods', 'interceptoff']) {
+    const { context, exports, messages } = agent();
+    const mods = [{ type: 'action', key: '', val: 'changed', extraType: '' }];
+    let notifications = 0;
+    context.getStackTrace = () => [];
+    context.dumpIntent = () => ({});
+    context.endHold = () => {};
+    context.lock = {
+      wait() { assert.fail('an accepted decision must not wait for another notification'); },
+      notify() { notifications++; },
+    };
+    context.beginHold = () => {
+      const id = context.activeDecisionId;
+      const accepted = operation.endsWith('WithMods')
+        ? exports[operation](mods, id) : exports[operation](id);
+      if (operation !== 'interceptoff') assert.equal(accepted, true);
+      return 'hold-early';
+    };
+    context.applyModifications = () => {
+      assert.equal(context.modQueue[0].val, 'changed');
+      return { ok: true };
+    };
+    assert.equal(context.processIntercept('Example', 'onReceive', {}, null, null), operation === 'drop');
+    assert.equal(notifications, 1);
+    assert.equal(context.waiting, false);
+    assert.equal(context.activeDecisionId, null);
+    assert.equal(messages.some(m => typeof m === 'string' && m.includes('Blocking Error')), false);
+    assert.equal(messages.some(m => m.noxenEvent === 'modification_result'), operation.endsWith('WithMods'));
+  }
+});
+
+test('wakeups without a decision continue waiting instead of forwarding', () => {
+  const { context, exports } = agent();
+  let waits = 0;
+  context.getStackTrace = () => [];
+  context.dumpIntent = () => ({});
+  context.beginHold = () => 'hold-wake';
+  context.endHold = () => {};
+  context.lock = {
+    notify() {},
+    wait() {
+      waits++;
+      assert.equal(context.waiting, true);
+      if (waits < 3) assert.equal(context.resumeRequested, false);
+      else assert.equal(exports.drop(context.activeDecisionId), true);
+      assert.ok(waits <= 3);
+    },
+  };
+  assert.equal(context.processIntercept('Example', 'onReceive', {}, null, null), true);
+  assert.equal(waits, 3);
+});
+
+test('interruptions do not decide and the interrupt flag is restored only after the hold', () => {
+  for (const operation of ['forward', 'drop', 'forwardWithMods', 'interceptoff']) {
+    const { context, exports, messages } = agent();
+    let waits = 0;
+    let restored = 0;
+    let ended = false;
+    const interrupted = Object.assign(new Error('java.lang.InterruptedException'), { $h: {}, interrupted: true });
+    context.Java.cast = error => error;
+    context.Java.use = name => {
+      if (name === 'java.lang.InterruptedException') return { class: { isInstance: e => e.interrupted === true } };
+      if (name === 'java.lang.Throwable') return {};
+      assert.equal(name, 'java.lang.Thread');
+      return { currentThread: () => ({ interrupt() { assert.equal(ended, true); restored++; } }) };
+    };
+    context.getStackTrace = () => [];
+    context.dumpIntent = () => ({});
+    context.beginHold = () => 'hold-interrupt';
+    context.endHold = () => { ended = true; };
+    context.applyModifications = () => { assert.equal(restored, 0); return { ok: true }; };
+    context.lock = {
+      notify() {},
+      wait() {
+        assert.equal(restored, 0);
+        if (++waits <= 2) throw interrupted;
+        assert.equal(waits, 3);
+        if (operation === 'forwardWithMods') {
+          exports.forwardWithMods([{ type: 'action', key: '', val: 'edited', extraType: '' }], context.activeDecisionId);
+        } else exports[operation](context.activeDecisionId);
+      },
+    };
+    assert.equal(context.processIntercept('Example', 'onReceive', {}, null, null), operation === 'drop');
+    assert.equal(restored, 1);
+    assert.equal(waits, 3);
+    assert.equal(messages.some(m => typeof m === 'string' && m.includes('Blocking Error')), false);
+  }
+});
+
+test('the first accepted decision cannot be overwritten by another RPC or cleanup', () => {
+  for (const first of ['forward', 'drop', 'forwardWithMods']) {
+    const { context, exports } = agent();
+    let notifications = 0;
+    context.waiting = true;
+    context.activeIntentPresent = true;
+    context.activeDecisionId = 'decision-once';
+    context.lock = { notify() { notifications++; } };
+    const mods = [{ type: 'action', key: '', val: 'first-draft', extraType: '' }];
+    assert.equal(first === 'forwardWithMods'
+      ? exports.forwardWithMods(mods, 'decision-once') : exports[first]('decision-once'), true);
+    assert.equal(exports.forward('decision-once'), false);
+    assert.equal(exports.drop('decision-once'), false);
+    assert.equal(exports.forwardWithMods([], 'decision-once'), false);
+    assert.equal(exports.interceptOffWithMods([], 'decision-once'), false);
+    assert.equal(exports.stageMod('action', '', 'late-change', '', 'decision-once'), false);
+    exports.interceptoff();
+    assert.equal(context.blockEnabled, false);
+    assert.equal(context.resumeMode, first === 'drop' ? 'drop' : 'forward');
+    assert.equal(context.modQueue.length, first === 'forwardWithMods' ? 1 : 0);
+    if (first === 'forwardWithMods') assert.equal(context.modQueue[0].val, 'first-draft');
+    assert.equal(notifications, 1);
+  }
+});
+
+test('a failed notification can be retried and is not reported as accepted', () => {
+  const { context, exports } = agent();
+  context.waiting = true;
+  context.activeDecisionId = 'decision-retry';
+  context.lock = { notify() { throw new Error('monitor failure'); } };
+  assert.equal(exports.forward('decision-retry'), false);
+  assert.equal(context.resumeRequested, false);
+  context.lock.notify = () => {};
+  assert.equal(exports.drop('decision-retry'), true);
+  assert.equal(context.resumeMode, 'drop');
 });
 
 test('new captures distinguish a null Intent from a present empty Intent without mutating metadata', () => {

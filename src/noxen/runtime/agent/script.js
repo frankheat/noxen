@@ -19,6 +19,7 @@ var waiting = false;
 var activeDecisionId = null;
 var activeIntentPresent = false;
 var resumeMode = "forward"; 
+var resumeRequested = false;
 var modQueue = []; 
 var holdCounter = 0;
 var decisionCounter = 0;
@@ -1141,6 +1142,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
   var holdId = null;
   var decisionId = null;
   var isBlocking = false;
+  var interrupted = false;
 
   try {
     var willBlock = blockEnabled && !waiting;
@@ -1152,6 +1154,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
       activeDecisionId = decisionId;
       activeIntentPresent = intent !== null;
       resumeMode = "forward";
+      resumeRequested = false;
       modQueue = [];
     }
 
@@ -1177,7 +1180,22 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
     if (!willBlock) return false;
     holdId = beginHold(className, methodName);
 
-    Java.synchronized(lock, function () { lock.wait(); });
+    Java.synchronized(lock, function () {
+      // Notifications are only a wake-up hint. The decision remains available
+      // even when its notification arrived before this thread started waiting.
+      while (!resumeRequested) {
+        try {
+          lock.wait();
+        } catch (e) {
+          if (!e.$h || !Java.use("java.lang.InterruptedException").class.isInstance(
+            Java.cast(e, Java.use("java.lang.Throwable"))
+          )) throw e;
+          // Do not turn application cancellation into an implicit Forward.
+          // Restoring the flag here would make wait throw repeatedly.
+          interrupted = true;
+        }
+      }
+    });
 
     var mode = resumeMode;
     
@@ -1210,10 +1228,15 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
     send("[Blocking Error] " + e);
   } finally {
     if (isBlocking) {
-      endHold(holdId);
       waiting = false;
       activeDecisionId = null;
       activeIntentPresent = false;
+      resumeRequested = false;
+      try {
+        endHold(holdId);
+      } finally {
+        if (interrupted) Java.use("java.lang.Thread").currentThread().interrupt();
+      }
     }
   }
 
@@ -1221,7 +1244,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
 }
 
 function matchesActiveDecision(decisionId) {
-  return waiting && typeof decisionId === "string" && decisionId.length > 0 &&
+  return waiting && !resumeRequested && typeof decisionId === "string" && decisionId.length > 0 &&
     decisionId === activeDecisionId;
 }
 
@@ -1248,6 +1271,28 @@ function normalizeRpcMods(mods) {
   });
 }
 
+function resumeDecision(decisionId, mode, mods, disableInterception) {
+  var resumed = false;
+  Java.performNow(function () {
+    if (!lock) return;
+    Java.synchronized(lock, function () {
+      if (matchesActiveDecision(decisionId)) {
+        if (mods !== null && mods.length > 0 && !activeIntentPresent) return;
+        if (mods !== null) modQueue = mods;
+        if (disableInterception) blockEnabled = false;
+        resumeMode = mode;
+        lock.notify();
+        resumeRequested = true;
+        resumed = true;
+      } else if (disableInterception && !waiting && (decisionId === null || decisionId === undefined)) {
+        blockEnabled = false;
+        resumed = true;
+      }
+    });
+  });
+  return resumed;
+}
+
 function resumeWithMods(mods, decisionId, disableInterception) {
   var normalized;
   try {
@@ -1257,27 +1302,13 @@ function resumeWithMods(mods, decisionId, disableInterception) {
     return false;
   }
 
-  var resumed = false;
   try {
-    Java.performNow(function () {
-      if (matchesActiveDecision(decisionId) && lock) {
-        if (normalized.length > 0 && !activeIntentPresent) return;
-        // Replacing, instead of extending, the queue makes retries idempotent and
-        // ensures the agent applies exactly the draft visible in the TUI.
-        modQueue = normalized;
-        if (disableInterception) blockEnabled = false;
-        resumeMode = "forward";
-        Java.synchronized(lock, function () { lock.notify(); });
-        resumed = true;
-      } else if (disableInterception && !waiting && (decisionId === null || decisionId === undefined)) {
-        blockEnabled = false;
-        resumed = true;
-      }
-    });
+    // Replace the queue with exactly the draft visible in the TUI.
+    return resumeDecision(decisionId, "forward", normalized, disableInterception);
   } catch (e) {
     send("[!] Forward resume failed: " + e);
   }
-  return resumed;
+  return false;
 }
 
 function returnTypeName(overload) {
@@ -1435,19 +1466,12 @@ rpc.exports = {
   },
 
   forward: function (decisionId) {
-    var resumed = false;
     try {
-      Java.performNow(function () {
-        if (matchesActiveDecision(decisionId) && lock) {
-          resumeMode = "forward";
-          Java.synchronized(lock, function () { lock.notify(); });
-          resumed = true;
-        }
-      });
+      return resumeDecision(decisionId, "forward", null, false);
     } catch (e) {
       send("[!] Forward resume failed: " + e);
     }
-    return resumed;
+    return false;
   },
 
   forwardWithMods: function (mods, decisionId) {
@@ -1455,19 +1479,12 @@ rpc.exports = {
   },
 
   drop: function (decisionId) {
-    var resumed = false;
     try {
-      Java.performNow(function () {
-        if (matchesActiveDecision(decisionId) && lock) {
-          resumeMode = "drop";
-          Java.synchronized(lock, function () { lock.notify(); });
-          resumed = true;
-        }
-      });
+      return resumeDecision(decisionId, "drop", null, false);
     } catch (e) {
       send("[!] Drop resume failed: " + e);
     }
-    return resumed;
+    return false;
   },
 
   stageMod: function (type, key, val, extraType, decisionId) {
@@ -1492,8 +1509,12 @@ rpc.exports = {
       Java.performNow(function () {
         blockEnabled = false;
         if (waiting && lock) {
-          resumeMode = "forward";
-          Java.synchronized(lock, function () { lock.notify(); });
+          Java.synchronized(lock, function () {
+            if (!waiting || resumeRequested) return;
+            resumeMode = "forward";
+            lock.notify();
+            resumeRequested = true;
+          });
         }
       });
     } catch (e) {

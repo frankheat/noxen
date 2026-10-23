@@ -13437,6 +13437,7 @@ std_string_c_str (StdString * self)
   var activeDecisionId = null;
   var activeIntentPresent = false;
   var resumeMode = "forward";
+  var resumeRequested = false;
   var modQueue = [];
   var holdCounter = 0;
   var decisionCounter = 0;
@@ -14523,6 +14524,7 @@ std_string_c_str (StdString * self)
     var holdId = null;
     var decisionId = null;
     var isBlocking = false;
+    var interrupted = false;
     try {
       var willBlock = blockEnabled && !waiting;
       if (willBlock) {
@@ -14533,6 +14535,7 @@ std_string_c_str (StdString * self)
         activeDecisionId = decisionId;
         activeIntentPresent = intent !== null;
         resumeMode = "forward";
+        resumeRequested = false;
         modQueue = [];
       }
       var infoIntent = dumpIntent(intent);
@@ -14554,7 +14557,16 @@ std_string_c_str (StdString * self)
       if (!willBlock) return false;
       holdId = beginHold(className, methodName);
       Java.synchronized(lock, function() {
-        lock.wait();
+        while (!resumeRequested) {
+          try {
+            lock.wait();
+          } catch (e) {
+            if (!e.$h || !Java.use("java.lang.InterruptedException").class.isInstance(
+              Java.cast(e, Java.use("java.lang.Throwable"))
+            )) throw e;
+            interrupted = true;
+          }
+        }
       });
       var mode = resumeMode;
       if (mode === "drop") {
@@ -14583,16 +14595,21 @@ std_string_c_str (StdString * self)
       send("[Blocking Error] " + e);
     } finally {
       if (isBlocking) {
-        endHold(holdId);
         waiting = false;
         activeDecisionId = null;
         activeIntentPresent = false;
+        resumeRequested = false;
+        try {
+          endHold(holdId);
+        } finally {
+          if (interrupted) Java.use("java.lang.Thread").currentThread().interrupt();
+        }
       }
     }
     return shouldDrop;
   }
   function matchesActiveDecision(decisionId) {
-    return waiting && typeof decisionId === "string" && decisionId.length > 0 && decisionId === activeDecisionId;
+    return waiting && !resumeRequested && typeof decisionId === "string" && decisionId.length > 0 && decisionId === activeDecisionId;
   }
   function normalizeRpcMods(mods) {
     if (!Array.isArray(mods)) throw new Error("modifications must be an array");
@@ -14620,6 +14637,27 @@ std_string_c_str (StdString * self)
       };
     });
   }
+  function resumeDecision(decisionId, mode, mods, disableInterception) {
+    var resumed = false;
+    Java.performNow(function() {
+      if (!lock) return;
+      Java.synchronized(lock, function() {
+        if (matchesActiveDecision(decisionId)) {
+          if (mods !== null && mods.length > 0 && !activeIntentPresent) return;
+          if (mods !== null) modQueue = mods;
+          if (disableInterception) blockEnabled = false;
+          resumeMode = mode;
+          lock.notify();
+          resumeRequested = true;
+          resumed = true;
+        } else if (disableInterception && !waiting && (decisionId === null || decisionId === void 0)) {
+          blockEnabled = false;
+          resumed = true;
+        }
+      });
+    });
+    return resumed;
+  }
   function resumeWithMods(mods, decisionId, disableInterception) {
     var normalized;
     try {
@@ -14628,27 +14666,12 @@ std_string_c_str (StdString * self)
       send("[!] Invalid modification set: " + e);
       return false;
     }
-    var resumed = false;
     try {
-      Java.performNow(function() {
-        if (matchesActiveDecision(decisionId) && lock) {
-          if (normalized.length > 0 && !activeIntentPresent) return;
-          modQueue = normalized;
-          if (disableInterception) blockEnabled = false;
-          resumeMode = "forward";
-          Java.synchronized(lock, function() {
-            lock.notify();
-          });
-          resumed = true;
-        } else if (disableInterception && !waiting && (decisionId === null || decisionId === void 0)) {
-          blockEnabled = false;
-          resumed = true;
-        }
-      });
+      return resumeDecision(decisionId, "forward", normalized, disableInterception);
     } catch (e) {
       send("[!] Forward resume failed: " + e);
     }
-    return resumed;
+    return false;
   }
   function returnTypeName(overload) {
     try {
@@ -14776,41 +14799,23 @@ std_string_c_str (StdString * self)
       return { pending: true };
     },
     forward: function(decisionId) {
-      var resumed = false;
       try {
-        Java.performNow(function() {
-          if (matchesActiveDecision(decisionId) && lock) {
-            resumeMode = "forward";
-            Java.synchronized(lock, function() {
-              lock.notify();
-            });
-            resumed = true;
-          }
-        });
+        return resumeDecision(decisionId, "forward", null, false);
       } catch (e) {
         send("[!] Forward resume failed: " + e);
       }
-      return resumed;
+      return false;
     },
     forwardWithMods: function(mods, decisionId) {
       return resumeWithMods(mods, decisionId, false);
     },
     drop: function(decisionId) {
-      var resumed = false;
       try {
-        Java.performNow(function() {
-          if (matchesActiveDecision(decisionId) && lock) {
-            resumeMode = "drop";
-            Java.synchronized(lock, function() {
-              lock.notify();
-            });
-            resumed = true;
-          }
-        });
+        return resumeDecision(decisionId, "drop", null, false);
       } catch (e) {
         send("[!] Drop resume failed: " + e);
       }
-      return resumed;
+      return false;
     },
     stageMod: function(type, key, val, extraType, decisionId) {
       if (matchesActiveDecision(decisionId) && activeIntentPresent) {
@@ -14833,9 +14838,11 @@ std_string_c_str (StdString * self)
         Java.performNow(function() {
           blockEnabled = false;
           if (waiting && lock) {
-            resumeMode = "forward";
             Java.synchronized(lock, function() {
+              if (!waiting || resumeRequested) return;
+              resumeMode = "forward";
               lock.notify();
+              resumeRequested = true;
             });
           }
         });
