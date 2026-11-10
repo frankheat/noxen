@@ -69,6 +69,7 @@ from noxen.frida_devices import scan_devices
 from noxen.frida_session import FridaSession, SessionConfig
 from noxen.history_columns import normalize_history_column_widths
 from noxen.history_table import HistoryTable
+from noxen.monitor_ui import MonitorPane
 from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
@@ -1384,6 +1385,8 @@ class NoxenApp(App):
                     yield Button("⊟", id="btn_columns")
                 yield HistoryTable(id="history_table")
                 yield RichLog(id="history_detail", markup=True, highlight=False, auto_scroll=False)
+            with TabPane(" Monitor ", id="tab_monitor"):
+                yield MonitorPane(id="monitor_pane")
             with TabPane(" Info app ", id="tab_info"):
                 with Horizontal(id="info_split"):
                     with Vertical(id="info_rail"):
@@ -1655,6 +1658,7 @@ class NoxenApp(App):
             lambda stage, error, session=session: self._on_connection_failed(stage, error, session)
         )
         session.disconnected_cb = lambda session=session: self._on_disconnected(session)
+        self.query_one(MonitorPane).begin_session(session)
         session.connect(device_id)
 
     def _on_hook_warning(self, message: str, session=None) -> None:

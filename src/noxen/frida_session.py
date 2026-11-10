@@ -73,6 +73,8 @@ class FridaSession:
         self.connected_cb = None
         self.connection_failed_cb = None
         self.disconnected_cb = None
+        self.monitor_cb = None
+        self.monitor_hooks = []
 
         self._script = None
         self._session = None
@@ -232,6 +234,15 @@ class FridaSession:
             stage = "hooks"
             self._hooks_result = hooks_result
             hook_report = script.exports_sync.proxy(hooks_data)
+            if self.monitor_hooks:
+                try:
+                    script.exports_sync.configure_monitor(self.monitor_hooks, 0)
+                except Exception as error:
+                    self.log_cb(log_warning(f"Monitor setup failed: {error}", "monitor"))
+                    if self.monitor_cb:
+                        self.monitor_cb({"noxenEvent": "monitor_status", "revision": 0,
+                            "statuses": [{"profile": h["profile"], "index": h["index"],
+                                          "state": "Error", "detail": str(error)} for h in self.monitor_hooks]})
             if isinstance(hook_report, dict) and not hook_report.get("pending"):
                 self._receive_hook_report(hook_report)
             if self._is_stale(generation):
@@ -474,11 +485,21 @@ class FridaSession:
                 except Exception:
                     pass
 
+    def configure_monitor(self, hooks, revision):
+        script = self._script
+        if script is None:
+            raise RuntimeError("Monitor is not connected")
+        return script.exports_sync.configure_monitor(hooks, revision)
+
     def on_message(self, message, data):
         if message["type"] == "send":
             payload = message["payload"]
             if isinstance(payload, dict):
                 event_name = payload.get("noxenEvent")
+                if event_name in ("monitor_batch", "monitor_status"):
+                    if self.monitor_cb:
+                        self.monitor_cb(payload)
+                    return
                 if event_name == "hook_report":
                     if self._hook_report_event is not None:
                         self._receive_hook_report(payload.get("report"))

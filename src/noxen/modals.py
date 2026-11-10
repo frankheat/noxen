@@ -51,13 +51,14 @@ class ExtraKeyModal(ModalScreen):
     }
     """
 
-    def __init__(self, key: str):
+    def __init__(self, key: str, *, title: str = "Extra key (read-only)"):
         super().__init__()
         self._key = key
+        self._title = title
 
     def compose(self) -> ComposeResult:
         with Vertical(id="extra_key_dialog"):
-            yield Label("Extra key (read-only)", id="extra_key_title")
+            yield Label(self._title, id="extra_key_title")
             yield TextArea(self._key, read_only=True, id="extra_key_text")
             with Horizontal(id="extra_key_buttons"):
                 yield Button("Close", id="extra_key_close")

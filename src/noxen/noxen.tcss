@@ -293,6 +293,38 @@ Input:focus {
     border: none;
     background-tint: $surface 0%;
 }
+#monitor_search,
+#monitor_dialog Input {
+    height: 3;
+    border: round $foreground-muted;
+}
+#monitor_search { background: $panel; }
+#monitor_search:focus,
+#monitor_dialog Input:focus { border: round $accent; }
+#monitor_pane .monitor_controls Button,
+#monitor_dialog Button {
+    height: 3;
+    border: round $foreground-muted;
+    background: transparent;
+    color: $foreground;
+    text-style: bold;
+    tint: transparent;
+    background-tint: transparent;
+}
+#monitor_pane .monitor_controls Button:hover,
+#monitor_pane .monitor_controls Button:focus,
+#monitor_pane .monitor_controls Button.-active,
+#monitor_dialog Button:hover,
+#monitor_dialog Button:focus,
+#monitor_dialog Button.-active {
+    border: round $accent;
+    color: $accent;
+}
+#monitor_pane .monitor_controls Button:disabled,
+#monitor_dialog Button:disabled {
+    border: round $foreground-muted;
+    color: $foreground-muted;
+}
 #intercept_input_bar.intercepted {
     border: round $error;
 }
