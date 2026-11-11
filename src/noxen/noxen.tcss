@@ -302,7 +302,9 @@ Input:focus {
 #monitor_search:focus,
 #monitor_dialog Input:focus { border: round $accent; }
 #monitor_pane .monitor_controls Button,
-#monitor_dialog Button {
+#monitor_dialog Button,
+#monitor_restore_dialog Button,
+#recording_dialog Button {
     height: 3;
     border: round $foreground-muted;
     background: transparent;
@@ -316,7 +318,13 @@ Input:focus {
 #monitor_pane .monitor_controls Button.-active,
 #monitor_dialog Button:hover,
 #monitor_dialog Button:focus,
-#monitor_dialog Button.-active {
+#monitor_dialog Button.-active,
+#monitor_restore_dialog Button:hover,
+#monitor_restore_dialog Button:focus,
+#monitor_restore_dialog Button.-active,
+#recording_dialog Button:hover,
+#recording_dialog Button:focus,
+#recording_dialog Button.-active {
     border: round $accent;
     color: $accent;
 }

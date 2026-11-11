@@ -69,7 +69,7 @@ from noxen.frida_devices import scan_devices
 from noxen.frida_session import FridaSession, SessionConfig
 from noxen.history_columns import normalize_history_column_widths
 from noxen.history_table import HistoryTable
-from noxen.monitor_ui import MonitorPane
+from noxen.monitor_ui import MonitorPane, RecordingDialog
 from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
@@ -998,7 +998,7 @@ class NoxenApp(App):
             self._try_connect()
             return
         elif event.button.id == "home_disconnect":
-            self._do_disconnect()
+            self._disconnect_with_monitor()
             return
         elif event.button.id in ("info_nav_overview", "info_nav_permissions", "info_nav_components"):
             self._switch_info_view(event.button.id)
@@ -1627,7 +1627,7 @@ class NoxenApp(App):
     def on_device_selected(self, device_id):
         if not device_id:
             self.write_cmd("[red]No device selected[/red]")
-            self.exit()
+            self.action_quit()
             return
 
         cfg = self._session_config
@@ -1658,7 +1658,7 @@ class NoxenApp(App):
             lambda stage, error, session=session: self._on_connection_failed(stage, error, session)
         )
         session.disconnected_cb = lambda session=session: self._on_disconnected(session)
-        self.query_one(MonitorPane).begin_session(session)
+        self.query_one(MonitorPane).begin_session(session, target)
         session.connect(device_id)
 
     def _on_hook_warning(self, message: str, session=None) -> None:
@@ -1998,6 +1998,16 @@ class NoxenApp(App):
             self.call_from_thread(_do)
         except Exception:
             pass
+
+    @work(exclusive=False)
+    async def _disconnect_with_monitor(self):
+        pane = self.query_one(MonitorPane)
+        session = self.frida_session
+        async with pane.recording_lock:
+            if session is self.frida_session:
+                await pane.stop_recording_feed(session)
+                if session is self.frida_session:
+                    self._do_disconnect()
 
     def _do_disconnect(self):
         if self.frida_session:
@@ -2538,6 +2548,23 @@ class NoxenApp(App):
 
     # --- Actions ---
 
+    @work
+    async def action_quit(self):
+        if getattr(self, "_quit_in_progress", False):
+            return
+        self._quit_in_progress = True
+        pane = self.query_one(MonitorPane)
+        async with pane.recording_lock:
+            if pane.recording_enabled:
+                await pane.stop_recording_feed(self.frida_session)
+                while not await pane.finish_recording():
+                    exit_anyway = await self.push_screen_wait(RecordingDialog(
+                        f"Monitor recording could not be saved.\n\n{pane.recording_error}",
+                        "Exit anyway", "Retry",
+                    ))
+                    if exit_anyway:
+                        break
+            self.exit()
 
     def set_intercept_state(self, is_intercepted):
         self._intent_blocked = bool(is_intercepted)
@@ -3028,7 +3055,7 @@ class NoxenApp(App):
             self.call_from_thread(lambda: self.push_screen(HelpModal(menu)))
 
         elif cmd_base == "/quit":
-            self.call_from_thread(self.exit)
+            self.call_from_thread(self.action_quit)
 
         elif cmd_base == "/theme" and parse_theme_command(parts):
             self.call_from_thread(self.action_toggle_theme)

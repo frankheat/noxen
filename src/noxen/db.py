@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 from noxen.history_columns import normalize_history_column_widths
 
+MONITOR_STORAGE_BYTES = 32 * 1024 * 1024
+
 _MIGRATED_INTENT_COLUMNS = {
     "outcome": "TEXT",
     "original_intent": "TEXT",
@@ -93,34 +95,83 @@ class ProjectDB:
 
     def set_info(self, key: str, value: str) -> None:
         """Store or update a metadata key in project_info."""
-        if self._conn is None:
-            return
         with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO project_info (key, value) VALUES (?, ?)",
-                (key, value),
-            )
-            self._conn.commit()
+            if self._conn is None:
+                return
+            with self._conn as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO project_info (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
 
     def get_info(self, key: str, default: str = "") -> str:
         """Return a metadata value from project_info."""
-        if self._conn is None:
-            return default
-        row = self._conn.execute(
-            "SELECT value FROM project_info WHERE key=?",
-            (key,),
-        ).fetchone()
+        with self._lock:
+            if self._conn is None:
+                return default
+            row = self._conn.execute(
+                "SELECT value FROM project_info WHERE key=?",
+                (key,),
+            ).fetchone()
         if not row or row[0] is None:
             return default
         return str(row[0])
 
     def close(self) -> None:
-        if self._conn:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
+        with self._lock:
+            if self._conn:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+
+    def save_monitor_batch(self, recording, started, events, lost, unsaved, status):
+        payloads = [json.dumps(event, separators=(",", ":")) for event in events]
+        with self._lock, self._require_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            size = sum(map(len, payloads))
+            if size:
+                used = conn.execute(
+                    "SELECT COALESCE(SUM(bytes), 0) FROM monitor_recordings"
+                ).fetchone()[0]
+                if used + size > MONITOR_STORAGE_BYTES:
+                    raise ValueError("Monitor storage limit reached. Delete a recording to free space.")
+            conn.execute("""
+                INSERT INTO monitor_recordings (id, started, lost, unsaved, status, bytes)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET lost=excluded.lost, unsaved=excluded.unsaved,
+                    status=excluded.status, bytes=monitor_recordings.bytes+excluded.bytes
+            """, (recording, started, lost, unsaved, status, size))
+            conn.executemany(
+                "INSERT INTO monitor_events (recording, payload) VALUES (?, ?)",
+                ((recording, payload) for payload in payloads),
+            )
+
+    def monitor_recordings(self):
+        with self._lock:
+            return self._require_connection().execute("""
+                SELECT id, started, lost, unsaved, status FROM monitor_recordings
+                ORDER BY started DESC
+            """).fetchall()
+
+    def monitor_recording_page(self, recording, query, offset, limit):
+        with self._lock:
+            rows = self._require_connection().execute("""
+                SELECT payload FROM monitor_events
+                WHERE recording=? AND instr(lower(payload), ?)>0
+                ORDER BY id DESC LIMIT ? OFFSET ?
+            """, (recording, query, limit + 1, offset)).fetchall()
+        return [json.loads(row[0]) for row in reversed(rows[:limit])], len(rows) > limit
+
+    def delete_monitor_recording(self, recording):
+        with self._lock, self._require_connection() as conn:
+            conn.execute("DELETE FROM monitor_recordings WHERE id=?", (recording,))
+
+    def _require_connection(self):
+        if self._conn is None:
+            raise sqlite3.ProgrammingError("Project database is closed")
+        return self._conn
 
     # ------------------------------------------------------------------
     # Internal
@@ -139,6 +190,20 @@ class ProjectDB:
                 key   TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE TABLE IF NOT EXISTS monitor_recordings (
+                id TEXT PRIMARY KEY,
+                started TEXT NOT NULL,
+                lost INTEGER NOT NULL,
+                unsaved INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                bytes INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS monitor_events (
+                id INTEGER PRIMARY KEY,
+                recording TEXT NOT NULL REFERENCES monitor_recordings(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS monitor_events_recording ON monitor_events(recording, id);
             CREATE TABLE IF NOT EXISTS intents (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp            TEXT    NOT NULL,

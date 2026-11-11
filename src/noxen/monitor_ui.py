@@ -1,10 +1,14 @@
 """Monitor UI and bounded delivery; no Frida calls on the UI thread."""
+import asyncio
 import copy
 import json
 import sqlite3
 import threading
 from collections import deque
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from itertools import islice
+from uuid import uuid4
 
 from rich.text import Text
 from textual import work
@@ -13,8 +17,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, DataTable, Input, Label, Select, Static, TabbedContent, TabPane
 
 from noxen.modals import ExtraKeyModal
-from noxen.monitor import (MAX_EVENTS, enabled_hooks, event_detail, load_profiles, new_profile,
-                           signature, validate_hook, validate_profiles)
+from noxen.monitor import (MAX_EVENTS, PROFILE_FORMAT_VERSION, enabled_hooks, event_detail, load_profiles,
+                           missing_default_hooks, new_profile, signature, validate_hook, validate_profiles)
 
 
 class MonitorDialog(ModalScreen):
@@ -101,18 +105,101 @@ class MonitorDialog(ModalScreen):
             error.display = True
 
 
+class RestoreHooksDialog(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+    DEFAULT_CSS = """
+    RestoreHooksDialog { align: center middle; }
+    #monitor_restore_dialog {
+        width: 85%; max-width: 72; height: auto; padding: 1 2;
+        background: $surface; border: solid $foreground-muted;
+    }
+    #monitor_restore_title { text-style: bold; }
+    #monitor_restore_message { height: auto; margin: 1 0; }
+    #monitor_restore_dialog Horizontal { height: 3; align: right middle; }
+    #monitor_restore_dialog Button { width: auto; min-width: 12; margin-left: 1; }
+    """
+
+    def __init__(self, name, count):
+        super().__init__()
+        self.name_to_restore = name
+        self.count = count
+
+    def compose(self):
+        hooks = "hook" if self.count == 1 else "hooks"
+        with Vertical(id="monitor_restore_dialog"):
+            yield Label("Restore missing hooks", id="monitor_restore_title")
+            yield Label(f"Add {self.count} missing default {hooks} to {self.name_to_restore}?",
+                        id="monitor_restore_message", markup=False)
+            with Horizontal():
+                yield Button("Cancel", id="monitor_restore_cancel")
+                yield Button("Restore", id="monitor_restore_confirm")
+
+    def on_mount(self):
+        self.query_one("#monitor_restore_cancel", Button).focus()
+
+    def on_button_pressed(self, event):
+        event.stop()
+        self.dismiss(event.button.id == "monitor_restore_confirm")
+
+
+class RecordingDialog(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+    DEFAULT_CSS = """
+    RecordingDialog { align: center middle; }
+    #recording_dialog { width: 85%; max-width: 72; height: auto; padding: 1 2;
+        background: $surface; border: solid $foreground-muted; }
+    #recording_message { height: auto; margin: 1 0; }
+    #recording_dialog Horizontal { height: 3; align: right middle; }
+    #recording_dialog Button { width: auto; min-width: 10; margin-left: 1; }
+    """
+
+    def __init__(self, message, confirm, cancel="Cancel"):
+        super().__init__()
+        self.message, self.confirm, self.cancel = message, confirm, cancel
+
+    def compose(self):
+        with Vertical(id="recording_dialog"):
+            yield Label(self.message, id="recording_message", markup=False)
+            with Horizontal():
+                yield Button(self.cancel, id="recording_cancel")
+                yield Button(self.confirm, id="recording_confirm")
+
+    def on_mount(self):
+        self.query_one("#recording_cancel", Button).focus()
+
+    def on_button_pressed(self, event):
+        event.stop()
+        self.dismiss(event.button.id == "recording_confirm")
+
+
+@dataclass
+class MonitorRecording:
+    id: str = field(default_factory=lambda: uuid4().hex)
+    started: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    pending: deque = field(default_factory=deque)
+    lost: int = 0
+    unsaved: int = 0
+    interrupted: bool = False
+    accepting: bool = True
+    dirty: bool = True
+
+
 class MonitorPane(Vertical):
     HOOK_STATE_WIDTH = 13
+    PROFILE_LIST_WIDTH = 27
+    RECORDING_BATCH = 512
+    RECORDING_BUFFER = 4096
+    ARCHIVE_PAGE = 200
 
     DEFAULT_CSS = """
     MonitorPane { height: 1fr; }
     MonitorPane .monitor_controls { height: 3; padding: 0 1; align: left middle; background: $panel; }
     MonitorPane .monitor_controls Button { width: auto; min-width: 10; margin-left: 1; }
-    #monitor_profiles, #monitor_search { width: 1fr; height: 3; }
-    #monitor_profiles > SelectCurrent {
+    #monitor_search, #monitor_recordings { width: 1fr; height: 3; }
+    #monitor_recordings > SelectCurrent {
         border: round $foreground-muted; background: $panel;
     }
-    #monitor_profiles:focus > SelectCurrent { border: round $accent; }
+    #monitor_recordings:focus > SelectCurrent { border: round $accent; }
     MonitorPane .monitor_table, MonitorPane .monitor_detail {
         height: 1fr; margin: 0 1; border: solid $foreground-muted;
     }
@@ -120,14 +207,21 @@ class MonitorPane(Vertical):
         height: 1fr; padding: 1 2; color: $foreground-muted;
     }
     MonitorPane .monitor_detail { padding: 0 1; }
+    #monitor_profile_body, #monitor_hook_panel { height: 1fr; }
+    #monitor_hook_panel { width: 1fr; }
+    #monitor_profiles { margin-right: 0; scrollbar-gutter: stable; }
+    #monitor_profile_name { width: 1fr; height: 1; text-style: bold; text-wrap: nowrap; text-overflow: ellipsis; }
     #monitor_hooks { scrollbar-gutter: stable; }
     #monitor_status { height: auto; margin: 0 1; color: $foreground-muted; }
+    #monitor_missing_count { width: 1fr; height: 3; content-align: left middle; color: $foreground-muted; }
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.profiles = []
+        self.selected_profile = None
         self.session = None
+        self.session_was_current = False
         self.revision = 0
         self.session_number = 0
         self.statuses = {}
@@ -144,6 +238,18 @@ class MonitorPane(Vertical):
         self.event_query = None
         self.status_text = ""
         self._hooks_layout_width = 0
+        self.recording_enabled = False
+        self.recording = None
+        self.recording_error = ""
+        self.recording_task = None
+        self.recording_lock = asyncio.Lock()
+        self.stopped_session = None
+        self.target = ""
+        self.saved_recordings = {}
+        self.archive = "live"
+        self.archive_page = 0
+        self.archive_events = []
+        self.archive_search_timer = None
 
     def compose(self):
         with TabbedContent(id="monitor_views", initial="monitor_events_view"):
@@ -151,6 +257,13 @@ class MonitorPane(Vertical):
                 with Horizontal(classes="monitor_controls"):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
                     yield Button("Clear events", id="monitor_clear")
+                with Horizontal(classes="monitor_controls"):
+                    yield Select([("Live events", "live")], value="live", allow_blank=False, id="monitor_recordings")
+                    yield Button("Record to project", id="monitor_record")
+                    yield Button("Retry save", id="monitor_retry_recording")
+                    yield Button("Newer", id="monitor_newer")
+                    yield Button("Older", id="monitor_older")
+                    yield Button("Delete", id="monitor_delete_recording")
                 yield Label("", id="monitor_status", markup=False)
                 yield Label("", id="monitor_events_empty", classes="monitor_empty")
                 yield DataTable(id="monitor_events", cursor_type="row", classes="monitor_table")
@@ -158,7 +271,7 @@ class MonitorPane(Vertical):
                     yield Static(id="monitor_event_text", markup=False)
             with TabPane("Profiles", id="monitor_profiles_view"):
                 with Horizontal(classes="monitor_controls"):
-                    yield Select([], prompt="Profile", id="monitor_profiles")
+                    yield Label("", id="monitor_profile_name", markup=False)
                     yield Button("Enable", id="monitor_toggle")
                     yield Button("New profile", id="monitor_new")
                     yield Button("Rename", id="monitor_rename")
@@ -169,16 +282,31 @@ class MonitorPane(Vertical):
                     yield Button("Remove hook", id="monitor_remove")
                     yield Button("Retry hooks", id="monitor_retry")
                     yield Button("Details", id="monitor_hook_details")
-                yield Label("", id="monitor_hooks_empty", classes="monitor_empty")
-                yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
+                with Horizontal(id="monitor_restore_controls", classes="monitor_controls") as restore:
+                    restore.display = False
+                    yield Label("", id="monitor_missing_count", markup=False)
+                    yield Button("Restore missing hooks", id="monitor_restore")
+                with Horizontal(id="monitor_profile_body"):
+                    yield DataTable(id="monitor_profiles", cursor_type="row", classes="monitor_table")
+                    with Vertical(id="monitor_hook_panel"):
+                        yield Label("", id="monitor_hooks_empty", classes="monitor_empty")
+                        yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
 
     def on_mount(self):
+        self.recording_enabled = self.app.db.get_info("monitor_recording_enabled") == "1"
+        self.refresh_recordings()
+        self.refresh_recording_controls()
         self.profiles, warning = load_profiles(self.app.db.get_info("monitor_profiles"))
         if warning:
             self.app.notify(warning, severity="warning")
         events = self.query_one("#monitor_events", DataTable)
         for label, width in (("Time", 12), ("Profile", 16), ("Method", 21), ("Outcome", 10)):
             events.add_column(label, width=width)
+        profiles = self.query_one("#monitor_profiles", DataTable)
+        profiles.styles.width = self.PROFILE_LIST_WIDTH
+        profiles.add_column("On", width=2)
+        profiles.add_column("Profile", width=17)
+        profiles.tooltip = "Press Space to enable or disable the selected profile."
         self.refresh_profiles()
         self.refresh_events()
         self.set_interval(0.2, self.drain)
@@ -188,26 +316,36 @@ class MonitorPane(Vertical):
             self.refresh_hooks()
 
     def profile(self):
-        value = self.query_one("#monitor_profiles", Select).value
-        return next((p for p in self.profiles if p["id"] == value), None)
+        return next((p for p in self.profiles if p["id"] == self.selected_profile), None)
 
     def refresh_profiles(self, selected=None):
-        select = self.query_one("#monitor_profiles", Select)
-        current = selected or select.value
-        select.set_options([(Text(p["name"] + (" · enabled" if p["enabled"] else "")), p["id"]) for p in self.profiles])
-        ids = [p["id"] for p in self.profiles]
-        if ids:
-            select.value = current if current in ids else ids[0]
-        self.refresh_hooks()
+        table = self.query_one("#monitor_profiles", DataTable)
+        current = selected or self.selected_profile
+        previous_row = table.cursor_row
+        table.clear()
+        for profile in self.profiles:
+            table.add_row("✓" if profile["enabled"] else "–",
+                          Text(profile["name"], no_wrap=True, overflow="ellipsis"), key=profile["id"])
+        if self.profiles:
+            row = table.get_row_index(current) if current in table.rows else min(previous_row, table.row_count - 1)
+            table.move_cursor(row=row)
+            current = self.profiles[row]["id"]
+        else:
+            current = None
+        changed = current != self.selected_profile
+        self.selected_profile = current
+        self.refresh_hooks(reset_selection=changed)
 
-    def refresh_hooks(self):
+    def refresh_hooks(self, reset_selection=False):
         table = self.query_one("#monitor_hooks", DataTable)
-        previous = table.cursor_row
+        previous = 0 if reset_selection else table.cursor_row
         width = self.size.width
         resize_columns = not table.columns or width != self._hooks_layout_width
         table.clear(columns=resize_columns)
         if resize_columns:
-            available = width - table.styles.margin.width - table.styles.gutter.width
+            profiles = self.query_one("#monitor_profiles", DataTable)
+            available = width - self.PROFILE_LIST_WIDTH - profiles.styles.margin.width
+            available -= table.styles.margin.width + table.styles.gutter.width
             available -= table.scrollbar_size_vertical + 4 * table.cell_padding
             table.add_column("State", width=self.HOOK_STATE_WIDTH)
             table.add_column("Method overload", width=max(15, available - self.HOOK_STATE_WIDTH))
@@ -244,6 +382,7 @@ class MonitorPane(Vertical):
 
     def refresh_controls(self):
         p = self.profile()
+        self.query_one("#monitor_profile_name", Label).update(p["name"] if p else "")
         connecting = self.app._connection_state == "connecting"
         online = self.session is not None and self.session is self.app.frida_session
         self.query_one("#monitor_toggle", Button).label = "Disable" if p and p["enabled"] else "Enable"
@@ -254,11 +393,17 @@ class MonitorPane(Vertical):
             self.query_one(f"#monitor_{key}", Button).disabled = connecting or not (p and p["hooks"])
         self.query_one("#monitor_retry", Button).disabled = connecting or not (online and p and p["enabled"] and p["hooks"])
         self.query_one("#monitor_hook_details", Button).disabled = not (p and p["hooks"])
+        missing = len(missing_default_hooks(p))
+        self.query_one("#monitor_restore_controls").display = bool(missing)
+        self.query_one("#monitor_restore", Button).disabled = connecting
+        if missing:
+            hooks = "hook" if missing == 1 else "hooks"
+            self.query_one("#monitor_missing_count", Label).update(f"{missing} default {hooks} missing")
 
     def save(self, profiles, selected=None):
         try:
             profiles = validate_profiles(profiles)
-            self.app.db.set_info("monitor_profiles", json.dumps(profiles))
+            self.app.db.set_info("monitor_profiles", json.dumps({"version": PROFILE_FORMAT_VERSION, "profiles": profiles}))
         except (ValueError, OSError, sqlite3.Error) as exc:
             self.app.notify(str(exc), severity="error")
             return
@@ -266,12 +411,34 @@ class MonitorPane(Vertical):
         self.refresh_profiles(selected)
         self.apply_configuration()
 
-    def begin_session(self, session):
+    def restore_hooks(self, profile):
+        missing = missing_default_hooks(profile)
+        if not missing:
+            return
+        profile_id = profile["id"]
+
+        def restore(confirmed):
+            if not confirmed or self.app._connection_state == "connecting":
+                return
+            profiles = copy.deepcopy(self.profiles)
+            target = next((p for p in profiles if p["id"] == profile_id), None)
+            additions = missing_default_hooks(target)
+            if additions:
+                target["hooks"].extend(additions)
+                self.save(profiles, profile_id)
+
+        self.app.push_screen(RestoreHooksDialog(profile["name"], len(missing)), restore)
+
+    def begin_session(self, session, target=""):
+        self.drain()
         with self.lock:
             self.inbox.clear()
             self.pending_status = None
             self.session = session
+            self.session_was_current = session is self.app.frida_session
         self.session_number += 1
+        self.target = target
+        self.stopped_session = None
         self.revision = 0
         self.statuses.clear()
         session.monitor_hooks = enabled_hooks(self.profiles)
@@ -315,36 +482,236 @@ class MonitorPane(Vertical):
             self.last_connection = connection
             self.refresh_hooks()
         with self.lock:
+            disconnected = (
+                self.session_was_current and self.session is not None
+                and self.session is not self.app.frida_session
+            )
+            interrupted = disconnected and self.stopped_session is not self.session
+            if disconnected:
+                self.session = None
             messages = list(self.inbox)
             self.inbox.clear()
-            self.lost += self.inbound_lost
+            lost = self.inbound_lost
             self.inbound_lost = 0
             if self.pending_status is not None:
                 messages.append(self.pending_status)
                 self.pending_status = None
-        changed = False
+        captured = []
         for payload in messages:
             if payload.get("noxenEvent") == "monitor_status":
                 if payload.get("revision") == self.revision:
                     self.statuses = {(s["profile"], s["index"]): (s["state"], s["detail"]) for s in payload["statuses"]}
                     self.refresh_hooks()
             else:
-                self.lost += payload.get("dropped", 0)
+                lost += payload.get("dropped", 0)
                 for e in payload.get("events", []):
                     self.evicted += len(self.events) == MAX_EVENTS
                     e = dict(e, session=self.session_number)
+                    if self.target:
+                        e["target"] = self.target
                     self.events.append(e)
-                    changed = True
-        self.dirty |= changed
+                    captured.append(e)
+        self.lost += lost
+        self.queue_recording(captured, lost)
+        if interrupted and self.recording:
+            self.recording.interrupted = True
+        self.dirty |= bool(captured)
         if (
             self.dirty
+            and self.archive == "live"
             and self.app.query_one("#main_tabs", TabbedContent).active == "tab_monitor"
             and self.query_one("#monitor_views", TabbedContent).active == "monitor_events_view"
         ):
             self.refresh_events()
         self.refresh_event_status()
 
+    def queue_recording(self, events, lost):
+        if not self.recording_enabled:
+            return
+        if self.recording is None and (events or lost):
+            self.recording = MonitorRecording()
+        recording = self.recording
+        if recording is None or not recording.accepting:
+            return
+        if events or lost:
+            available = self.RECORDING_BUFFER - len(recording.pending)
+            recording.pending.extend(events[:available])
+            recording.unsaved += max(0, len(events) - available)
+            recording.lost += lost
+            recording.dirty = True
+        if recording.dirty and self.recording_task is None and not self.recording_error:
+            self.recording_task = asyncio.create_task(self.write_recording(recording))
+
+    async def write_recording(self, recording, finish=False, discard=False):
+        try:
+            while True:
+                batch = [] if discard else list(islice(recording.pending, self.RECORDING_BATCH))
+                last_batch = discard or len(batch) == len(recording.pending)
+                unsaved = recording.unsaved + (len(recording.pending) if discard else 0)
+                status = "open"
+                if finish and last_batch:
+                    status = "incomplete" if recording.interrupted or unsaved else "complete"
+                recording.dirty = not last_batch
+                await asyncio.to_thread(
+                    self.app.db.save_monitor_batch, recording.id, recording.started, batch,
+                    recording.lost, unsaved, status,
+                )
+                for _ in batch:
+                    recording.pending.popleft()
+                if not finish or last_batch:
+                    return True
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            recording.dirty = True
+            self.recording_error = str(exc)
+            self.refresh_recording_controls()
+            self.refresh_event_status()
+            self.app.notify(self.recording_error, title="Monitor recording paused", severity="error", markup=False)
+            return False
+        finally:
+            if not finish:
+                self.recording_task = None
+
+    async def finish_recording(self, discard=False):
+        self.drain()
+        recording = self.recording
+        if recording is None:
+            return True
+        recording.accepting = False
+        if self.recording_task is not None:
+            await self.recording_task
+        if not await self.write_recording(recording, finish=True, discard=discard):
+            recording.accepting = True
+            return False
+        self.recording = None
+        self.recording_error = ""
+        self.refresh_recordings()
+        self.refresh_recording_controls()
+        return True
+
+    async def stop_recording_feed(self, session):
+        if not self.recording_enabled or session is None or self.stopped_session is session:
+            return
+        self.drain()
+        incomplete = False
+        try:
+            final = await asyncio.to_thread(session.stop_monitor)
+            if final:
+                incomplete = final.get("incomplete", False)
+                self.receive(session, final)
+        except Exception:
+            incomplete = True
+        self.stopped_session = session
+        self.drain()
+        if incomplete and self.recording:
+            self.recording.interrupted = True
+
+    @work
+    async def toggle_recording(self, retry=False):
+        if self.recording_lock.locked():
+            return
+        async with self.recording_lock:
+            if retry:
+                if self.recording_error and self.recording and await self.write_recording(self.recording):
+                    self.recording_error = ""
+                    self.refresh_recording_controls()
+                    self.refresh_event_status()
+                return
+            enabled = not self.recording_enabled
+            if enabled and not await self.app.push_screen_wait(RecordingDialog(
+                "Save Monitor events automatically in this project? Arguments and return values may contain sensitive data.",
+                "Start recording",
+            )):
+                return
+            if not enabled and not await self.finish_recording():
+                discard = await self.app.push_screen_wait(RecordingDialog(
+                    f"Monitor recording could not be saved.\n\n{self.recording_error}",
+                    "Discard unsaved events",
+                ))
+                if not discard or not await self.finish_recording(discard=True):
+                    return
+            if not enabled:
+                self.recording_enabled = False
+            try:
+                await asyncio.to_thread(self.app.db.set_info, "monitor_recording_enabled", "1" if enabled else "0")
+            except (OSError, sqlite3.Error) as exc:
+                self.recording_enabled = not enabled
+                self.app.notify(str(exc), title="Could not save recording setting", severity="error", markup=False)
+                return
+            self.recording_enabled = enabled
+            self.refresh_recording_controls()
+            self.refresh_event_status()
+
+    def refresh_recordings(self):
+        rows = self.app.db.monitor_recordings()
+        self.saved_recordings = {row[0]: row[1:] for row in rows}
+        options = [("Live events", "live")]
+        for key, started, _, _, status in rows:
+            if self.recording and key == self.recording.id:
+                continue
+            when = datetime.fromisoformat(started).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            label = when if status == "complete" else f"{when} · incomplete"
+            options.append((label, key))
+        select = self.query_one("#monitor_recordings", Select)
+        select.set_options(options)
+        select.value = self.archive if self.archive in self.saved_recordings else "live"
+
+    def refresh_recording_controls(self, has_older=False):
+        live = self.archive == "live"
+        button = self.query_one("#monitor_record", Button)
+        button.display = live
+        button.label = "Stop recording" if self.recording_enabled else "Record to project"
+        self.query_one("#monitor_retry_recording", Button).display = live and bool(self.recording_error)
+        for action in ("newer", "older", "delete_recording"):
+            self.query_one(f"#monitor_{action}", Button).display = not live
+        self.query_one("#monitor_newer", Button).disabled = self.archive_page == 0
+        self.query_one("#monitor_older", Button).disabled = not has_older
+
+    @work(exclusive=True, group="monitor_archive")
+    async def load_archive(self):
+        key, page = self.archive, self.archive_page
+        if key == "live":
+            return
+        query = self.query_one("#monitor_search", Input).value.casefold()
+        try:
+            events, has_older = await asyncio.to_thread(
+                self.app.db.monitor_recording_page, key, query, page * self.ARCHIVE_PAGE, self.ARCHIVE_PAGE,
+            )
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            self.app.notify(str(exc), title="Could not read recording", severity="error", markup=False)
+            return
+        if (key, page, query) != (
+            self.archive, self.archive_page, self.query_one("#monitor_search", Input).value.casefold()
+        ):
+            return
+        self.archive_events = events
+        self.refresh_events()
+        self.refresh_recording_controls(has_older)
+
+    @work
+    async def delete_recording(self, key):
+        if not await self.app.push_screen_wait(RecordingDialog(
+            "Delete this Monitor recording from the project?", "Delete"
+        )):
+            return
+        try:
+            await asyncio.to_thread(self.app.db.delete_monitor_recording, key)
+        except (OSError, sqlite3.Error) as exc:
+            self.app.notify(str(exc), title="Could not delete recording", severity="error", markup=False)
+            return
+        self.refresh_recordings()
+
     def refresh_event_status(self):
+        if self.archive != "live":
+            _, lost, unsaved, state = self.saved_recordings.get(self.archive, ("", 0, 0, "open"))
+            status = f"Page {self.archive_page + 1} · {'Saved' if state == 'complete' else 'Incomplete'}"
+            if lost:
+                status += f" · {lost} lost during capture"
+            if unsaved:
+                status += f" · {unsaved} not saved"
+            if status != self.status_text:
+                self.query_one("#monitor_status", Label).update(status)
+                self.status_text = status
+            return
         status = f"{len(self.events)} events"
         if self.lost:
             status += f" · {self.lost} lost"
@@ -353,6 +720,12 @@ class MonitorPane(Vertical):
         shown = self.query_one("#monitor_events", DataTable).row_count
         if shown < len(self.events):
             status += f" · {shown} shown"
+        if self.recording_error:
+            status += " · Recording paused"
+        elif self.recording_enabled:
+            status += " · Recording to project"
+        if self.recording and self.recording.unsaved:
+            status += f" · {self.recording.unsaved} not saved"
         if status != self.status_text:
             self.query_one("#monitor_status", Label).update(status)
             self.status_text = status
@@ -362,7 +735,9 @@ class MonitorPane(Vertical):
         table = self.query_one("#monitor_events", DataTable)
         old = self.selected
         query = self.query_one("#monitor_search", Input).value.casefold()
-        matches = [e for e in self.events if not query or query in json.dumps(e, ensure_ascii=True).casefold()]
+        matches = self.archive_events if self.archive != "live" else [
+            e for e in self.events if not query or query in json.dumps(e, ensure_ascii=True).casefold()
+        ]
         visible = {self.event_key(e): e for e in matches[-200:]}
         if self.event_query != query:
             table.clear()
@@ -374,8 +749,11 @@ class MonitorPane(Vertical):
             if key in table.rows:
                 continue
             timestamp = datetime.fromtimestamp(e.get("time", 0) / 1000).strftime("%H:%M:%S.%f")[:-3]
+            method = e.get("method", "Capture error")
+            if method == "$init" and e.get("class"):
+                method = e["class"].rsplit(".", 1)[-1]
             table.add_row(timestamp, Text(", ".join(e.get("profiles", [])), no_wrap=True, overflow="ellipsis"),
-                          Text(e.get("method", "Capture error"), no_wrap=True, overflow="ellipsis"),
+                          Text(method, no_wrap=True, overflow="ellipsis"),
                           e.get("outcome", "unknown"), key=key)
         table.display = self.query_one("#monitor_detail").display = bool(visible)
         empty = self.query_one("#monitor_events_empty", Label)
@@ -387,9 +765,9 @@ class MonitorPane(Vertical):
         else:
             self.selected = None
             self.query_one("#monitor_event_text", Static).update("")
-            empty.update("No matching events." if self.events else
+            empty.update("No matching events." if self.events or self.archive != "live" else
                          "No events yet. Enable a profile in Profiles and use the target app.")
-        self.query_one("#monitor_clear", Button).disabled = not self.events
+        self.query_one("#monitor_clear", Button).disabled = self.archive != "live" or not self.events
         self.refresh_event_status()
 
     @staticmethod
@@ -400,7 +778,8 @@ class MonitorPane(Vertical):
         if key == self.selected:
             return
         self.selected = key
-        event = next((e for e in self.events if self.event_key(e) == key), None)
+        events = self.events if self.archive == "live" else self.archive_events
+        event = next((e for e in events if self.event_key(e) == key), None)
         if event:
             self.query_one("#monitor_event_text", Static).update(Text(event_detail(event), overflow="fold"))
             self.query_one("#monitor_detail").scroll_home(animate=False, immediate=True)
@@ -410,36 +789,78 @@ class MonitorPane(Vertical):
         table = event.data_table
         if event.cursor_row != table.cursor_row or not table.row_count:
             return
+        if table.id not in ("monitor_events", "monitor_profiles"):
+            return
+        key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        if event.row_key != key:
+            return
         if table.id == "monitor_events":
-            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            if event.row_key == key:
-                self.show_event(key.value)
+            self.show_event(key.value)
+        elif key.value != self.selected_profile:
+            self.selected_profile = key.value
+            self.refresh_hooks(reset_selection=True)
+
+    def on_key(self, event):
+        if event.key == "space" and getattr(self.app.focused, "id", None) == "monitor_profiles":
+            event.stop()
+            self.query_one("#monitor_toggle", Button).press()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated):
         event.stop()
-        if event.pane.id == "monitor_events_view" and self.dirty:
+        if event.pane.id == "monitor_events_view" and self.dirty and self.archive == "live":
             self.refresh_events()
 
     def on_select_changed(self, event):
         event.stop()
-        if event.value == event.select.value:
-            self.refresh_hooks()
+        if event.value != event.select.value:
+            return
+        if event.select.id == "monitor_recordings":
+            if event.value == self.archive:
+                return
+            self.archive = event.value
+            self.archive_page = 0
+            self.archive_events = []
+            self.selected = None
+            self.query_one("#monitor_events", DataTable).clear()
+            self.refresh_recording_controls()
+            self.refresh_events()
+            self.load_archive()
 
     def on_input_changed(self, event):
         event.stop()
         if event.input.id == "monitor_search":
-            self.refresh_events()
+            if self.archive == "live":
+                self.refresh_events()
+            else:
+                self.archive_page = 0
+                self.refresh_recording_controls()
+                if self.archive_search_timer is not None:
+                    self.archive_search_timer.stop()
+                self.archive_search_timer = self.set_timer(0.15, self.load_archive)
 
     def on_button_pressed(self, event):
         event.stop()
         action = event.button.id.removeprefix("monitor_")
+        if action == "record":
+            self.toggle_recording()
+            return
+        if action == "retry_recording":
+            self.toggle_recording(retry=True)
+            return
+        if action in ("newer", "older"):
+            self.archive_page += 1 if action == "older" else -1
+            self.refresh_recording_controls()
+            self.load_archive()
+            return
+        if action == "delete_recording":
+            self.delete_recording(self.archive)
+            return
         p = self.profile()
         if action == "hook_details":
             self.show_hook()
             return
         if action == "clear":
-            with self.lock:
-                self.inbox.clear()
+            self.drain()
             self.events.clear()
             self.refresh_events()
             return
@@ -453,6 +874,9 @@ class MonitorPane(Vertical):
             self.app.push_screen(MonitorDialog(name=""), add)
             return
         if not p:
+            return
+        if action == "restore":
+            self.restore_hooks(p)
             return
         profiles = copy.deepcopy(self.profiles)
         target = next(x for x in profiles if x["id"] == p["id"])

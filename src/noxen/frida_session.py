@@ -491,6 +491,20 @@ class FridaSession:
             raise RuntimeError("Monitor is not connected")
         return script.exports_sync.configure_monitor(hooks, revision)
 
+    def stop_monitor(self):
+        import frida
+
+        script = self._script
+        if script is None:
+            raise RuntimeError("Monitor is not connected")
+        cancellable = frida.Cancellable()
+        timeout = threading.Timer(2.0, cancellable.cancel)
+        timeout.start()
+        try:
+            return script.exports_sync.stop_monitor(cancellable=cancellable)
+        finally:
+            timeout.cancel()
+
     def on_message(self, message, data):
         if message["type"] == "send":
             payload = message["payload"]

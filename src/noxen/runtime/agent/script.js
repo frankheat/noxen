@@ -9,6 +9,7 @@ const Java = typeof globalThis.Java !== 'undefined' ? globalThis.Java : Java_bri
 // On Frida < 17 Java is a read-only built-in, so we skip this silently.
 try { globalThis.Java = Java; } catch (_) {}
 let monitor = null;
+let monitorStopped = false;
 
 var lock = null;
 var ObjectJava = null;
@@ -1401,8 +1402,13 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
 
 rpc.exports = {
   configureMonitor: function (hooks, revision) {
+    if (monitorStopped) return false;
     if (monitor === null) monitor = require('./monitor.js').createMonitor(Java, send, setInterval);
     return monitor.configure(hooks, revision);
+  },
+  stopMonitor: function () {
+    monitorStopped = true;
+    return monitor === null ? null : monitor.stop();
   },
   loadExtraScript: function (name, source) {
     // Use the same runtime/Java bridge, but preserve the extra file's name in errors.

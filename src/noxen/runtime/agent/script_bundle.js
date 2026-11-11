@@ -1762,9 +1762,72 @@
   var require_monitor = __commonJS({
     "agent/monitor.js"(exports, module) {
       init_node_globals();
+      var MAX_QUEUED_EVENTS = 512;
+      var RESOLVER = "android.content.ContentResolver";
+      var SQLITE = "android.database.sqlite.SQLiteDatabase";
+      var ANDROID_LOG = "android.util.Log";
+      var CIPHER = "javax.crypto.Cipher";
+      var URL_CLASS = "java.net.URL";
+      var SOCKET_ADDRESS = "java.net.SocketAddress";
+      var INET_SOCKET_ADDRESS = "java.net.InetSocketAddress";
+      var URI = "android.net.Uri";
+      var STRING = "java.lang.String";
+      var FILE = "java.io.File";
+      var FRAMEWORK_URIS = /* @__PURE__ */ new Set(["android.net.Uri$StringUri", "android.net.Uri$HierarchicalUri", "android.net.Uri$OpaqueUri"]);
+      var FILE_CONSTRUCTORS = /* @__PURE__ */ new Set(["java.io.FileInputStream", "java.io.FileOutputStream", "java.io.RandomAccessFile"]);
+      var SQL_BOXED_SCALARS = /* @__PURE__ */ new Set([
+        STRING,
+        "java.lang.Long",
+        "java.lang.Double",
+        "java.lang.Integer",
+        "java.lang.Short",
+        "java.lang.Byte",
+        "java.lang.Float",
+        "java.lang.Boolean"
+      ]);
+      function sameObject(a, b) {
+        if (a === b) return true;
+        const left = Array.isArray(a) ? a.$w : a;
+        const right = Array.isArray(b) ? b.$w : b;
+        return left != null && right != null && left.$isSameObject(right);
+      }
+      function forwardsTo(parent, spec, receiver, args) {
+        if (!parent || parent.spec.profile !== spec.profile || parent.spec.class !== spec.class || parent.spec.method !== spec.method || !sameObject(parent.receiver, receiver)) return false;
+        const outer = parent.args;
+        if (spec.class === CIPHER) {
+          const from2 = parent.spec.args, to = spec.args;
+          if (spec.method === "getInstance")
+            return from2[1] === STRING && to[1] === "java.security.Provider" && outer[0] === args[0];
+          return spec.method === "init" && to.length === from2.length + 1 && to[to.length - 1] === "java.security.SecureRandom" && outer[0] === args[0] && from2.slice(1).every((type, i) => type === to[i + 1] && sameObject(outer[i + 1], args[i + 1]));
+        }
+        if (spec.method === "$init") {
+          const from2 = parent.spec.args[0], to = spec.args[0];
+          if (spec.class !== "java.io.FileOutputStream") {
+            return from2 === STRING && to === FILE && outer.length === args.length && (outer.length === 1 || outer[1] === args[1]);
+          }
+          if (args.length !== 2 || args[1] !== (outer.length === 1 ? false : outer[1])) return false;
+          if (from2 === STRING && to === FILE) return true;
+          if (outer.length === 1 && from2 === to) {
+            return from2 === STRING ? outer[0] === args[0] : sameObject(outer[0], args[0]);
+          }
+          return false;
+        }
+        if (spec.method === "call") {
+          return parent.spec.args[0] === URI && spec.args[0] === STRING && outer[0] != null && FRAMEWORK_URIS.has(outer[0].$className) && outer[0].getAuthority() === args[0] && outer[1] === args[1] && outer[2] === args[2] && sameObject(outer[3], args[3]);
+        }
+        if (!sameObject(outer[0], args[0])) return false;
+        if (spec.method === "openFileDescriptor")
+          return outer.length === 2 && args.length === 3 && outer[1] === args[1] && args[2] == null;
+        if (spec.method !== "query" || !sameObject(outer[1], args[1])) return false;
+        if (outer.length === 5 && args.length === 6)
+          return outer[2] === args[2] && sameObject(outer[3], args[3]) && outer[4] === args[4] && args[5] == null;
+        return outer.length === 6 && args.length === 4 && spec.args[2] === "android.os.Bundle" && sameObject(outer[5], args[3]);
+      }
       function createMonitor(Java2, sendMessage, schedule) {
         const installed = /* @__PURE__ */ new Map();
+        const forwardingFrames = /* @__PURE__ */ new Map();
         let revision = -1, queue = [], dropped = 0, sequence = 0, inspecting = false;
+        let stopped = false, activeCalls = 0;
         function safe(fn, fallback) {
           try {
             return fn();
@@ -1772,15 +1835,54 @@
             return fallback;
           }
         }
+        function textValue(type, text, limit = 2048) {
+          return { type, value: text.slice(0, limit), truncated: text.length > limit };
+        }
+        function urlDestination(url) {
+          const scheme = url.getProtocol();
+          if (scheme !== "http" && scheme !== "https") return textValue(URL_CLASS, scheme + ":");
+          const port = url.getPort();
+          const authority = url.getHost() + (port === -1 ? "" : ":" + port);
+          return textValue(URL_CLASS, scheme + "://" + authority + (url.getPath() || ""));
+        }
         function value(v, type) {
           if (v === null || v === void 0) return { type, value: null };
+          if (type === URI && FRAMEWORK_URIS.has(v.$className))
+            return textValue(type, String(v.toString()));
+          if (type === FILE && v.$className === FILE)
+            return textValue(type, String(v.getPath()));
+          if (type === SOCKET_ADDRESS && v.$className === INET_SOCKET_ADDRESS) {
+            const endpoint = Java2.cast(v, Java2.use(INET_SOCKET_ADDRESS));
+            const host = endpoint.getHostString();
+            const address = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
+            return textValue(INET_SOCKET_ADDRESS, address + ":" + endpoint.getPort());
+          }
+          if (type === "long" && typeof Int64 !== "undefined" && v instanceof Int64)
+            return { type, value: v.toString() };
           if (type === "java.lang.String" || type === "char" || typeof v === "string") {
-            const s = String(v);
-            return { type, value: s.slice(0, 2048), truncated: s.length > 2048 };
+            return textValue(type, String(v));
           }
           if (typeof v === "boolean" || typeof v === "number")
             return { type, value: typeof v === "number" && !Number.isFinite(v) ? String(v) : v };
           return { type, opaque: true };
+        }
+        function sqlBinding(binding) {
+          if (binding == null) return { type: "null", value: null };
+          if (typeof binding === "string") return textValue(STRING, binding, 512);
+          const type = binding.$className || "java.lang.Object";
+          if (!SQL_BOXED_SCALARS.has(type)) return { type, opaque: true };
+          return textValue(type, String(binding.toString()), 512);
+        }
+        function argumentValue(spec, args, index) {
+          const type = spec.args[index], arg = args[index];
+          if (spec.class === ANDROID_LOG && type === "java.lang.Throwable" && arg != null)
+            return { type: arg.$className || type, opaque: true };
+          if (spec.class === CIPHER && spec.method === "init" && index > 0 && arg != null)
+            return { type: arg.$className || type, opaque: true };
+          const bindings = spec.class === SQLITE && (spec.method === "execSQL" && index === 1 && type === "[Ljava.lang.Object;" || spec.method === "rawQueryWithFactory" && index === 2 && type === "[Ljava.lang.String;");
+          if (!bindings || !Array.isArray(arg)) return value(arg, type);
+          const items = arg.slice(0, 16).map((binding) => safe(() => sqlBinding(binding), { captureError: true }));
+          return { type, items, count: arg.length };
         }
         function inspect2(fn) {
           inspecting = true;
@@ -1791,11 +1893,60 @@
           }
         }
         function emit(event) {
-          if (queue.length >= 128) {
+          if (queue.length >= MAX_QUEUED_EVENTS) {
             dropped++;
             return;
           }
           queue.push(event);
+        }
+        function captureCall(method, receiver, args, specs, thread) {
+          if (!specs.length) return method.apply(receiver, args);
+          if (queue.length >= MAX_QUEUED_EVENTS) {
+            dropped++;
+            return method.apply(receiver, args);
+          }
+          activeCalls++;
+          try {
+            return recordCall(method, receiver, args, specs, thread);
+          } finally {
+            activeCalls--;
+          }
+        }
+        function recordCall(method, receiver, args, specs, thread) {
+          const event = {
+            id: ++sequence,
+            time: Date.now(),
+            revision,
+            profiles: specs.map((s) => s.profileName),
+            class: specs[0].class,
+            method: specs[0].method,
+            types: specs[0].args,
+            thread: thread === null ? "unknown" : String(thread)
+          };
+          if (specs.some((s) => s.captureArguments)) {
+            event.arguments = specs[0].args.map((_, i) => inspect2(() => argumentValue(specs[0], args, i)));
+            if (event.class === URL_CLASS && event.method === "openConnection")
+              event.destination = inspect2(() => urlDestination(receiver));
+            if (event.class === CIPHER && event.method === "init")
+              event.transformation = inspect2(() => value(receiver.getAlgorithm(), STRING));
+          }
+          if (specs.some((s) => s.captureStack))
+            event.stack = inspect2(() => Java2.backtrace({ limit: 16 }).frames.map((f) => f.signature));
+          let result;
+          try {
+            result = method.apply(receiver, args);
+          } catch (error) {
+            event.outcome = "exception";
+            const type = inspect2(() => error.$className || error.$h && Java2.vm.getEnv().getObjectClassName(error.$h));
+            event.exception = { type: typeof type === "string" ? type : "unknown", opaque: true };
+            if (!stopped) emit(event);
+            throw error;
+          }
+          event.outcome = "returned";
+          if (specs.some((s) => s.captureReturn))
+            event.result = inspect2(() => value(result, method.returnType.className));
+          if (!stopped) emit(event);
+          return result;
         }
         schedule(function() {
           if (!queue.length && !dropped) return;
@@ -1808,9 +1959,10 @@
           }
         }, 100);
         function configure(hooks, nextRevision) {
+          if (stopped) return false;
           revision = nextRevision;
           Java2.perform(function() {
-            if (nextRevision !== revision) return;
+            if (stopped || nextRevision !== revision) return;
             installed.forEach((record) => {
               record.specs = [];
             });
@@ -1833,40 +1985,22 @@
                   if (method.implementation !== null) throw new Error("Method already hooked; Intercept or extra-script conflict");
                   record = { specs: [], method };
                   record.wrapper = function() {
-                    if (inspecting || !record.specs.length) return method.apply(this, arguments);
-                    if (queue.length >= 128) {
-                      dropped++;
-                      return method.apply(this, arguments);
-                    }
-                    const specs = record.specs.slice(), args = arguments;
-                    const event = {
-                      id: ++sequence,
-                      time: Date.now(),
-                      revision,
-                      profiles: specs.map((s) => s.profileName),
-                      class: specs[0].class,
-                      method: specs[0].method,
-                      types: specs[0].args,
-                      thread: safe(() => String(Process.getCurrentThreadId()), "unknown")
-                    };
-                    if (specs.some((s) => s.captureArguments))
-                      event.arguments = specs[0].args.map((t, i) => inspect2(() => value(args[i], t)));
-                    if (specs.some((s) => s.captureStack))
-                      event.stack = inspect2(() => Java2.backtrace({ limit: 16 }).frames.map((f) => f.signature));
-                    let result;
+                    if (stopped || inspecting || !record.specs.length) return method.apply(this, arguments);
+                    const specs = record.specs;
+                    const thread = safe(() => Process.getCurrentThreadId(), null);
+                    const builtin = specs.find((s) => s.profile === "content-provider" && s.class === RESOLVER || s.profile === "file" && s.method === "$init" && FILE_CONSTRUCTORS.has(s.class) || s.profile === "crypto" && s.class === CIPHER);
+                    if (!builtin || thread === null)
+                      return captureCall(method, this, arguments, specs, thread);
+                    const parent = forwardingFrames.get(thread);
+                    const forwarded = inspect2(() => forwardsTo(parent, builtin, this, arguments)) === true;
+                    const active = forwarded ? specs.filter((s) => s !== builtin) : specs;
+                    forwardingFrames.set(thread, { spec: builtin, receiver: this, args: arguments });
                     try {
-                      result = method.apply(this, arguments);
-                    } catch (error) {
-                      event.outcome = "exception";
-                      event.exception = inspect2(() => ({ type: error.$className || "unknown", opaque: true }));
-                      emit(event);
-                      throw error;
+                      return captureCall(method, this, arguments, active, thread);
+                    } finally {
+                      if (parent) forwardingFrames.set(thread, parent);
+                      else forwardingFrames.delete(thread);
                     }
-                    event.outcome = "returned";
-                    if (specs.some((s) => s.captureReturn))
-                      event.result = inspect2(() => value(result, method.returnType.className));
-                    emit(event);
-                    return result;
                   };
                   method.implementation = record.wrapper;
                   record.replacement = method.implementation;
@@ -1885,7 +2019,14 @@
           });
           return true;
         }
-        return { configure };
+        function stop() {
+          stopped = true;
+          const final = { noxenEvent: "monitor_batch", events: queue, dropped, incomplete: activeCalls > 0 };
+          queue = [];
+          dropped = 0;
+          return final;
+        }
+        return { configure, stop };
       }
       module.exports = { createMonitor };
     }
@@ -13625,6 +13766,7 @@ std_string_c_str (StdString * self)
   } catch (_) {
   }
   var monitor = null;
+  var monitorStopped = false;
   var lock = null;
   var ObjectJava = null;
   var UriJava = null;
@@ -14934,8 +15076,13 @@ std_string_c_str (StdString * self)
   }
   rpc.exports = {
     configureMonitor: function(hooks, revision) {
+      if (monitorStopped) return false;
       if (monitor === null) monitor = require_monitor().createMonitor(Java, send, setInterval);
       return monitor.configure(hooks, revision);
+    },
+    stopMonitor: function() {
+      monitorStopped = true;
+      return monitor === null ? null : monitor.stop();
     },
     loadExtraScript: function(name, source) {
       var exports = rpc.exports;
