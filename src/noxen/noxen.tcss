@@ -299,6 +299,7 @@ Input:focus {
 #monitor_search,
 #monitor_dialog Input {
     height: 3;
+    padding: 0 1;
     border: round $foreground-muted;
 }
 #monitor_search { background: $panel; }
