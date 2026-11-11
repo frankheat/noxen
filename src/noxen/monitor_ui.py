@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from itertools import islice
+from time import monotonic
 from uuid import uuid4
 
 from rich.cells import cell_len
@@ -16,11 +17,11 @@ from textual import work
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, DataTable, Input, Label, OptionList, Select, Static, TabbedContent, TabPane
+from textual.widgets import Button, Checkbox, DataTable, Input, Label, OptionList, Static, TabbedContent, TabPane
 from textual.widgets.option_list import Option
 
 from noxen.modals import ExtraKeyModal
-from noxen.monitor import (MAX_EVENTS, PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_detail, load_profiles,
+from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_detail, load_profiles,
                            missing_default_hooks, new_profile, signature, validate_hook, validate_profiles)
 
 ALL_HOOKS_ROW = ":all"
@@ -185,7 +186,6 @@ class MonitorRecording:
     lost: int = 0
     unsaved: int = 0
     interrupted: bool = False
-    accepting: bool = True
     dirty: bool = True
 
 
@@ -249,17 +249,13 @@ class MonitorPane(Vertical):
     PROFILE_LIST_WIDTH = 29
     RECORDING_BATCH = 512
     RECORDING_BUFFER = 4096
-    ARCHIVE_PAGE = 200
+    EVENT_PAGE_SIZE = 200
 
     DEFAULT_CSS = """
     MonitorPane { height: 1fr; }
     MonitorPane .monitor_controls { height: 3; padding: 0 1; align: left middle; background: $panel; }
     MonitorPane .monitor_controls Button { width: auto; min-width: 10; margin-left: 1; }
-    #monitor_search, #monitor_recordings { width: 1fr; height: 3; }
-    #monitor_recordings > SelectCurrent {
-        border: round $foreground-muted; background: $panel;
-    }
-    #monitor_recordings:focus > SelectCurrent { border: round $accent; }
+    #monitor_search { width: 1fr; height: 3; }
     MonitorPane .monitor_table, MonitorPane .monitor_detail {
         height: 1fr; margin: 0 1; border: solid $foreground-muted;
     }
@@ -298,11 +294,11 @@ class MonitorPane(Vertical):
         self.revision = 0
         self.session_number = 0
         self.statuses = {}
-        self.events = deque(maxlen=MAX_EVENTS)
+        self.events = []
         self.inbox = deque()
         self.lock = threading.Lock()
         self.rpc_lock = threading.Lock()
-        self.lost = self.evicted = 0
+        self.saved_count = self.lost = self.saved_unsaved = self.interrupted_recordings = 0
         self.inbound_lost = 0
         self.pending_status = None
         self.dirty = False
@@ -311,32 +307,28 @@ class MonitorPane(Vertical):
         self.event_query = None
         self.status_text = ""
         self._hooks_layout_width = 0
-        self.recording_enabled = False
         self.recording = None
         self.recording_error = ""
+        self.retry_recording_at = 0.0
         self.recording_task = None
         self.recording_lock = asyncio.Lock()
+        self.clearing = False
+        self.finishing = False
         self.stopped_session = None
         self.target = ""
-        self.saved_recordings = {}
-        self.archive = "live"
-        self.archive_page = 0
-        self.archive_events = []
-        self.archive_search_timer = None
+        self.event_pages = []
+        self.event_page_task = None
+        self.event_page_version = 0
+        self.older_event_id = None
 
     def compose(self):
         with TabbedContent(id="monitor_views", initial="monitor_events_view"):
             with TabPane("Events", id="monitor_events_view"):
                 with Horizontal(classes="monitor_controls"):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
+                    yield Button("Newer", id="monitor_newer", disabled=True)
+                    yield Button("Older", id="monitor_older", disabled=True)
                     yield Button("Clear events", id="monitor_clear")
-                with Horizontal(classes="monitor_controls"):
-                    yield Select([("Live events", "live")], value="live", allow_blank=False, id="monitor_recordings")
-                    yield Button("Record to project", id="monitor_record")
-                    yield Button("Retry save", id="monitor_retry_recording")
-                    yield Button("Newer", id="monitor_newer")
-                    yield Button("Older", id="monitor_older")
-                    yield Button("Delete", id="monitor_delete_recording")
                 yield Label("", id="monitor_status", markup=False)
                 yield Label("", id="monitor_events_empty", classes="monitor_empty")
                 yield DataTable(id="monitor_events", cursor_type="row", classes="monitor_table")
@@ -365,14 +357,12 @@ class MonitorPane(Vertical):
                         yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
 
     def on_mount(self):
-        self.recording_enabled = self.app.db.get_info("monitor_recording_enabled") == "1"
-        self.refresh_recordings()
-        self.refresh_recording_controls()
+        self.saved_count, self.lost, self.saved_unsaved, self.interrupted_recordings = self.app.db.monitor_event_summary()
         self.profiles, warning = load_profiles(self.app.db.get_info("monitor_profiles"))
         if warning:
             self.app.notify(warning, severity="warning")
         events = self.query_one("#monitor_events", DataTable)
-        for label, width in (("Time", 12), ("Profile", 16), ("Method", 21), ("Outcome", 10)):
+        for label, width in (("Time", 19), ("Profile", 16), ("Method", 21), ("Outcome", 10)):
             events.add_column(label, width=width)
         profiles = self.query_one("#monitor_profiles", DataTable)
         self.query_one("#monitor_profile_panel").styles.width = self.PROFILE_LIST_WIDTH
@@ -381,6 +371,7 @@ class MonitorPane(Vertical):
         profiles.tooltip = "Click the On column or press Space to toggle a profile."
         self.refresh_profiles()
         self.refresh_events()
+        self.dirty = True
         self.set_interval(0.2, self.drain)
 
     def on_resize(self):
@@ -663,6 +654,8 @@ class MonitorPane(Vertical):
                                   "state": "Error", "detail": str(exc)} for h in hooks]})
 
     def drain(self):
+        if self.clearing:
+            return
         connection = getattr(self.app, "_connection_state", "disconnected")
         if self.last_connection != connection:
             self.last_connection = connection
@@ -690,34 +683,23 @@ class MonitorPane(Vertical):
                     self.refresh_hooks()
             else:
                 lost += payload.get("dropped", 0)
-                for e in payload.get("events", []):
-                    self.evicted += len(self.events) == MAX_EVENTS
-                    e = dict(e, session=self.session_number)
+                for event in payload.get("events", []):
+                    event = dict(event, session=self.session_number)
                     if self.target:
-                        e["target"] = self.target
-                    self.events.append(e)
-                    captured.append(e)
+                        event["target"] = self.target
+                    captured.append(event)
         self.lost += lost
         self.queue_recording(captured, lost)
         if interrupted and self.recording:
             self.recording.interrupted = True
-        self.dirty |= bool(captured)
-        if (
-            self.dirty
-            and self.archive == "live"
-            and self.app.query_one("#main_tabs", TabbedContent).active == "tab_monitor"
-            and self.query_one("#monitor_views", TabbedContent).active == "monitor_events_view"
-        ):
-            self.refresh_events()
+        self.refresh_page_if_visible()
         self.refresh_event_status()
 
     def queue_recording(self, events, lost):
-        if not self.recording_enabled:
-            return
         if self.recording is None and (events or lost):
             self.recording = MonitorRecording()
         recording = self.recording
-        if recording is None or not recording.accepting:
+        if recording is None:
             return
         if events or lost:
             available = self.RECORDING_BUFFER - len(recording.pending)
@@ -725,57 +707,65 @@ class MonitorPane(Vertical):
             recording.unsaved += max(0, len(events) - available)
             recording.lost += lost
             recording.dirty = True
-        if recording.dirty and self.recording_task is None and not self.recording_error:
+            if self.recording_error and not self.event_pages:
+                self.dirty = True
+        if (
+            recording.dirty and self.recording_task is None and not self.finishing
+            and monotonic() >= self.retry_recording_at
+        ):
             self.recording_task = asyncio.create_task(self.write_recording(recording))
 
-    async def write_recording(self, recording, finish=False, discard=False):
+    async def write_recording(self, recording, finish=False):
         try:
             while True:
-                batch = [] if discard else list(islice(recording.pending, self.RECORDING_BATCH))
-                last_batch = discard or len(batch) == len(recording.pending)
-                unsaved = recording.unsaved + (len(recording.pending) if discard else 0)
+                batch = list(islice(recording.pending, self.RECORDING_BATCH))
+                last_batch = len(batch) == len(recording.pending)
                 status = "open"
                 if finish and last_batch:
-                    status = "incomplete" if recording.interrupted or unsaved else "complete"
+                    status = "incomplete" if recording.interrupted or recording.unsaved else "complete"
                 recording.dirty = not last_batch
                 await asyncio.to_thread(
                     self.app.db.save_monitor_batch, recording.id, recording.started, batch,
-                    recording.lost, unsaved, status,
+                    recording.lost, recording.unsaved, status,
                 )
                 for _ in batch:
                     recording.pending.popleft()
-                if not finish or last_batch:
+                self.saved_count += len(batch)
+                self.recording_error = ""
+                self.retry_recording_at = 0.0
+                if not self.event_pages:
+                    self.dirty = True
+                if not finish or not recording.dirty:
                     return True
         except (ValueError, OSError, sqlite3.Error) as exc:
             recording.dirty = True
+            if not self.recording_error:
+                self.app.notify(str(exc), title="Could not save Monitor events", severity="error", markup=False)
             self.recording_error = str(exc)
-            self.refresh_recording_controls()
-            self.refresh_event_status()
-            self.app.notify(self.recording_error, title="Monitor recording paused", severity="error", markup=False)
+            self.retry_recording_at = monotonic() + 2.0
+            if not self.event_pages:
+                self.dirty = True
             return False
         finally:
             if not finish:
                 self.recording_task = None
+            self.refresh_event_status()
 
-    async def finish_recording(self, discard=False):
+    async def finish_recording(self):
+        self.finishing = True
         self.drain()
         recording = self.recording
         if recording is None:
             return True
-        recording.accepting = False
         if self.recording_task is not None:
             await self.recording_task
-        if not await self.write_recording(recording, finish=True, discard=discard):
-            recording.accepting = True
+        if not await self.write_recording(recording, finish=True):
             return False
         self.recording = None
-        self.recording_error = ""
-        self.refresh_recordings()
-        self.refresh_recording_controls()
         return True
 
     async def stop_recording_feed(self, session):
-        if not self.recording_enabled or session is None or self.stopped_session is session:
+        if session is None or self.stopped_session is session:
             return
         self.drain()
         incomplete = False
@@ -791,150 +781,118 @@ class MonitorPane(Vertical):
         if incomplete and self.recording:
             self.recording.interrupted = True
 
-    @work
-    async def toggle_recording(self, retry=False):
-        if self.recording_lock.locked():
-            return
-        async with self.recording_lock:
-            if retry:
-                if self.recording_error and self.recording and await self.write_recording(self.recording):
-                    self.recording_error = ""
-                    self.refresh_recording_controls()
-                    self.refresh_event_status()
-                return
-            enabled = not self.recording_enabled
-            if enabled and not await self.app.push_screen_wait(RecordingDialog(
-                "Save Monitor events automatically in this project? Arguments and return values may contain sensitive data.",
-                "Start recording",
-            )):
-                return
-            if not enabled and not await self.finish_recording():
-                discard = await self.app.push_screen_wait(RecordingDialog(
-                    f"Monitor recording could not be saved.\n\n{self.recording_error}",
-                    "Discard unsaved events",
-                ))
-                if not discard or not await self.finish_recording(discard=True):
-                    return
-            if not enabled:
-                self.recording_enabled = False
-            try:
-                await asyncio.to_thread(self.app.db.set_info, "monitor_recording_enabled", "1" if enabled else "0")
-            except (OSError, sqlite3.Error) as exc:
-                self.recording_enabled = not enabled
-                self.app.notify(str(exc), title="Could not save recording setting", severity="error", markup=False)
-                return
-            self.recording_enabled = enabled
-            self.refresh_recording_controls()
-            self.refresh_event_status()
+    def request_event_page(self):
+        self.event_page_version += 1
+        self.older_event_id = None
+        self.dirty = True
+        self.refresh_page_if_visible()
+        self.refresh_event_status()
 
-    def refresh_recordings(self):
-        rows = self.app.db.monitor_recordings()
-        self.saved_recordings = {row[0]: row[1:] for row in rows}
-        options = [("Live events", "live")]
-        for key, started, _, _, status in rows:
-            if self.recording and key == self.recording.id:
-                continue
-            when = datetime.fromisoformat(started).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            label = when if status == "complete" else f"{when} · incomplete"
-            options.append((label, key))
-        select = self.query_one("#monitor_recordings", Select)
-        select.set_options(options)
-        select.value = self.archive if self.archive in self.saved_recordings else "live"
+    def refresh_page_if_visible(self):
+        if (
+            self.dirty and not self.clearing and not self.finishing and self.event_page_task is None
+            and self.app.query_one("#main_tabs", TabbedContent).active == "tab_monitor"
+            and self.query_one("#monitor_views", TabbedContent).active == "monitor_events_view"
+        ):
+            self.dirty = False
+            self.event_page_task = asyncio.create_task(self.load_event_page())
 
-    def refresh_recording_controls(self, has_older=False):
-        live = self.archive == "live"
-        button = self.query_one("#monitor_record", Button)
-        button.display = live
-        button.label = "Stop recording" if self.recording_enabled else "Record to project"
-        self.query_one("#monitor_retry_recording", Button).display = live and bool(self.recording_error)
-        for action in ("newer", "older", "delete_recording"):
-            self.query_one(f"#monitor_{action}", Button).display = not live
-        self.query_one("#monitor_newer", Button).disabled = self.archive_page == 0
-        self.query_one("#monitor_older", Button).disabled = not has_older
-
-    @work(exclusive=True, group="monitor_archive")
-    async def load_archive(self):
-        key, page = self.archive, self.archive_page
-        if key == "live":
-            return
+    async def load_event_page(self):
+        version = self.event_page_version
+        before = self.event_pages[-1] if self.event_pages else None
         query = self.query_one("#monitor_search", Input).value.casefold()
+
+        def cancelled():
+            return self.clearing or self.finishing or version != self.event_page_version
+
         try:
             events, has_older = await asyncio.to_thread(
-                self.app.db.monitor_recording_page, key, query, page * self.ARCHIVE_PAGE, self.ARCHIVE_PAGE,
+                self.app.db.monitor_event_page, query, before, self.EVENT_PAGE_SIZE, cancelled
             )
+            if cancelled():
+                return
+            visible = events
+            if before is None and self.recording_error and self.recording:
+                visible_by_key = {self.event_key(event): event for event in events}
+                for event in self.recording.pending:
+                    if not query or query in json.dumps(event).casefold():
+                        pending = dict(event, _recording=self.recording.id)
+                        visible_by_key.setdefault(self.event_key(pending), pending)
+                visible = list(visible_by_key.values())[-self.EVENT_PAGE_SIZE:]
+            oldest_visible = next((event["_db_id"] for event in visible if "_db_id" in event), None)
+            self.older_event_id = None
+            if events:
+                if oldest_visible is None:
+                    self.older_event_id = events[-1]["_db_id"] + 1
+                elif has_older or oldest_visible > events[0]["_db_id"]:
+                    self.older_event_id = oldest_visible
+            self.events = visible
+            self.refresh_events(query, before)
         except (OSError, sqlite3.Error, ValueError) as exc:
-            self.app.notify(str(exc), title="Could not read recording", severity="error", markup=False)
-            return
-        if (key, page, query) != (
-            self.archive, self.archive_page, self.query_one("#monitor_search", Input).value.casefold()
-        ):
-            return
-        self.archive_events = events
-        self.refresh_events()
-        self.refresh_recording_controls(has_older)
+            if not cancelled():
+                self.app.notify(str(exc), title="Could not read Monitor events", severity="error", markup=False)
+        finally:
+            self.event_page_task = None
 
     @work
-    async def delete_recording(self, key):
-        if not await self.app.push_screen_wait(RecordingDialog(
-            "Delete this Monitor recording from the project?", "Delete"
-        )):
+    async def clear_events(self):
+        if self.clearing:
             return
-        try:
-            await asyncio.to_thread(self.app.db.delete_monitor_recording, key)
-        except (OSError, sqlite3.Error) as exc:
-            self.app.notify(str(exc), title="Could not delete recording", severity="error", markup=False)
-            return
-        self.refresh_recordings()
+        async with self.recording_lock:
+            self.drain()
+            self.clearing = True
+            try:
+                if self.recording_task is not None:
+                    await self.recording_task
+                await asyncio.to_thread(self.app.db.clear_monitor_events)
+            except (OSError, sqlite3.Error) as exc:
+                self.app.notify(str(exc), title="Could not clear Monitor events", severity="error", markup=False)
+                return
+            finally:
+                self.clearing = False
+            self.recording = None
+            self.recording_error = ""
+            self.retry_recording_at = 0.0
+            self.saved_count = self.lost = self.saved_unsaved = self.interrupted_recordings = 0
+            self.events = []
+            self.event_pages.clear()
+            self.refresh_events()
+            self.request_event_page()
 
     def refresh_event_status(self):
-        if self.archive != "live":
-            _, lost, unsaved, state = self.saved_recordings.get(self.archive, ("", 0, 0, "open"))
-            status = f"Page {self.archive_page + 1} · {'Saved' if state == 'complete' else 'Incomplete'}"
-            if lost:
-                status += f" · {lost} lost during capture"
-            if unsaved:
-                status += f" · {unsaved} not saved"
-            if status != self.status_text:
-                self.query_one("#monitor_status", Label).update(status)
-                self.status_text = status
-            return
-        status = f"{len(self.events)} events"
+        status = f"{self.saved_count} saved"
+        if self.event_pages:
+            status += f" · Page {len(self.event_pages) + 1}"
         if self.lost:
-            status += f" · {self.lost} lost"
-        if self.evicted:
-            status += f" · {self.evicted} older events discarded"
-        shown = self.query_one("#monitor_events", DataTable).row_count
-        if shown < len(self.events):
-            status += f" · {shown} shown"
-        if self.recording_error:
-            status += " · Recording paused"
-        elif self.recording_enabled:
-            status += " · Recording to project"
-        if self.recording and self.recording.unsaved:
-            status += f" · {self.recording.unsaved} not saved"
+            status += f" · {self.lost} lost during capture"
+        unsaved = self.saved_unsaved + (self.recording.unsaved if self.recording else 0)
+        if unsaved:
+            status += f" · {unsaved} not saved"
+        if self.recording_error and self.recording:
+            status += f" · Save failed · {len(self.recording.pending)} waiting to save"
+        if self.interrupted_recordings:
+            status += f" · {self.interrupted_recordings} incomplete captures"
         if status != self.status_text:
             self.query_one("#monitor_status", Label).update(status)
             self.status_text = status
+        self.query_one("#monitor_newer", Button).disabled = not self.event_pages
+        self.query_one("#monitor_older", Button).disabled = self.older_event_id is None
+        self.query_one("#monitor_clear", Button).disabled = not (self.saved_count or self.recording or self.lost)
 
-    def refresh_events(self):
-        self.dirty = False
+    def refresh_events(self, query="", before=None):
         table = self.query_one("#monitor_events", DataTable)
         old = self.selected
-        query = self.query_one("#monitor_search", Input).value.casefold()
-        matches = self.archive_events if self.archive != "live" else [
-            e for e in self.events if not query or query in json.dumps(e, ensure_ascii=True).casefold()
-        ]
-        visible = {self.event_key(e): e for e in matches[-200:]}
-        if self.event_query != query:
+        visible = {self.event_key(e): e for e in self.events}
+        if self.event_query != (query, before):
             table.clear()
-            self.event_query = query
+            self.event_query = (query, before)
         for row in list(table.rows):
             if row.value not in visible:
                 table.remove_row(row)
         for key, e in visible.items():
             if key in table.rows:
                 continue
-            timestamp = datetime.fromtimestamp(e.get("time", 0) / 1000).strftime("%H:%M:%S.%f")[:-3]
+            timestamp = datetime.fromtimestamp(e.get("time", 0) / 1000).strftime("%Y-%m-%d %H:%M:%S")
             method = e.get("method", "Capture error")
             if method == "$init" and e.get("class"):
                 method = e["class"].rsplit(".", 1)[-1]
@@ -951,21 +909,19 @@ class MonitorPane(Vertical):
         else:
             self.selected = None
             self.query_one("#monitor_event_text", Static).update("")
-            empty.update("No matching events." if self.events or self.archive != "live" else
+            empty.update("No matching events." if query or before is not None else
                          "No events yet. Enable a profile in Profiles and use the target app.")
-        self.query_one("#monitor_clear", Button).disabled = self.archive != "live" or not self.events
         self.refresh_event_status()
 
     @staticmethod
     def event_key(event):
-        return f"{event['session']}:{event['id']}"
+        return f"{event['_recording']}:{event['session']}:{event['id']}"
 
     def show_event(self, key):
         if key == self.selected:
             return
         self.selected = key
-        events = self.events if self.archive == "live" else self.archive_events
-        event = next((e for e in events if self.event_key(e) == key), None)
+        event = next((e for e in self.events if self.event_key(e) == key), None)
         if event:
             self.query_one("#monitor_event_text", Static).update(Text(event_detail(event), overflow="fold"))
             self.query_one("#monitor_detail").scroll_home(animate=False, immediate=True)
@@ -1016,62 +972,32 @@ class MonitorPane(Vertical):
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated):
         event.stop()
-        if event.pane.id == "monitor_events_view" and self.dirty and self.archive == "live":
-            self.refresh_events()
-
-    def on_select_changed(self, event):
-        event.stop()
-        if event.value != event.select.value:
-            return
-        if event.select.id == "monitor_recordings":
-            if event.value == self.archive:
-                return
-            self.archive = event.value
-            self.archive_page = 0
-            self.archive_events = []
-            self.selected = None
-            self.query_one("#monitor_events", DataTable).clear()
-            self.refresh_recording_controls()
-            self.refresh_events()
-            self.load_archive()
+        if event.pane.id == "monitor_events_view":
+            self.refresh_page_if_visible()
 
     def on_input_changed(self, event):
         event.stop()
-        if event.input.id == "monitor_search":
-            if self.archive == "live":
-                self.refresh_events()
-            else:
-                self.archive_page = 0
-                self.refresh_recording_controls()
-                if self.archive_search_timer is not None:
-                    self.archive_search_timer.stop()
-                self.archive_search_timer = self.set_timer(0.15, self.load_archive)
+        if event.input.id == "monitor_search" and event.value == event.input.value:
+            self.event_pages.clear()
+            self.request_event_page()
 
     def on_button_pressed(self, event):
         event.stop()
         action = event.button.id.removeprefix("monitor_")
-        if action == "record":
-            self.toggle_recording()
+        if action == "newer" and self.event_pages:
+            self.event_pages.pop()
+            self.request_event_page()
             return
-        if action == "retry_recording":
-            self.toggle_recording(retry=True)
-            return
-        if action in ("newer", "older"):
-            self.archive_page += 1 if action == "older" else -1
-            self.refresh_recording_controls()
-            self.load_archive()
-            return
-        if action == "delete_recording":
-            self.delete_recording(self.archive)
+        if action == "older" and self.older_event_id is not None:
+            self.event_pages.append(self.older_event_id)
+            self.request_event_page()
             return
         p = self.profile()
         if action == "hook_details":
             self.show_hook()
             return
         if action == "clear":
-            self.drain()
-            self.events.clear()
-            self.refresh_events()
+            self.clear_events()
             return
         if self.app._connection_state == "connecting":
             return

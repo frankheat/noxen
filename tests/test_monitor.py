@@ -7,13 +7,21 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from textual.widgets import Input, DataTable, Label, Select, TabbedContent, TextArea
+from textual.widgets import Input, DataTable, Label, TabbedContent, TextArea
 from noxen.app import NoxenApp
 from noxen.db import ProjectDB
 from noxen.monitor import (PROFILE_FORMAT_VERSION, argument_type, default_profiles,
                            enabled_hooks, event_detail, load_profiles, signature, validate_hook, validate_profiles)
 from noxen.monitor_ui import ALL_HOOKS_ROW, MonitorPane
 from tests.ui_test_case import IsolatedAppTestCase
+
+
+async def wait_until(predicate):
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(poll(), timeout=5)
 
 
 class MonitorRecordingTests(IsolatedAppTestCase):
@@ -28,17 +36,14 @@ class MonitorRecordingTests(IsolatedAppTestCase):
             path = os.path.join(tmp, "recorded.noxen")
             args = SimpleNamespace(project=None, new_project=path, skip_device_scan=True)
             app = NoxenApp(args)
+            app.db.set_info("monitor_recording_enabled", "0")
+            app.db.save_monitor_batch("legacy", "2026-01-01T00:00:00+00:00",
+                                      [dict(event(1, "oldCall"), session=1)], 2, 1, "open")
+            app.db.save_intent({"timestamp": "2026-01-01 00:00:00"})
             async with app.run_test(size=(100, 35)) as pilot:
                 await pilot.click("#--content-tab-tab_monitor")
                 pane = app.query_one(MonitorPane)
-                self.assertFalse(pane.recording_enabled)
-                await pilot.click("#monitor_record")
-                await pilot.click("#recording_confirm")
-                for _ in range(20):
-                    if pane.recording_enabled:
-                        break
-                    await pilot.pause(0.05)
-                self.assertTrue(pane.recording_enabled)
+                await wait_until(lambda: [e["method"] for e in pane.events] == ["oldCall"])
 
                 session = SimpleNamespace(
                     stop_monitor=lambda: batch(event(2, "finalCall"), dropped=7), cleanup=lambda: None,
@@ -62,12 +67,9 @@ class MonitorRecordingTests(IsolatedAppTestCase):
 
             db = ProjectDB(path)
             db.open_existing()
-            recordings = db.monitor_recordings()
-            self.assertEqual(len(recordings), 1)
-            key, _, lost, unsaved, status = recordings[0]
-            self.assertEqual((lost, unsaved, status), (7, 0, "complete"))
-            events, has_older = db.monitor_recording_page(key, "", 0, 200)
-            self.assertEqual([e["method"] for e in events], ["firstCall", "finalCall"])
+            self.assertEqual(db.monitor_event_summary(), (3, 9, 1, 1))
+            events, has_older = db.monitor_event_page("", None, 200)
+            self.assertEqual([e["method"] for e in events], ["oldCall", "firstCall", "finalCall"])
             self.assertFalse(has_older)
             db.close()
 
@@ -75,15 +77,17 @@ class MonitorRecordingTests(IsolatedAppTestCase):
             async with reopened.run_test(size=(100, 35)) as pilot:
                 await pilot.click("#--content-tab-tab_monitor")
                 pane = reopened.query_one(MonitorPane)
-                self.assertTrue(pane.recording_enabled)
-                self.assertFalse(pane.events)
-                reopened.query_one("#monitor_recordings", Select).value = key
+                await wait_until(lambda: len(pane.events) == 3)
+                self.assertEqual(reopened.query_one("#monitor_events", DataTable).row_count, 3)
                 reopened.query_one("#monitor_search", Input).value = "finalcall"
-                for _ in range(20):
-                    if [e["method"] for e in pane.archive_events] == ["finalCall"]:
-                        break
-                    await pilot.pause(0.05)
-                self.assertEqual([e["method"] for e in pane.archive_events], ["finalCall"])
+                await wait_until(lambda: [e["method"] for e in pane.events] == ["finalCall"])
+                await pilot.click("#monitor_clear")
+                await wait_until(lambda: pane.saved_count == 0)
+                self.assertFalse(pane.events)
+            db = ProjectDB(path)
+            self.assertEqual(len(db.open_existing()), 1)
+            self.assertEqual(db.monitor_event_summary(), (0, 0, 0, 0))
+            db.close()
 
 
 class MonitorModelTests(unittest.TestCase):
@@ -388,14 +392,13 @@ class MonitorUITests(IsolatedAppTestCase):
                     {'id': 1, 'time': 1, 'profiles': ['My profile'], 'method': 'check', 'outcome': 'returned',
                      'arguments': [{'type': 'java.lang.String', 'value': '[bold]test\ntext'}]}], 'dropped': 3})
                 pane.drain()
-                self.assertEqual(app.query_one('#monitor_events', DataTable).row_count, 1)
+                events_table = app.query_one('#monitor_events', DataTable)
+                await wait_until(lambda: events_table.row_count == 1)
                 self.assertEqual(pane.lost, 3)
                 app.query_one('#monitor_search', Input).value = 'absent'
-                await pilot.pause()
-                self.assertEqual(app.query_one('#monitor_events', DataTable).row_count, 0)
+                await wait_until(lambda: events_table.row_count == 0)
                 app.query_one('#monitor_search', Input).value = 'test'
-                await pilot.pause()
-                self.assertEqual(app.query_one('#monitor_events', DataTable).row_count, 1)
+                await wait_until(lambda: events_table.row_count == 1)
                 pane.receive(SimpleNamespace(), {'events': [{'id': 2}]})
                 pane.drain()
                 self.assertEqual(len(pane.events), 1)
@@ -406,9 +409,14 @@ class MonitorUITests(IsolatedAppTestCase):
                         {'id': i, 'time': i, 'profiles': ['Load test'], 'method': 'run',
                          'outcome': 'returned', 'arguments': []} for i in range(start, start + 32)], 'dropped': 0})
                 pane.drain()
-                self.assertEqual(len(pane.events), 2000)
-                self.assertEqual(pane.evicted, 17)
-                self.assertEqual(app.query_one('#monitor_events', DataTable).row_count, 200)
+                await wait_until(lambda: pane.saved_count == 2017 and pane.events[-1]["id"] == 2017)
+                self.assertEqual(events_table.row_count, 200)
+                first_on_latest = pane.events[0]["id"]
+                await pilot.click("#monitor_older")
+                await wait_until(lambda: pane.events[-1]["id"] == first_on_latest - 1)
+                self.assertEqual(events_table.row_count, 200)
+                await pilot.click("#monitor_newer")
+                await wait_until(lambda: pane.events[-1]["id"] == 2017)
                 pane.receive(session, {'noxenEvent': 'monitor_status', 'revision': -1,
                     'statuses': [{'profile':'webview','index':0,'state':'Active','detail':''}]})
                 pane.drain()
@@ -425,6 +433,6 @@ class MonitorUITests(IsolatedAppTestCase):
                     {'id': 2018, 'time': 2018, 'profiles': ['Load test'], 'method': 'run',
                      'outcome': 'returned', 'arguments': []}], 'dropped': 0})
                 pane.drain()
-                await pilot.pause()
+                await wait_until(lambda: pane.events[-1]["id"] == 2018)
                 self.assertEqual(pane.selected, selected)
                 self.assertEqual(detail.scroll_y, scroll_y)

@@ -3,11 +3,11 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime, timezone
+from pathlib import Path
 
 from noxen.history_columns import normalize_history_column_widths
-
-MONITOR_STORAGE_BYTES = 32 * 1024 * 1024
 
 _MIGRATED_INTENT_COLUMNS = {
     "outcome": "TEXT",
@@ -129,14 +129,7 @@ class ProjectDB:
     def save_monitor_batch(self, recording, started, events, lost, unsaved, status):
         payloads = [json.dumps(event, separators=(",", ":")) for event in events]
         with self._lock, self._require_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
             size = sum(map(len, payloads))
-            if size:
-                used = conn.execute(
-                    "SELECT COALESCE(SUM(bytes), 0) FROM monitor_recordings"
-                ).fetchone()[0]
-                if used + size > MONITOR_STORAGE_BYTES:
-                    raise ValueError("Monitor storage limit reached. Delete a recording to free space.")
             conn.execute("""
                 INSERT INTO monitor_recordings (id, started, lost, unsaved, status, bytes)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -148,25 +141,41 @@ class ProjectDB:
                 ((recording, payload) for payload in payloads),
             )
 
-    def monitor_recordings(self):
+    def monitor_event_summary(self):
         with self._lock:
-            return self._require_connection().execute("""
-                SELECT id, started, lost, unsaved, status FROM monitor_recordings
-                ORDER BY started DESC
-            """).fetchall()
+            conn = self._require_connection()
+            return conn.execute("""
+                SELECT (SELECT COUNT(*) FROM monitor_events), COALESCE(SUM(lost), 0),
+                       COALESCE(SUM(unsaved), 0), COALESCE(SUM(status != 'complete'), 0)
+                FROM monitor_recordings
+            """).fetchone()
 
-    def monitor_recording_page(self, recording, query, offset, limit):
-        with self._lock:
-            rows = self._require_connection().execute("""
-                SELECT payload FROM monitor_events
-                WHERE recording=? AND instr(lower(payload), ?)>0
-                ORDER BY id DESC LIMIT ? OFFSET ?
-            """, (recording, query, limit + 1, offset)).fetchall()
-        return [json.loads(row[0]) for row in reversed(rows[:limit])], len(rows) > limit
+    def monitor_event_page(self, query, before, limit, cancelled=None):
+        conditions, params = [], []
+        if before is not None:
+            conditions.append("id < ?")
+            params.append(before)
+        if query:
+            conditions.append("instr(lower(payload), ?) > 0")
+            params.append(query)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        # Search can scan the project. Use a separate read-only connection so
+        # SQLite's WAL lets capture continue while a page is being read.
+        uri = Path(self._path).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            if cancelled is not None:
+                conn.set_progress_handler(cancelled, 1000)
+            rows = conn.execute(
+                f"SELECT id, recording, payload FROM monitor_events {where} ORDER BY id DESC LIMIT ?",
+                (*params, limit + 1),
+            ).fetchall()
+        events = [dict(json.loads(payload), _db_id=row_id, _recording=recording)
+                  for row_id, recording, payload in reversed(rows[:limit])]
+        return events, len(rows) > limit
 
-    def delete_monitor_recording(self, recording):
+    def clear_monitor_events(self):
         with self._lock, self._require_connection() as conn:
-            conn.execute("DELETE FROM monitor_recordings WHERE id=?", (recording,))
+            conn.execute("DELETE FROM monitor_recordings")
 
     def _require_connection(self):
         if self._conn is None:

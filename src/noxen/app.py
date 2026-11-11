@@ -2555,15 +2555,14 @@ class NoxenApp(App):
         self._quit_in_progress = True
         pane = self.query_one(MonitorPane)
         async with pane.recording_lock:
-            if pane.recording_enabled:
-                await pane.stop_recording_feed(self.frida_session)
-                while not await pane.finish_recording():
-                    exit_anyway = await self.push_screen_wait(RecordingDialog(
-                        f"Monitor recording could not be saved.\n\n{pane.recording_error}",
-                        "Exit anyway", "Retry",
-                    ))
-                    if exit_anyway:
-                        break
+            await pane.stop_recording_feed(self.frida_session)
+            while not await pane.finish_recording():
+                exit_anyway = await self.push_screen_wait(RecordingDialog(
+                    f"Monitor events could not be saved.\n\n{pane.recording_error}",
+                    "Exit anyway", "Retry",
+                ))
+                if exit_anyway:
+                    break
             self.exit()
 
     def set_intercept_state(self, is_intercepted):

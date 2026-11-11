@@ -8,7 +8,6 @@ from noxen.rendering import format_uri_grant_flags
 
 MAX_PROFILES = 32
 MAX_HOOKS = 128
-MAX_EVENTS = 2000
 PROFILE_FORMAT_VERSION = 8
 _RESOLVER = "android.content.ContentResolver"
 _SQLITE = "android.database.sqlite.SQLiteDatabase"
