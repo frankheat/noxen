@@ -69,7 +69,7 @@ class MonitorDialog(ModalScreen):
             with VerticalScroll(id="monitor_dialog_body"):
                 if is_profile:
                     yield Label("Profile name")
-                    yield Input(self.profile_name, id="monitor_name", max_length=60)
+                    yield Input(self.profile_name, id="monitor_name", max_length=60, select_on_focus=False)
                 else:
                     yield from self.compose_hook_fields()
             error = Label("", id="monitor_error", markup=False)
@@ -86,11 +86,14 @@ class MonitorDialog(ModalScreen):
     def compose_hook_fields(self):
         hook = self.hook or {}
         yield Label("Class")
-        yield Input(hook.get("class", ""), placeholder="com.example.ReportManager", id="monitor_class")
+        yield Input(hook.get("class", ""), placeholder="com.example.ReportManager", id="monitor_class",
+                    select_on_focus=False)
         yield Label("Method ($init for constructors)")
-        yield Input(hook.get("method", ""), placeholder="exportReport", id="monitor_method")
+        yield Input(hook.get("method", ""), placeholder="exportReport", id="monitor_method",
+                    select_on_focus=False)
         yield Label("Argument types (comma-separated, blank for none)")
-        yield Input(", ".join(hook.get("args", [])), placeholder="java.lang.String, boolean", id="monitor_args")
+        yield Input(", ".join(hook.get("args", [])), placeholder="java.lang.String, boolean", id="monitor_args",
+                    select_on_focus=False)
         for key, title, default in (("captureArguments", "Capture arguments", True),
                                     ("captureReturn", "Capture return value", True),
                                     ("captureStack", "Capture stack (up to 16 frames)", False)):
@@ -991,6 +994,7 @@ class MonitorPane(Vertical):
             column_widths=self.event_column_widths,
             on_widths_changed=lambda widths: self.save_event_columns(self.event_visible_columns, widths),
             resizable_keys=self.EVENT_COLUMN_KEYS,
+            select_width_on_focus=False,
         ))
 
     def save_event_columns(self, visible, widths):

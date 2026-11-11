@@ -269,12 +269,14 @@ class ColumnSelectModal(ModalScreen):
         on_widths_changed: Callable[[dict[str, int]], None] | None = None,
         *,
         resizable_keys=RESIZABLE_HISTORY_COLUMN_KEYS,
+        select_width_on_focus: bool = True,
     ):
         super().__init__()
         self._visible = set(visible_cols)
         self._on_changed = on_changed
         self._columns = columns
         self._on_widths_changed = on_widths_changed
+        self._select_width_on_focus = select_width_on_focus
         self._resizable_width_keys = [
             key for key, _label in columns if key in resizable_keys
         ]
@@ -315,6 +317,7 @@ class ColumnSelectModal(ModalScreen):
             id=f"csm_width_{key}",
             placeholder="auto" if key in self._resizable_width_keys else "-",
             disabled=key not in self._resizable_width_keys,
+            select_on_focus=self._select_width_on_focus,
             classes="csm_width_input",
         )
         return Horizontal(width_input, classes="csm_width_cell")
