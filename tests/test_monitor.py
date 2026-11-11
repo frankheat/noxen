@@ -198,6 +198,53 @@ class MonitorModelTests(unittest.TestCase):
 
 
 class MonitorUITests(IsolatedAppTestCase):
+    async def test_resize_event_detail_shortcuts_are_contextual(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "resize.noxen")
+            app = NoxenApp(SimpleNamespace(project=None, new_project=path, skip_device_scan=True))
+            async with app.run_test(size=(100, 35)) as pilot:
+                def resize_keys():
+                    return {key.key for key in app.query("FooterKey")} & {"alt+up", "alt+down"}
+
+                await pilot.click("#--content-tab-tab_monitor")
+                self.assertFalse(resize_keys())
+                pane = app.query_one(MonitorPane)
+                session = SimpleNamespace()
+                pane.begin_session(session)
+                pane.receive(session, {"events": [{"id": 1, "time": 1, "method": "check"}]})
+                pane.drain()
+                table = app.query_one("#monitor_events", DataTable)
+                await wait_until(lambda: table.row_count == 1)
+                await pilot.pause()
+                self.assertEqual(resize_keys(), {"alt+up", "alt+down"})
+
+                detail = app.query_one("#monitor_detail")
+                original_height = detail.region.height
+                original_table_height = table.region.height
+                selected = pane.selected
+                table.focus()
+                await pilot.press("alt+up")
+                self.assertEqual(detail.region.height, original_height + 1)
+                self.assertEqual(table.region.height, original_table_height - 1)
+                self.assertEqual(pane.selected, selected)
+                await pilot.press("alt+down")
+                self.assertEqual(detail.region.height, original_height)
+
+                await pilot.click("#--content-tab-monitor_profiles_view")
+                self.assertFalse(resize_keys())
+                await pilot.resize_terminal(100, 22)
+                await pilot.click("#--content-tab-monitor_events_view")
+                await pilot.pause()
+                self.assertGreaterEqual(table.size.height, 3)
+                self.assertGreaterEqual(detail.size.height, 3)
+                self.assertEqual(pane.selected, selected)
+
+                app.query_one("#monitor_search", Input).value = "no matches"
+                await wait_until(lambda: not pane.display_events)
+                await pilot.pause()
+                self.assertFalse(resize_keys())
+            app.db.close()
+
     async def test_restore_only_missing_hooks_and_reopen_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "restore.noxen")
@@ -464,6 +511,7 @@ class MonitorUITests(IsolatedAppTestCase):
                 search.value = ""
                 await wait_until(lambda: len(pane.events) == 200)
                 self.assertEqual(events_table.row_count, 200)
+                await pilot.pause()
                 events_table.scroll_to(y=events_table.max_scroll_y, animate=False, immediate=True)
                 await wait_until(lambda: len(pane.events) == 400)
                 self.assertEqual([e["_db_id"] for e in pane.events], list(range(2017, 1617, -1)))

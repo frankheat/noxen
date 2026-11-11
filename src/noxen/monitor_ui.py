@@ -254,6 +254,27 @@ class MonitorActionsMenu(ModalScreen):
             self.dismiss()
 
 
+class MonitorEventSplit(Vertical):
+    def on_resize(self):
+        self.adjust_detail()
+
+    def adjust_detail(self, delta=0):
+        detail = self.query_one("#monitor_detail", VerticalScroll)
+        height = detail.styles.height
+        fixed_height = height is not None and height.is_cells
+        if not self.size.height or (not delta and not fixed_height):
+            return
+        table = self.query_one("#monitor_events", DataTable)
+        # Keep at least three content rows in each pane when space permits.
+        minimum = 3 + detail.styles.gutter.height
+        maximum = self.size.height - table.styles.gutter.height - 3
+        if maximum < minimum:
+            detail.styles.height = None
+            return
+        current = int(height.value) if fixed_height else detail.region.height
+        detail.styles.height = max(minimum, min(current + delta, maximum))
+
+
 class MonitorPane(Vertical):
     HOOK_STATE_WIDTH = 13
     PROFILE_LIST_WIDTH = 29
@@ -267,13 +288,14 @@ class MonitorPane(Vertical):
 
     DEFAULT_CSS = """
     MonitorPane { height: 1fr; }
+    #monitor_views, #monitor_views > ContentSwitcher, #monitor_events_view { height: 1fr; }
     MonitorPane .monitor_controls { height: 3; padding: 0 1; align: left middle; background: $panel; }
     MonitorPane .monitor_controls Button { width: auto; min-width: 10; margin-left: 1; }
     #monitor_search { width: 1fr; height: 3; }
     MonitorPane .monitor_table, MonitorPane .monitor_detail {
         height: 1fr; margin: 0 1; border: solid $foreground-muted;
     }
-    #monitor_events { margin-top: 1; }
+    MonitorEventSplit { height: 1fr; margin-top: 1; }
     MonitorPane .monitor_empty {
         height: 1fr; padding: 1 2; color: $foreground-muted;
     }
@@ -347,9 +369,10 @@ class MonitorPane(Vertical):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
                 yield Label("", id="monitor_status", markup=False)
                 yield Label("", id="monitor_events_empty", classes="monitor_empty")
-                yield DataTable(id="monitor_events", cursor_type="row", classes="monitor_table")
-                with VerticalScroll(id="monitor_detail", classes="monitor_detail"):
-                    yield Static(id="monitor_event_text", markup=False)
+                with MonitorEventSplit():
+                    yield DataTable(id="monitor_events", cursor_type="row", classes="monitor_table")
+                    with VerticalScroll(id="monitor_detail", classes="monitor_detail"):
+                        yield Static(id="monitor_event_text", markup=False)
             with TabPane("Profiles", id="monitor_profiles_view"):
                 with Horizontal(id="monitor_profile_body"):
                     with Vertical(id="monitor_profile_panel", classes="monitor_profile_panel") as profiles:
@@ -390,6 +413,10 @@ class MonitorPane(Vertical):
     def on_resize(self):
         if self.is_mounted and self.size.width != self._hooks_layout_width:
             self.refresh_hooks()
+
+    def adjust_event_detail(self, delta):
+        if self.display_events:
+            self.query_one(MonitorEventSplit).adjust_detail(delta)
 
     def profile(self):
         return next((p for p in self.profiles if p["id"] == self.selected_profile), None)
@@ -993,7 +1020,11 @@ class MonitorPane(Vertical):
         if reordered:
             positions = {event["_db_id"]: i for i, event in enumerate(visible.values())}
             table.sort("id", key=positions.__getitem__)
-        table.display = self.query_one("#monitor_detail").display = bool(visible)
+        has_events = bool(visible)
+        split = self.query_one(MonitorEventSplit)
+        if split.display != has_events:
+            split.display = has_events
+            self.app.refresh_bindings()
         empty = self.query_one("#monitor_events_empty", Label)
         empty.display = not visible
         if visible:

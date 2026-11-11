@@ -2664,6 +2664,8 @@ class NoxenApp(App):
                     self._app_info
                     and self.query_one("#info_switcher", ContentSwitcher).current == "info_view_components"
                 )
+            if self._monitor_events_active():
+                return bool(self.query_one(MonitorPane).display_events)
             return self._active_tab == "tab_history"
         return True
 
@@ -2799,6 +2801,8 @@ class NoxenApp(App):
                 self._adjust_history_split(-1)
         elif self._active_tab == "tab_info" and self.check_action("resize_panel_up", ()):
             self._adjust_info_component_detail(1)
+        elif self._monitor_events_active():
+            self.query_one(MonitorPane).adjust_event_detail(1)
 
     def action_resize_panel_down(self):
         if self._active_tab == "tab_intercept":
@@ -2812,6 +2816,8 @@ class NoxenApp(App):
                 self._adjust_history_split(1)
         elif self._active_tab == "tab_info" and self.check_action("resize_panel_down", ()):
             self._adjust_info_component_detail(-1)
+        elif self._monitor_events_active():
+            self.query_one(MonitorPane).adjust_event_detail(-1)
 
     def action_toggle_command_bar(self):
         if self._active_tab == "tab_intercept":
