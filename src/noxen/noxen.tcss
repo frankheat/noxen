@@ -2,7 +2,7 @@ Screen {
     background: $background;
     color: $foreground;
 }
-ProfileActionsMenu {
+MonitorActionsMenu {
     background: transparent;
 }
 Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {

@@ -20,7 +20,7 @@ from textual.widgets import Button, Checkbox, DataTable, Input, Label, OptionLis
 from textual.widgets.option_list import Option
 
 from noxen.modals import ExtraKeyModal
-from noxen.monitor import (MAX_EVENTS, PROFILE_FORMAT_VERSION, enabled_hooks, event_detail, load_profiles,
+from noxen.monitor import (MAX_EVENTS, PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_detail, load_profiles,
                            missing_default_hooks, new_profile, signature, validate_hook, validate_profiles)
 
 ALL_HOOKS_ROW = ":all"
@@ -209,12 +209,12 @@ class MonitorProfileTable(DataTable):
             self.post_message(self.ToggleRequested(profile_id))
 
 
-class ProfileActionsMenu(ModalScreen):
+class MonitorActionsMenu(ModalScreen):
     BINDINGS = [("escape", "dismiss", "Close")]
     WIDTH = 29
     DEFAULT_CSS = """
-    ProfileActionsMenu { align: left top; }
-    #monitor_profile_menu { height: auto; border: round $foreground-muted; background: $surface; }
+    MonitorActionsMenu { align: left top; }
+    #monitor_actions_menu { height: auto; border: round $foreground-muted; background: $surface; }
     """
 
     def __init__(self, anchor, actions):
@@ -223,7 +223,7 @@ class ProfileActionsMenu(ModalScreen):
         self.actions = actions
 
     def compose(self):
-        yield OptionList(*(Option(label, id=key) for key, label in self.actions), id="monitor_profile_menu")
+        yield OptionList(*(Option(label, id=key) for key, label in self.actions), id="monitor_actions_menu")
 
     def on_mount(self):
         menu = self.query_one(OptionList)
@@ -279,6 +279,9 @@ class MonitorPane(Vertical):
     MonitorPane .monitor_profile_panel .monitor_table {
         width: 1fr; margin: 0; border: none; scrollbar-gutter: stable;
     }
+    #monitor_hook_actions { height: auto; }
+    #monitor_hook_actions.stacked { layout: vertical; }
+    #monitor_hook_actions > Horizontal { width: auto; height: 3; }
     #monitor_hook_actions Button { min-width: 0; padding: 0; }
     #monitor_profile_actions { width: 5; min-width: 5; padding: 0; }
     #monitor_status { height: auto; margin: 0 1; color: $foreground-muted; }
@@ -350,10 +353,13 @@ class MonitorPane(Vertical):
                     with Vertical(id="monitor_hook_panel", classes="monitor_profile_panel") as hooks:
                         hooks.border_title = "Hooks"
                         with Horizontal(id="monitor_hook_actions", classes="monitor_controls"):
-                            yield Button("+ Add", id="monitor_add")
-                            yield Button("Edit", id="monitor_edit")
-                            yield Button("Remove", id="monitor_remove")
-                            yield Button("Details", id="monitor_hook_details")
+                            with Horizontal():
+                                yield Button("+ Add", id="monitor_add")
+                                yield Button("Edit", id="monitor_edit")
+                                yield Button("Remove", id="monitor_remove")
+                                yield Button("Details", id="monitor_hook_details")
+                            with Horizontal(id="monitor_hook_restore_group"):
+                                yield Button("Restore missing hooks", id="monitor_restore")
                         yield Label("", id="monitor_hooks_empty", classes="monitor_empty")
                         yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
 
@@ -411,11 +417,7 @@ class MonitorPane(Vertical):
         self.hook_rows = [(p, i) for p in profiles for i in range(len(p["hooks"]))]
         signatures = [signature(p["hooks"][i]) for p, i in self.hook_rows]
 
-        body = self.query_one("#monitor_profile_body")
-        profile_panel = self.query_one("#monitor_profile_panel")
-        hook_panel = self.query_one("#monitor_hook_panel")
-        available = width - body.styles.gutter.width - self.PROFILE_LIST_WIDTH
-        available -= profile_panel.styles.margin.width + hook_panel.styles.gutter.width
+        available = self.hook_panel_content_width()
         column_count = 3 if all_hooks else 2
         profile_width = min(17, max(10, width // 8)) if all_hooks else 0
         available -= table.scrollbar_size_vertical + column_count * 2 * table.cell_padding
@@ -453,6 +455,13 @@ class MonitorPane(Vertical):
                          "No profiles. Select New profile to get started.")
         self.refresh_controls()
 
+    def hook_panel_content_width(self):
+        body = self.query_one("#monitor_profile_body")
+        profiles = self.query_one("#monitor_profile_panel")
+        hooks = self.query_one("#monitor_hook_panel")
+        return (self.size.width - body.styles.gutter.width - self.PROFILE_LIST_WIDTH
+                - profiles.styles.margin.width - hooks.styles.gutter.width)
+
     def hook_status(self, profile, row):
         if not profile["enabled"]:
             return "Disabled", ""
@@ -476,32 +485,61 @@ class MonitorPane(Vertical):
         p = self.profile()
         connecting = self.app._connection_state == "connecting"
         self.query_one("#monitor_new", Button).disabled = connecting
-        for key in ("profile_actions", "add"):
-            button = self.query_one(f"#monitor_{key}", Button)
-            button.display = p is not None
-            button.disabled = connecting
+        actions = self.query_one("#monitor_profile_actions", Button)
+        actions.display = p is not None or bool(self.missing_profiles())
+        actions.disabled = connecting
+        add = self.query_one("#monitor_add", Button)
+        add.display = p is not None
+        add.disabled = connecting
         for key in ("edit", "remove"):
             button = self.query_one(f"#monitor_{key}", Button)
             button.display = p is not None
             button.disabled = connecting or not (p and p["hooks"])
         self.query_one("#monitor_hook_details", Button).disabled = not self.hook_rows
+        restore = self.query_one("#monitor_restore", Button)
+        missing = len(missing_default_hooks(p))
+        restore.display = self.query_one("#monitor_hook_restore_group").display = bool(missing)
+        restore.disabled = connecting
+        toolbar = self.query_one("#monitor_hook_actions")
+        if missing:
+            restore.label = f"Restore missing hooks ({missing})"
+        required = toolbar.styles.gutter.width + sum(
+            button.get_content_width(self.size, self.app.size) + button.styles.gutter.width + button.styles.margin.width
+            for button in toolbar.query(Button) if button.display
+        )
+        toolbar.set_class(bool(missing) and required > self.hook_panel_content_width(), "stacked")
+
+    def missing_profiles(self):
+        existing = {profile["id"] for profile in self.profiles}
+        return [profile for profile in default_profiles() if profile["id"] not in existing]
 
     def show_profile_actions(self, profile, anchor):
-        actions = [
-            ("toggle", "Disable" if profile["enabled"] else "Enable"),
-            ("rename", "Rename"),
-            ("delete", "Delete profile"),
-        ]
-        if self.session is not None and self.session is self.app.frida_session and profile["enabled"] and profile["hooks"]:
-            actions.append(("retry", "Retry hooks"))
-        missing = len(missing_default_hooks(profile))
+        actions = []
+        profile_id = None
+        if profile is not None:
+            profile_id = profile["id"]
+            actions.extend([
+                ("toggle", "Disable" if profile["enabled"] else "Enable"),
+                ("rename", "Rename"),
+                ("delete", "Delete profile"),
+            ])
+            online = self.session is not None and self.session is self.app.frida_session
+            if online and profile["enabled"] and profile["hooks"]:
+                actions.append(("retry", "Retry hooks"))
+        missing = len(self.missing_profiles())
         if missing:
-            actions.append(("restore", f"Restore missing hooks ({missing})"))
-        self.app.push_screen(ProfileActionsMenu(anchor, actions),
-                             lambda action: self.run_profile_action(profile["id"], action))
+            actions.append(("restore_profiles", f"Restore profiles ({missing})"))
+        if actions:
+            self.app.push_screen(MonitorActionsMenu(anchor, actions),
+                                 lambda action: self.run_profile_action(profile_id, action, anchor))
 
-    def run_profile_action(self, profile_id, action):
+    def run_profile_action(self, profile_id, action, anchor):
         if action is None or self.app._connection_state == "connecting":
+            return
+        if action == "restore_profiles":
+            choices = [(p["id"], p["name"]) for p in self.missing_profiles()]
+            if choices:
+                self.app.push_screen(MonitorActionsMenu(anchor, choices), self.restore_profile)
             return
         profiles = copy.deepcopy(self.profiles)
         profile = next((p for p in profiles if p["id"] == profile_id), None)
@@ -509,8 +547,6 @@ class MonitorPane(Vertical):
             return
         if action == "toggle":
             self.toggle_profile(profile_id)
-        elif action == "restore":
-            self.restore_hooks(profile)
         elif action == "rename":
             def rename(name):
                 if name is not None:
@@ -521,6 +557,18 @@ class MonitorPane(Vertical):
             self.save([p for p in profiles if p["id"] != profile_id])
         elif action == "retry":
             self.apply_configuration()
+
+    def restore_profile(self, profile_id):
+        if profile_id is None or self.app._connection_state == "connecting":
+            return
+        profile = next((p for p in self.missing_profiles() if p["id"] == profile_id), None)
+        if profile is None:
+            return
+        if any(p["name"].casefold() == profile["name"].casefold() for p in self.profiles):
+            self.app.notify(f"Rename the existing {profile['name']} profile before restoring the default.",
+                            severity="error", markup=False)
+            return
+        self.save([*self.profiles, profile], profile_id)
 
     def save(self, profiles, selected=None):
         try:
@@ -1009,10 +1057,13 @@ class MonitorPane(Vertical):
                     self.save(self.profiles + [new], new["id"])
             self.app.push_screen(MonitorDialog(name=""), add)
             return
-        if not p:
-            return
         if action == "profile_actions":
             self.show_profile_actions(p, event.button.region)
+            return
+        if not p:
+            return
+        if action == "restore":
+            self.restore_hooks(p)
             return
         profiles = copy.deepcopy(self.profiles)
         target = next(x for x in profiles if x["id"] == p["id"])
@@ -1022,7 +1073,7 @@ class MonitorPane(Vertical):
                 return
             if action == "remove":
                 target["hooks"].pop(row)
-                self.save(profiles)
+                self.save(profiles, p["id"])
                 return
             def save_hook(h):
                 if h is not None:
