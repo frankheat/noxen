@@ -286,6 +286,11 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertEqual(hooks.get_row_at(provider_hook)[1].plain, "Content Provider")
                 self.assertEqual(hooks.get_row_at(provider_hook)[2].plain, signature(pane.profiles[1]["hooks"][0]))
                 hooks.focus()
+                await pilot.pause()
+                self.assertEqual(
+                    profiles.get_component_styles("datatable--fixed-cursor").background,
+                    profiles.get_component_styles("datatable--cursor").background,
+                )
                 await pilot.press("right")
                 await pilot.pause(0.2)
                 self.assertGreater(hooks.scroll_x, 0)

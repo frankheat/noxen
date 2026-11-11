@@ -350,7 +350,8 @@ Input:focus {
     border: none;
     background: $surface;
 }
-DataTable > .datatable--cursor {
+DataTable > .datatable--cursor,
+#monitor_profiles > .datatable--fixed-cursor {
     background: $primary;
     color: $button-color-foreground;
 }
