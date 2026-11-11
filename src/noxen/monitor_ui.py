@@ -311,7 +311,6 @@ class MonitorPane(Vertical):
         self.dirty = False
         self.selected = None
         self.last_connection = None
-        self.event_query = None
         self.status_text = None
         self._hooks_layout_width = 0
         self.recording = None
@@ -323,11 +322,14 @@ class MonitorPane(Vertical):
         self.finishing = False
         self.stopped_session = None
         self.target = ""
-        self.event_pages = []
+        self.event_reload = True
+        self.event_watermark = 0
+        self.event_depth = self.EVENT_PAGE_SIZE
+        self.display_events = {}
         self.event_page_task = None
         self.event_page_version = 0
         self.next_event_cursor = None
-        self.event_sort = None
+        self.event_sort = ("id", True)
         self.event_columns_sort = None
 
     def compose(self):
@@ -335,8 +337,6 @@ class MonitorPane(Vertical):
             with TabPane("Events", id="monitor_events_view"):
                 with Horizontal(classes="monitor_controls"):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
-                    yield Button("Newer", id="monitor_newer", disabled=True)
-                    yield Button("Older", id="monitor_older", disabled=True)
                 yield Label("", id="monitor_status", markup=False)
                 yield Label("", id="monitor_events_empty", classes="monitor_empty")
                 yield DataTable(id="monitor_events", cursor_type="row", classes="monitor_table")
@@ -712,7 +712,7 @@ class MonitorPane(Vertical):
             recording.unsaved += max(0, len(events) - available)
             recording.lost += lost
             recording.dirty = True
-            if self.recording_error and not self.event_pages:
+            if self.recording_error:
                 self.dirty = True
         if (
             recording.dirty and self.recording_task is None and not self.finishing
@@ -737,8 +737,7 @@ class MonitorPane(Vertical):
                     recording.pending.popleft()
                 self.recording_error = ""
                 self.retry_recording_at = 0.0
-                if not self.event_pages:
-                    self.dirty = True
+                self.dirty = True
                 if not finish or not recording.dirty:
                     return True
         except (ValueError, OSError, sqlite3.Error) as exc:
@@ -747,8 +746,7 @@ class MonitorPane(Vertical):
                 self.app.notify(str(exc), title="Could not save Monitor events", severity="error", markup=False)
             self.recording_error = str(exc)
             self.retry_recording_at = monotonic() + 2.0
-            if not self.event_pages:
-                self.dirty = True
+            self.dirty = True
             return False
         finally:
             if not finish:
@@ -787,78 +785,107 @@ class MonitorPane(Vertical):
 
     def request_event_page(self):
         self.event_page_version += 1
+        self.event_reload = True
+        self.event_depth = self.EVENT_PAGE_SIZE
         self.next_event_cursor = None
-        self.dirty = True
         self.refresh_page_if_visible()
-        self.refresh_event_status()
 
     def refresh_page_if_visible(self):
         if (
-            self.dirty and not self.clearing and not self.finishing and self.event_page_task is None
-            and self.app.query_one("#main_tabs", TabbedContent).active == "tab_monitor"
-            and self.query_one("#monitor_views", TabbedContent).active == "monitor_events_view"
+            self.clearing or self.finishing or self.event_page_task is not None
+            or self.app.query_one("#main_tabs", TabbedContent).active != "tab_monitor"
+            or self.query_one("#monitor_views", TabbedContent).active != "monitor_events_view"
         ):
+            return
+        table = self.query_one("#monitor_events", DataTable)
+        near_end = table.scroll_y + table.scrollable_content_region.height >= table.row_count - 16
+        if self.event_reload:
+            self.event_reload = self.dirty = False
+            mode = "reload"
+        elif self.next_event_cursor is not None and near_end:
+            mode = "more"
+        elif self.dirty:
             self.dirty = False
-            self.event_page_task = asyncio.create_task(self.load_event_page())
+            mode = "updates"
+        else:
+            return
+        self.event_page_task = asyncio.create_task(self.load_event_page(mode))
 
-    async def load_event_page(self):
+    @staticmethod
+    def event_order_key(event):
+        return event["_sort_key"], event["_db_id"]
+
+    async def load_event_page(self, mode):
         version = self.event_page_version
-        before = self.event_pages[-1] if self.event_pages else None
         query = self.query_one("#monitor_search", Input).value.casefold()
         sort = self.event_sort
 
         def cancelled():
             return self.clearing or self.finishing or version != self.event_page_version
 
+        if mode == "updates":
+            cursor, db_sort = (self.event_watermark, self.event_watermark), ("id", False)
+        else:
+            cursor = self.next_event_cursor if mode == "more" else None
+            db_sort = sort
         try:
-            events, has_older = await asyncio.to_thread(
-                self.app.db.monitor_event_page, query, before, self.EVENT_PAGE_SIZE, cancelled, sort=sort
+            events, has_more, latest_id = await asyncio.to_thread(
+                self.app.db.monitor_event_page, query, cursor, self.EVENT_PAGE_SIZE, cancelled, sort=db_sort
             )
             if cancelled():
                 return
-            visible = events
-            if before is None and self.recording_error and self.recording:
-                saved_keys = {self.event_key(event) for event in events}
-                pending_events = []
-                for event in self.recording.pending:
-                    if not query or query in json.dumps(event).casefold():
-                        pending = dict(event, _recording=self.recording.id)
-                        if self.event_key(pending) not in saved_keys:
-                            pending_events.append(pending)
-                if sort is None:
-                    visible = (events + pending_events)[-self.EVENT_PAGE_SIZE:]
-                elif pending_events:
-                    column, reverse = sort
-                    # An event awaiting an ID sorts as newer than saved events.
-                    pending_id = 1 << 63
+            if mode == "reload":
+                self.events = events
+                self.event_watermark = latest_id
+            elif mode == "more":
+                self.events.extend(events)
+                self.event_depth = max(self.event_depth + self.EVENT_PAGE_SIZE, len(self.events))
+            else:
+                self.event_watermark = events[-1]["_db_id"] if has_more else latest_id
+                self.dirty |= has_more
+                has_more = self.merge_event_updates(events, sort)
 
-                    def page_key(event):
-                        if "_db_id" in event:
-                            return event["_sort_key"], event["_db_id"]
-                        value = pending_id if column == "id" else event_sort_value(event, column)
-                        return value, pending_id
-
-                    pending_limit = self.EVENT_PAGE_SIZE - bool(events)
-                    visible = sorted(events + pending_events[-pending_limit:], key=page_key,
-                                     reverse=reverse)[:self.EVENT_PAGE_SIZE]
-            self.next_event_cursor = None
-            if sort and events:
-                last = next(event for event in reversed(visible) if "_db_id" in event)
-                if has_older or last["_db_id"] != events[-1]["_db_id"]:
-                    self.next_event_cursor = (last["_sort_key"], last["_db_id"])
-            elif sort is None and events:
-                oldest_visible = next((event["_db_id"] for event in visible if "_db_id" in event), None)
-                if oldest_visible is None:
-                    self.next_event_cursor = events[-1]["_db_id"] + 1
-                elif has_older or oldest_visible > events[0]["_db_id"]:
-                    self.next_event_cursor = oldest_visible
-            self.events = visible
-            self.refresh_events(query, before)
+            self.next_event_cursor = self.event_order_key(self.events[-1]) if has_more and self.events else None
+            self.refresh_events(query, reset=mode == "reload")
         except (OSError, sqlite3.Error, ValueError) as exc:
             if not cancelled():
+                if mode == "more":
+                    self.next_event_cursor = None
                 self.app.notify(str(exc), title="Could not read Monitor events", severity="error", markup=False)
         finally:
             self.event_page_task = None
+
+    def merge_event_updates(self, incoming, sort):
+        more = self.next_event_cursor is not None
+        if not incoming:
+            return more
+        column, reverse = sort
+        existing_ids = {event["_db_id"] for event in self.events}
+        for event in incoming:
+            if event["_db_id"] in existing_ids:
+                continue
+            if column != "id":
+                event["_sort_key"] = event_sort_value(event, column)
+            key = self.event_order_key(event)
+            if not more or (key >= self.next_event_cursor if reverse else key <= self.next_event_cursor):
+                self.events.append(event)
+        self.events.sort(key=self.event_order_key, reverse=reverse)
+        if len(self.events) > self.event_depth:
+            # A burst can shift the selection and the rows already on screen
+            # beyond the nominal end of the loaded results.
+            keep = {self.selected}
+            table = self.query_one("#monitor_events", DataTable)
+            if table.scroll_offset.y > 0:
+                bottom = min(table.row_count - 1, table.scroll_offset.y + table.scrollable_content_region.height - 2)
+                if bottom >= 0:
+                    keep.add(table.ordered_rows[bottom].key.value)
+            for index, event in enumerate(self.events):
+                if self.event_key(event) in keep:
+                    self.event_depth = max(self.event_depth, index + 1)
+            if len(self.events) > self.event_depth:
+                del self.events[self.event_depth:]
+                more = True
+        return more
 
     @work
     async def clear_events(self):
@@ -881,14 +908,11 @@ class MonitorPane(Vertical):
             self.retry_recording_at = 0.0
             self.lost = self.saved_unsaved = self.interrupted_recordings = 0
             self.events = []
-            self.event_pages.clear()
-            self.refresh_events()
+            self.refresh_events(reset=True)
             self.request_event_page()
 
     def refresh_event_status(self):
         parts = []
-        if self.event_pages:
-            parts.append(f"Page {len(self.event_pages) + 1}")
         if self.lost:
             parts.append(f"{self.lost} lost during capture")
         unsaved = self.saved_unsaved + (self.recording.unsaved if self.recording else 0)
@@ -904,36 +928,43 @@ class MonitorPane(Vertical):
             label.update(status)
             label.display = bool(status)
             self.status_text = status
-        newer = self.query_one("#monitor_newer", Button)
-        older = self.query_one("#monitor_older", Button)
-        newer.disabled = not self.event_pages
-        older.disabled = self.next_event_cursor is None
-        newer.label = "Previous" if self.event_sort else "Newer"
-        older.label = "Next" if self.event_sort else "Older"
 
-    def refresh_events(self, query="", before=None):
+    def refresh_events(self, query="", reset=False):
         table = self.query_one("#monitor_events", DataTable)
         old = self.selected
-        visible = {self.event_key(e): e for e in self.events}
+        old_top = table.scroll_offset.y
+        top_key = table.ordered_rows[old_top].key if 0 < old_top < table.row_count else None
+        visible = {self.event_key(event): event for event in self.events}
+        column, reverse = self.event_sort
+        if self.recording_error and self.recording:
+            pending_id = 1 << 63  # Greater than any SQLite row ID.
+            for event in list(self.recording.pending)[-self.EVENT_PAGE_SIZE:]:
+                if not query or query in json.dumps(event).casefold():
+                    pending = dict(event, _recording=self.recording.id)
+                    value = pending_id if column == "id" else event_sort_value(event, column)
+                    visible.setdefault(self.event_key(pending), dict(pending, _sort_key=value))
+            visible = dict(sorted(visible.items(), key=lambda pair: (
+                pair[1]["_sort_key"], pair[1].get("_db_id", pending_id)
+            ), reverse=reverse))
+        self.display_events = visible
         columns_changed = not table.columns or self.event_columns_sort != self.event_sort
-        rows_changed = self.event_query != (query, before)
         if columns_changed:
             table.clear(columns=True)
-            column, reverse = self.event_sort or (None, False)
             for key, label, width in self.EVENT_COLUMNS:
                 if key == column:
                     label += " ↓" if reverse else " ↑"
                 table.add_column(label, width=width, key=key)
             self.event_columns_sort = self.event_sort
-        elif self.event_sort and not rows_changed:
-            remaining = [row.key.value for row in table.ordered_rows if row.key.value in visible]
-            rows_changed = remaining != list(visible)[:len(remaining)]
-        if rows_changed and not columns_changed:
+        elif reset:
             table.clear()
-        self.event_query = (query, before)
         for row in list(table.rows):
             if row.value not in visible:
                 table.remove_row(row)
+        remaining = [row.key.value for row in table.ordered_rows]
+        order_changed = reordered = remaining != list(visible)[:len(remaining)]
+        if reordered and any("_db_id" not in event for event in visible.values()):
+            table.clear()
+            reordered = False
         for key, e in visible.items():
             event_id = e.get("_db_id", "—")
             if key in table.rows:
@@ -945,17 +976,24 @@ class MonitorPane(Vertical):
             table.add_row(event_id, timestamp, Text(", ".join(e.get("profiles", [])), no_wrap=True, overflow="ellipsis"),
                           Text(method, no_wrap=True, overflow="ellipsis"),
                           e.get("outcome", "unknown"), key=key)
+        if reordered:
+            positions = {event["_db_id"]: i for i, event in enumerate(visible.values())}
+            table.sort("id", key=positions.__getitem__)
         table.display = self.query_one("#monitor_detail").display = bool(visible)
         empty = self.query_one("#monitor_events_empty", Label)
         empty.display = not visible
         if visible:
-            key = old if old in visible else next(reversed(visible))
-            table.move_cursor(row=table.get_row_index(key), scroll=key != old or columns_changed or rows_changed)
+            key = old if old in visible else next(iter(visible))
+            table.move_cursor(row=table.get_row_index(key), scroll=reset or key != old)
+            if not reset and order_changed:
+                target = table.get_row_index(top_key) if top_key in table.rows else old_top
+                # DataTable's cursor watcher also scrolls after a refresh.
+                table.call_after_refresh(table.scroll_to, y=target, animate=False, immediate=True)
             self.show_event(key)
         else:
             self.selected = None
             self.query_one("#monitor_event_text", Static).update("")
-            empty.update("No matching events." if query or before is not None else
+            empty.update("No matching events." if query else
                          "No events yet. Enable a profile in Profiles and use the target app.")
         self.refresh_event_status()
 
@@ -967,7 +1005,7 @@ class MonitorPane(Vertical):
         if key == self.selected:
             return
         self.selected = key
-        event = next((e for e in self.events if self.event_key(e) == key), None)
+        event = self.display_events.get(key)
         if event:
             self.query_one("#monitor_event_text", Static).update(render_event_detail(event))
             self.query_one("#monitor_detail").scroll_home(animate=False, immediate=True)
@@ -992,9 +1030,8 @@ class MonitorPane(Vertical):
         if event.data_table.id == "monitor_events":
             event.stop()
             key = event.column_key.value
-            previous, reverse = self.event_sort or (None, False)
+            previous, reverse = self.event_sort
             self.event_sort = (key, key == previous and not reverse)
-            self.event_pages.clear()
             self.request_event_page()
             return
         if event.data_table.id != "monitor_hooks":
@@ -1033,20 +1070,11 @@ class MonitorPane(Vertical):
     def on_input_changed(self, event):
         event.stop()
         if event.input.id == "monitor_search" and event.value == event.input.value:
-            self.event_pages.clear()
             self.request_event_page()
 
     def on_button_pressed(self, event):
         event.stop()
         action = event.button.id.removeprefix("monitor_")
-        if action == "newer" and self.event_pages:
-            self.event_pages.pop()
-            self.request_event_page()
-            return
-        if action == "older" and self.next_event_cursor is not None:
-            self.event_pages.append(self.next_event_cursor)
-            self.request_event_page()
-            return
         p = self.profile()
         if action == "hook_details":
             self.show_hook()

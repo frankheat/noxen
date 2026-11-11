@@ -69,9 +69,10 @@ class MonitorRecordingTests(IsolatedAppTestCase):
             db = ProjectDB(path)
             db.open_existing()
             self.assertEqual(db.monitor_event_summary(), (9, 1, 1))
-            events, has_older = db.monitor_event_page("", None, 200)
+            events, has_older, latest_id = db.monitor_event_page("", None, 200)
             self.assertEqual([e["method"] for e in events], ["oldCall", "firstCall", "finalCall"])
             self.assertFalse(has_older)
+            self.assertEqual(latest_id, 3)
             db.close()
 
             reopened = NoxenApp(SimpleNamespace(project=path, new_project=None, skip_device_scan=True))
@@ -80,7 +81,7 @@ class MonitorRecordingTests(IsolatedAppTestCase):
                 pane = reopened.query_one(MonitorPane)
                 await wait_until(lambda: len(pane.events) == 3)
                 table = reopened.query_one("#monitor_events", DataTable)
-                self.assertEqual([table.get_row_at(i)[0] for i in range(table.row_count)], [1, 2, 3])
+                self.assertEqual([table.get_row_at(i)[0] for i in range(table.row_count)], [3, 2, 1])
                 await pilot.click("#monitor_events", offset=(2, 1))
                 await wait_until(lambda: table.columns["id"].label.plain == "ID ↑")
                 await pilot.click("#monitor_events", offset=(2, 1))
@@ -103,7 +104,7 @@ class MonitorRecordingTests(IsolatedAppTestCase):
             db = ProjectDB(path)
             self.assertEqual(len(db.open_existing()), 1)
             self.assertEqual(db.monitor_event_summary(), (0, 0, 0))
-            self.assertEqual(db.monitor_event_page("", None, 1), ([], False))
+            self.assertEqual(db.monitor_event_page("", None, 1), ([], False, 0))
             db.close()
 
 
@@ -441,14 +442,16 @@ class MonitorUITests(IsolatedAppTestCase):
                         {'id': i, 'time': i, 'profiles': ['Load test'], 'method': 'run',
                          'outcome': 'returned', 'arguments': []} for i in range(start, start + 32)], 'dropped': 0})
                 pane.drain()
-                await wait_until(lambda: bool(pane.events) and pane.events[-1]["id"] == 2017)
+                await wait_until(lambda: bool(pane.events) and pane.events[0]["id"] == 2017)
+                search = app.query_one("#monitor_search", Input)
+                search.value = "no event matches this"
+                await wait_until(lambda: not pane.events)
+                search.value = ""
+                await wait_until(lambda: len(pane.events) == 200)
                 self.assertEqual(events_table.row_count, 200)
-                first_on_latest = pane.events[0]["id"]
-                await pilot.click("#monitor_older")
-                await wait_until(lambda: pane.events[-1]["id"] == first_on_latest - 1)
-                self.assertEqual(events_table.row_count, 200)
-                await pilot.click("#monitor_newer")
-                await wait_until(lambda: pane.events[-1]["id"] == 2017)
+                events_table.scroll_to(y=events_table.max_scroll_y, animate=False, immediate=True)
+                await wait_until(lambda: len(pane.events) == 400)
+                self.assertEqual([e["_db_id"] for e in pane.events], list(range(2017, 1617, -1)))
                 pane.receive(session, {'noxenEvent': 'monitor_status', 'revision': -1,
                     'statuses': [{'profile':'webview','index':0,'state':'Active','detail':''}]})
                 pane.drain()
@@ -461,22 +464,24 @@ class MonitorUITests(IsolatedAppTestCase):
                 scroll_y = detail.scroll_y
                 self.assertGreater(scroll_y, 0)
                 selected = pane.selected
+                top = events_table.scroll_offset.y
+                top_event_id = events_table.get_row_at(top)[0]
                 pane.receive(session, {'noxenEvent': 'monitor_batch', 'events': [
                     {'id': 2018, 'time': 2018, 'profiles': ['Load test'], 'method': 'run',
                      'outcome': 'returned', 'arguments': []}], 'dropped': 0})
                 pane.drain()
-                await wait_until(lambda: pane.events[-1]["id"] == 2018)
+                await wait_until(lambda: pane.events[0]["id"] == 2018)
+                await pilot.pause()
                 self.assertEqual(pane.selected, selected)
                 self.assertEqual(detail.scroll_y, scroll_y)
+                self.assertEqual(events_table.get_row_at(events_table.scroll_offset.y)[0], top_event_id)
                 method_x = 2 + sum(column.get_render_width(events_table) for column in events_table.ordered_columns[:3])
                 await pilot.click("#monitor_events", offset=(method_x, 1))
                 await wait_until(lambda: events_table.columns["method"].label.plain == "Method ↑")
                 self.assertEqual([event["_db_id"] for event in pane.events], list(range(1, 201)))
-                await pilot.click("#monitor_older")
-                await wait_until(lambda: pane.events[0]["_db_id"] == 201)
-                self.assertEqual([event["_db_id"] for event in pane.events], list(range(201, 401)))
-                await pilot.click("#monitor_newer")
-                await wait_until(lambda: pane.events[0]["_db_id"] == 1)
+                events_table.scroll_to(y=events_table.max_scroll_y, animate=False, immediate=True)
+                await wait_until(lambda: len(pane.events) == 400)
+                self.assertEqual([event["_db_id"] for event in pane.events], list(range(1, 401)))
                 await pilot.click("#monitor_events", offset=(method_x, 1))
                 await wait_until(lambda: events_table.columns["method"].label.plain == "Method ↓")
                 self.assertEqual([event["_db_id"] for event in pane.events], list(range(2018, 1818, -1)))

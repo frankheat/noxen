@@ -177,6 +177,8 @@ class ProjectDB:
         with closing(sqlite3.connect(uri, uri=True)) as conn:
             if cancelled is not None:
                 conn.set_progress_handler(cancelled, 1000)
+            conn.execute("BEGIN")
+            latest_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM monitor_events").fetchone()[0]
             if column != "id":
                 conn.create_function(
                     "monitor_sort_key", 1,
@@ -193,7 +195,7 @@ class ProjectDB:
             page.reverse()
         events = [dict(json.loads(payload), _db_id=row_id, _recording=recording, _sort_key=value)
                   for row_id, recording, payload, value in page]
-        return events, len(rows) > limit
+        return events, len(rows) > limit, latest_id
 
     def clear_monitor_events(self):
         with self._lock, self._require_connection() as conn:
