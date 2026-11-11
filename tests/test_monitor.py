@@ -11,7 +11,8 @@ from textual.widgets import Input, DataTable, Label, TabbedContent, TextArea
 from noxen.app import NoxenApp
 from noxen.db import ProjectDB
 from noxen.monitor import (PROFILE_FORMAT_VERSION, argument_type, default_profiles,
-                           enabled_hooks, event_detail, load_profiles, signature, validate_hook, validate_profiles)
+                           enabled_hooks, event_detail, load_profiles, render_event_detail, signature,
+                           validate_hook, validate_profiles)
 from noxen.monitor_ui import ALL_HOOKS_ROW, MonitorPane
 from tests.ui_test_case import IsolatedAppTestCase
 
@@ -91,6 +92,21 @@ class MonitorRecordingTests(IsolatedAppTestCase):
 
 
 class MonitorModelTests(unittest.TestCase):
+    def test_event_detail_dims_types_and_keeps_captured_text_literal(self):
+        event = {
+            "method": "getIntent",
+            "types": ["android.content.Intent"],
+            "arguments": [{"type": "android.content.Intent", "opaque": True}],
+            "result": {"type": "java.lang.String", "value": "[bold]:cd:[/bold]"},
+        }
+        detail = render_event_detail(event)
+        spans = [(detail.plain[span.start:span.end], span.style) for span in detail.spans]
+        self.assertIn(("[CALL]", "bold"), spans)
+        self.assertIn(("[android.content.Intent]", "dim"), spans)
+        self.assertIn(("[java.lang.String]", "dim"), spans)
+        self.assertIn('"[bold]:cd:[/bold]"', detail.plain)
+        self.assertNotIn(('"[bold]:cd:[/bold]"', "dim"), spans)
+
     def test_validation_and_roundtrip(self):
         profiles = default_profiles()
         self.assertEqual(load_profiles(json.dumps(profiles[:1])), (profiles, None))

@@ -21,8 +21,9 @@ from textual.widgets import Button, Checkbox, DataTable, Input, Label, OptionLis
 from textual.widgets.option_list import Option
 
 from noxen.modals import ExtraKeyModal
-from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_detail, load_profiles,
-                           missing_default_hooks, new_profile, signature, validate_hook, validate_profiles)
+from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, load_profiles,
+                           missing_default_hooks, new_profile, render_event_detail, signature, validate_hook,
+                           validate_profiles)
 
 ALL_HOOKS_ROW = ":all"
 
@@ -262,7 +263,7 @@ class MonitorPane(Vertical):
     MonitorPane .monitor_empty {
         height: 1fr; padding: 1 2; color: $foreground-muted;
     }
-    MonitorPane .monitor_detail { padding: 0 1; }
+    MonitorPane .monitor_detail { padding: 0 1; background: $surface; }
     #monitor_profile_body { height: 1fr; padding: 0 1; background: $background; }
     MonitorPane .monitor_profile_panel {
         height: 1fr; border: solid $foreground-muted; border-title-color: $foreground;
@@ -923,7 +924,7 @@ class MonitorPane(Vertical):
         self.selected = key
         event = next((e for e in self.events if self.event_key(e) == key), None)
         if event:
-            self.query_one("#monitor_event_text", Static).update(Text(event_detail(event), overflow="fold"))
+            self.query_one("#monitor_event_text", Static).update(render_event_detail(event))
             self.query_one("#monitor_detail").scroll_home(animate=False, immediate=True)
 
     def on_data_table_row_highlighted(self, event):

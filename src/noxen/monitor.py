@@ -4,6 +4,8 @@ import json
 import re
 import uuid
 
+from rich.text import Text
+
 from noxen.rendering import format_uri_grant_flags
 
 MAX_PROFILES = 32
@@ -372,40 +374,70 @@ def _argument_names(event):
 
 
 def event_detail(event):
-    lines = ["[CALL]", f"  Profile : {', '.join(event.get('profiles', []))}",
-             f"  Class   : {event.get('class', 'unknown')}",
-             f"  Method  : {event.get('method', 'unknown')}({', '.join(event.get('types', []))})",
-             f"  Thread  : {event.get('thread', 'unknown')}",
-             f"  Outcome : {event.get('outcome', 'unknown')}"]
+    return render_event_detail(event).plain
+
+
+def render_event_detail(event) -> Text:
+    text = Text(overflow="fold")
+
+    def section(title):
+        if text:
+            text.append("\n\n")
+        text.append(f"[{title}]", "bold")
+
+    def field(label, value, suffix=""):
+        text.append(f"\n  {label} :", "dim")
+        text.append(f" {value}")
+        text.append(suffix, "dim")
+
+    def typed_value(indent, name, value, rendered):
+        text.append(f"\n{indent}{name}")
+        text.append(f"[{value.get('type', 'unknown')}]", "dim")
+        text.append(" : ")
+        if rendered in {"opaque object", "unavailable", "unavailable (capture failed)"}:
+            text.append(rendered, "dim")
+        elif rendered.endswith(" (truncated)"):
+            text.append(rendered.removesuffix(" (truncated)"))
+            text.append(" (truncated)", "dim")
+        else:
+            text.append(rendered)
+
+    section("CALL")
+    field("Profile", ", ".join(event.get("profiles", [])))
+    field("Class  ", event.get("class", "unknown"))
+    types = ", ".join(event.get("types", []))
+    field("Method ", event.get("method", "unknown"), f"({types})")
+    field("Thread ", event.get("thread", "unknown"))
+    field("Outcome", event.get("outcome", "unknown"))
     if event.get("target"):
-        lines.append(f"  Target  : {event['target']}")
+        field("Target ", event["target"])
     if event.get("class") == _ANDROID_LOG and event.get("method") in _LOG_LEVELS:
-        lines.append(f"  Level   : {_LOG_LEVELS[event['method']]}")
+        field("Level  ", _LOG_LEVELS[event["method"]])
     if event.get("class") == _PREFERENCES_EDITOR:
         method = event.get("method")
         if method in _PREFERENCE_EDITS:
-            lines.append("  Phase   : Edit (staged change)")
+            field("Phase  ", "Edit", " (staged change)")
         elif method == "apply":
-            lines.append("  Phase   : Apply (asynchronous disk write)")
+            field("Phase  ", "Apply", " (asynchronous disk write)")
         elif method == "commit":
-            lines.append("  Phase   : Commit (synchronous)")
+            field("Phase  ", "Commit", " (synchronous)")
     if event.get("class") == _URL and event.get("method") == "openConnection":
-        lines.append("  Phase   : Prepare URLConnection")
+        field("Phase  ", "Prepare URLConnection")
         if "destination" in event:
-            lines.append(f"  URL     : {display_value(event['destination'])}")
+            field("URL    ", display_value(event["destination"]))
     if event.get("class") == _CIPHER and "transformation" in event:
-        lines.append(f"  Transformation : {display_value(event['transformation'])}")
+        field("Transformation", display_value(event["transformation"]))
     if "arguments" in event:
-        lines += ["", "[ARGUMENTS]"]
+        section("ARGUMENTS")
         names = _argument_names(event)
         for i, value in enumerate(event["arguments"]):
             name = names[i] if i < len(names) else i
             if name == "Bindings" and isinstance(value.get("items"), list):
                 items = value["items"]
                 count = value["count"]
-                lines.append(f"  Bindings : {count} (showing {len(items)})" if count > len(items) else f"  Bindings : {count}")
+                field("Bindings", count, f" (showing {len(items)})" if count > len(items) else "")
                 for index, item in enumerate(items, 1):
-                    lines.append(f"    [{index}] [{item.get('type', 'unknown')}] : {display_value(item)}")
+                    typed_value("    ", f"[{index}] ", item, display_value(item))
                 continue
             rendered = display_value(value)
             flags = value.get("value")
@@ -415,21 +447,26 @@ def event_detail(event):
                 rendered = f"{flags} ({_LOG_PRIORITIES[flags]})"
             if name == "Mode" and event.get("class") == _CIPHER and type(flags) is int and flags in _CIPHER_MODES:
                 rendered = f"{flags} ({_CIPHER_MODES[flags]})"
-            lines.append(f"  {name} [{value.get('type', 'unknown')}] : {rendered}")
+            typed_value("  ", f"{name} ", value, rendered)
         if names == ("Path",):
-            lines.append("  Mode : READ")
+            field("Mode", "READ")
         elif names == ("Path", "Append"):
-            lines.append("  Mode : WRITE")
+            field("Mode", "WRITE")
             if len(event["types"]) == 1:
-                lines.append("  Append : false (default)")
+                field("Append", "false", " (default)")
         if not event["arguments"]:
-            lines.append("  No arguments")
+            text.append("\n  No arguments", "dim")
     if "result" in event:
+        section("RETURN")
         result = event["result"]
-        lines += ["", "[RETURN]", f"  [{result.get('type', 'unknown')}] : {display_value(result)}"]
+        typed_value("  ", "", result, display_value(result))
     if "exception" in event:
-        lines += ["", "[EXCEPTION]", f"  {event['exception'].get('type', 'unknown')} (original exception propagated)"]
+        section("EXCEPTION")
+        text.append(f"\n  {event['exception'].get('type', 'unknown')}")
+        text.append(" (original exception propagated)", "dim")
     if "stack" in event:
+        section("STACK")
         stack = event["stack"]
-        lines += ["", "[STACK]"] + (["  " + s for s in stack] if isinstance(stack, list) else ["  unavailable"])
-    return "\n".join(lines)
+        for frame in stack if isinstance(stack, list) else ["unavailable"]:
+            text.append(f"\n  {frame}", "dim")
+    return text
