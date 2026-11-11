@@ -2,6 +2,9 @@ Screen {
     background: $background;
     color: $foreground;
 }
+ProfileActionsMenu {
+    background: transparent;
+}
 Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     scrollbar-background: $surface;
     scrollbar-color: $foreground-muted;
