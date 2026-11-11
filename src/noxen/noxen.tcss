@@ -171,6 +171,21 @@ Tab { text-style: bold; }
 Tab.-active { background: $panel; color: $foreground; }
 Tab.-active:focus { background: $panel; color: $foreground; }
 Tab.intercepted { color: $error; }
+#monitor_views > ContentTabs { height: 2; padding-bottom: 1; }
+#monitor_views > ContentTabs Underline { display: none; }
+#monitor_views > ContentTabs Tab {
+    background: transparent;
+    color: $foreground-muted;
+    text-style: none;
+}
+#monitor_views > ContentTabs Tab:hover {
+    color: $foreground;
+}
+#monitor_views > ContentTabs Tab.-active {
+    background: transparent;
+    color: $foreground;
+    text-style: bold underline;
+}
 TabPane {
     padding: 0;
     layout: vertical;
