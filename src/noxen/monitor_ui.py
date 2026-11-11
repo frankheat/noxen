@@ -17,7 +17,7 @@ from textual import work
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, DataTable, Input, Label, OptionList, Static, TabbedContent, TabPane
+from textual.widgets import Button, DataTable, Input, Label, OptionList, Static, Switch, TabbedContent, TabPane
 from textual.widgets.option_list import Option
 
 from noxen.modals import ExtraKeyModal
@@ -38,9 +38,14 @@ class MonitorDialog(ModalScreen):
     #monitor_dialog.profile-name-dialog { height: auto; max-height: 90%; }
     #monitor_dialog_body { height: 1fr; }
     .profile-name-dialog #monitor_dialog_body { height: auto; }
-    #monitor_dialog_title { text-style: bold; }
+    #monitor_dialog_title { text-style: bold; margin-bottom: 1; }
     #monitor_dialog Label { height: auto; }
-    #monitor_dialog Checkbox { height: 1; border: none; padding: 0; }
+    #monitor_args { margin-bottom: 1; }
+    .monitor-capture-row { height: auto; align: left middle; margin-bottom: 1; }
+    .monitor-capture-row:last-child { margin-bottom: 0; }
+    .monitor-capture-row Switch { padding: 0; }
+    .monitor-capture-row Label { width: auto; margin-left: 1; }
+    .monitor-capture-row Switch:focus > .switch--slider { text-style: underline; }
     #monitor_dialog .buttons { height: 3; align: right middle; }
     #monitor_dialog Button { width: auto; min-width: 12; margin-left: 1; }
     #monitor_error { color: $error; }
@@ -87,7 +92,9 @@ class MonitorDialog(ModalScreen):
         for key, title, default in (("captureArguments", "Capture arguments", True),
                                     ("captureReturn", "Capture return value", True),
                                     ("captureStack", "Capture stack (up to 16 frames)", False)):
-            yield Checkbox(title, hook.get(key, default), id=key)
+            with Horizontal(classes="monitor-capture-row"):
+                yield Switch(value=hook.get(key, default), id=key)
+                yield Label(title)
 
     def on_button_pressed(self, event):
         event.stop()
@@ -105,7 +112,7 @@ class MonitorDialog(ModalScreen):
                      "method": self.query_one("#monitor_method", Input).value.strip(),
                      "args": args.split(",") if args else []}
                 for key in ("captureArguments", "captureReturn", "captureStack"):
-                    h[key] = self.query_one(f"#{key}", Checkbox).value
+                    h[key] = self.query_one(f"#{key}", Switch).value
                 self.dismiss(validate_hook(h))
         except ValueError as exc:
             error = self.query_one("#monitor_error", Label)

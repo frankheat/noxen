@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from textual.widgets import Input, DataTable, Label, TabbedContent, TextArea
+from textual.widgets import Input, DataTable, Label, Switch, TabbedContent, TextArea
 from noxen.app import NoxenApp
 from noxen.db import ProjectDB
 from noxen.monitor import (PROFILE_FORMAT_VERSION, argument_type, default_profiles,
@@ -413,10 +413,25 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertTrue(app.screen.region.contains_region(app.screen.query_one('#monitor_save').region))
                 app.screen.query_one('#monitor_class', Input).value = 'com.example.Test'
                 app.screen.query_one('#monitor_method', Input).value = 'check'
-                app.screen.query_one('#monitor_args', Input).value = 'java.lang.String, boolean'
+                args_input = app.screen.query_one('#monitor_args', Input)
+                args_input.value = 'java.lang.String, boolean'
+                arguments = app.screen.query_one('#captureArguments', Switch)
+                returns = app.screen.query_one('#captureReturn', Switch)
+                stack = app.screen.query_one('#captureStack', Switch)
+                self.assertEqual((arguments.value, returns.value, stack.value), (True, True, False))
+                args_input.focus()
+                await pilot.press("tab", "tab", "space", "tab", "space")
+                self.assertEqual((arguments.value, returns.value, stack.value), (True, False, True))
                 await pilot.click('#monitor_save')
                 await pilot.pause()
                 self.assertEqual(pane.profile()['hooks'][0]['args'], ['java.lang.String', 'boolean'])
+                await pilot.click('#monitor_edit')
+                self.assertEqual(
+                    tuple(app.screen.query_one(f"#{key}", Switch).value
+                          for key in ("captureArguments", "captureReturn", "captureStack")),
+                    (True, False, True),
+                )
+                await pilot.click('#monitor_cancel')
                 self.assertEqual(len(json.loads(app.db.get_info('monitor_profiles'))["profiles"]), 10)
                 await pilot.click("#--content-tab-monitor_events_view")
                 session = SimpleNamespace()
