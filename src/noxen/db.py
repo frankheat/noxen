@@ -430,6 +430,12 @@ class ProjectDB:
         """Return saved history column widths, or {} if none."""
         return normalize_history_column_widths(self._load_json_info("history_column_widths", {}, dict))
 
+    def save_monitor_event_columns(self, visible: list[str], widths: dict[str, int]) -> None:
+        self.set_info("monitor_event_columns", json.dumps({"visible": visible, "widths": widths}))
+
+    def load_monitor_event_columns(self) -> dict:
+        return self._load_json_info("monitor_event_columns", {}, dict)
+
     def save_history_filters(self, filters: list) -> None:
         """Persist the history filter list to project_info."""
         self.set_info("history_filters", json.dumps(filters))

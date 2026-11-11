@@ -21,7 +21,7 @@ from textual.widgets import (
 from noxen.filters import FilterManager
 from noxen.history_columns import (
     RESIZABLE_HISTORY_COLUMN_KEYS,
-    normalize_history_column_widths,
+    normalize_column_widths,
     parse_history_column_width,
 )
 from noxen.textual_compat import is_select_empty
@@ -205,10 +205,13 @@ class ColumnSelectModal(ModalScreen):
         color: $foreground;
         background: transparent;
     }
-    .csm_show_button:hover, .csm_show_button:focus {
+    .csm_show_button:hover, .csm_show_button:focus, .csm_show_button.-active {
         color: $accent;
-        background: $boost;
-        background-tint: $surface 0%;
+        background: transparent;
+        background-tint: transparent;
+        tint: transparent;
+        border: none;
+        text-style: bold;
     }
     .csm_width_cell { width: 11; height: 1; align: left middle; }
     .csm_width_input {
@@ -264,16 +267,18 @@ class ColumnSelectModal(ModalScreen):
         columns: list[tuple[str, str]],
         column_widths: dict[str, int] | None = None,
         on_widths_changed: Callable[[dict[str, int]], None] | None = None,
+        *,
+        resizable_keys=RESIZABLE_HISTORY_COLUMN_KEYS,
     ):
         super().__init__()
         self._visible = set(visible_cols)
         self._on_changed = on_changed
         self._columns = columns
-        self._widths = normalize_history_column_widths(column_widths or {})
         self._on_widths_changed = on_widths_changed
         self._resizable_width_keys = [
-            key for key, _label in columns if key in RESIZABLE_HISTORY_COLUMN_KEYS
+            key for key, _label in columns if key in resizable_keys
         ]
+        self._widths = normalize_column_widths(column_widths, self._resizable_width_keys)
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="csm_dialog"):

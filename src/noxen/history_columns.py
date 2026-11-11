@@ -23,12 +23,16 @@ def parse_history_column_width(raw_value: str) -> tuple[int | None, str]:
 
 
 def normalize_history_column_widths(widths) -> dict[str, int]:
+    return normalize_column_widths(widths, RESIZABLE_HISTORY_COLUMN_KEYS)
+
+
+def normalize_column_widths(widths, allowed_keys) -> dict[str, int]:
     if not isinstance(widths, dict):
         return {}
 
     normalized = {}
     for key, value in widths.items():
-        if key not in RESIZABLE_HISTORY_COLUMN_KEYS:
+        if key not in allowed_keys:
             continue
         width, error = parse_history_column_width(str(value))
         if error or width is None:

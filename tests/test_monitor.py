@@ -198,6 +198,57 @@ class MonitorModelTests(unittest.TestCase):
 
 
 class MonitorUITests(IsolatedAppTestCase):
+    async def test_event_column_preferences_preserve_live_order_and_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "columns.noxen")
+            app = NoxenApp(SimpleNamespace(project=None, new_project=path, skip_device_scan=True))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.click("#--content-tab-tab_monitor")
+                pane = app.query_one(MonitorPane)
+                table = app.query_one("#monitor_events", DataTable)
+                session = SimpleNamespace()
+                pane.begin_session(session)
+                event = {"time": 1, "method": "check", "outcome": "returned"}
+                pane.receive(session, {"events": [dict(event, id=1), dict(event, id=2)]})
+                await wait_until(lambda: table.row_count == 2)
+                selected = pane.selected
+                await pilot.click("#monitor_columns")
+                await pilot.click("#csm_show_id")
+                await pilot.click("#csm_show_profile")
+                width = app.screen.query_one("#csm_width_method", Input)
+                width.value = "28"
+                await pilot.click("#csm_btn_apply_widths")
+                await pilot.click("#csm_btn_close")
+                self.assertEqual([column.key.value for column in table.ordered_columns], ["time", "method", "outcome"])
+                self.assertEqual(table.columns["method"].width, 28)
+                self.assertEqual(pane.selected, selected)
+
+                pane.receive(session, {"events": [dict(event, id=3)]})
+                await wait_until(lambda: table.row_count == 3)
+                self.assertEqual([pane.display_events[row.key.value]["id"] for row in table.ordered_rows], [3, 2, 1])
+                self.assertEqual(pane.selected, selected)
+            app.db.close()
+
+            reopened = NoxenApp(SimpleNamespace(project=path, new_project=None, skip_device_scan=True))
+            async with reopened.run_test(size=(100, 30)) as pilot:
+                await pilot.click("#--content-tab-tab_monitor")
+                table = reopened.query_one("#monitor_events", DataTable)
+                await wait_until(lambda: table.row_count == 3)
+                self.assertEqual([column.key.value for column in table.ordered_columns], ["time", "method", "outcome"])
+                self.assertEqual(table.columns["method"].width, 28)
+                await pilot.click("#monitor_columns")
+                await pilot.click("#csm_btn_reset_widths")
+                await pilot.click("#csm_show_time")
+                await pilot.click("#csm_show_outcome")
+                await pilot.click("#csm_show_method")
+                await pilot.click("#csm_btn_close")
+                self.assertEqual([column.key.value for column in table.ordered_columns], ["method"])
+                self.assertTrue(table.columns["method"].auto_width)
+                self.assertEqual(reopened.db.load_monitor_event_columns(), {"visible": ["method"], "widths": {}})
+                self.assertIsNone(reopened.db.load_history_columns())
+                self.assertEqual(reopened.db.load_history_column_widths(), {})
+            reopened.db.close()
+
     async def test_resize_event_detail_shortcuts_are_contextual(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "resize.noxen")

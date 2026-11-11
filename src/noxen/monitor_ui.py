@@ -20,7 +20,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, OptionList, Static, Switch, TabbedContent, TabPane
 from textual.widgets.option_list import Option
 
-from noxen.modals import ExtraKeyModal
+from noxen.history_columns import normalize_column_widths
+from noxen.modals import ColumnSelectModal, ExtraKeyModal
 from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_method_label,
                            event_sort_value, load_profiles,
                            missing_default_hooks, new_profile, render_event_detail, signature, validate_hook,
@@ -282,9 +283,10 @@ class MonitorPane(Vertical):
     RECORDING_BUFFER = 4096
     EVENT_PAGE_SIZE = 200
     EVENT_COLUMNS = (
-        ("id", "ID", None), ("time", "Time", 19), ("profile", "Profile", 16),
-        ("method", "Method", 21), ("outcome", "Outcome", 10),
+        ("id", "ID"), ("time", "Time"), ("profile", "Profile"),
+        ("method", "Method"), ("outcome", "Outcome"),
     )
+    EVENT_COLUMN_KEYS = frozenset(key for key, _ in EVENT_COLUMNS)
 
     DEFAULT_CSS = """
     MonitorPane { height: 1fr; }
@@ -360,13 +362,18 @@ class MonitorPane(Vertical):
         self.event_page_version = 0
         self.next_event_cursor = None
         self.event_sort = ("id", True)
-        self.event_columns_sort = None
+        self.display_event_sort = self.event_sort
+        self.display_event_query = ""
+        self.event_visible_columns = self.EVENT_COLUMN_KEYS
+        self.event_column_widths = {}
+        self.rendered_event_columns = ()
 
     def compose(self):
         with TabbedContent(id="monitor_views", initial="monitor_events_view"):
             with TabPane("Events", id="monitor_events_view"):
                 with Horizontal(classes="monitor_controls"):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
+                    yield Button("⊟", id="monitor_columns")
                 yield Label("", id="monitor_status", markup=False)
                 yield Label("", id="monitor_events_empty", classes="monitor_empty")
                 with MonitorEventSplit():
@@ -396,6 +403,13 @@ class MonitorPane(Vertical):
                         yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
 
     def on_mount(self):
+        columns = self.app.db.load_monitor_event_columns()
+        visible = columns.get("visible")
+        if isinstance(visible, list):
+            self.event_visible_columns = frozenset(
+                key for key in visible if isinstance(key, str) and key in self.EVENT_COLUMN_KEYS
+            ) or self.EVENT_COLUMN_KEYS
+        self.event_column_widths = normalize_column_widths(columns.get("widths"), self.EVENT_COLUMN_KEYS)
         self.lost, self.saved_unsaved, self.interrupted_recordings = self.app.db.monitor_event_summary()
         self.profiles, warning = load_profiles(self.app.db.get_info("monitor_profiles"))
         if warning:
@@ -404,7 +418,6 @@ class MonitorPane(Vertical):
         self.query_one("#monitor_profile_panel").styles.width = self.PROFILE_LIST_WIDTH
         profiles.add_column("On", width=2, key="on")
         profiles.add_column("Profile", width=17)
-        profiles.tooltip = "Click the On column or press Space to toggle a profile."
         self.refresh_profiles()
         self.refresh_events()
         self.dirty = True
@@ -970,11 +983,23 @@ class MonitorPane(Vertical):
             label.display = bool(status)
             self.status_text = status
 
+    def show_event_columns(self):
+        self.app.push_screen(ColumnSelectModal(
+            self.event_visible_columns,
+            on_changed=lambda visible: self.save_event_columns(visible, self.event_column_widths),
+            columns=list(self.EVENT_COLUMNS),
+            column_widths=self.event_column_widths,
+            on_widths_changed=lambda widths: self.save_event_columns(self.event_visible_columns, widths),
+            resizable_keys=self.EVENT_COLUMN_KEYS,
+        ))
+
+    def save_event_columns(self, visible, widths):
+        self.app.db.save_monitor_event_columns(sorted(visible), widths)
+        self.event_visible_columns = visible
+        self.event_column_widths = widths
+        self.render_event_table()
+
     def refresh_events(self, query="", reset=False):
-        table = self.query_one("#monitor_events", DataTable)
-        old = self.selected
-        old_top = table.scroll_offset.y
-        top_key = table.ordered_rows[old_top].key if 0 < old_top < table.row_count else None
         visible = {self.event_key(event): event for event in self.events}
         column, reverse = self.event_sort
         if self.recording_error and self.recording:
@@ -988,38 +1013,61 @@ class MonitorPane(Vertical):
                 pair[1]["_sort_key"], pair[1].get("_db_id", pending_id)
             ), reverse=reverse))
         self.display_events = visible
-        columns_changed = not table.columns or self.event_columns_sort != self.event_sort
+        self.display_event_sort = self.event_sort
+        self.display_event_query = query
+        self.render_event_table(reset)
+        self.refresh_event_status()
+
+    def render_event_table(self, reset=False):
+        table = self.query_one("#monitor_events", DataTable)
+        old = self.selected
+        old_top = table.scroll_offset.y
+        top_key = table.ordered_rows[old_top].key if 0 < old_top < table.row_count else None
+        visible = self.display_events
+        column, reverse = self.display_event_sort
+        indicator = " ↓" if reverse else " ↑"
+        columns = tuple(
+            (key, label + (indicator if key == column else ""), self.event_column_widths.get(key))
+            for key, label in self.EVENT_COLUMNS if key in self.event_visible_columns
+        )
+        column_keys = tuple(key for key, _, _ in columns)
+        columns_changed = columns != self.rendered_event_columns
         if columns_changed:
             table.clear(columns=True)
-            for key, label, width in self.EVENT_COLUMNS:
-                if key == column:
-                    label += " ↓" if reverse else " ↑"
+            for key, label, width in columns:
                 table.add_column(label, width=width, key=key)
-            self.event_columns_sort = self.event_sort
+            self.rendered_event_columns = columns
         elif reset:
             table.clear()
         for row in list(table.rows):
             if row.value not in visible:
                 table.remove_row(row)
         remaining = [row.key.value for row in table.ordered_rows]
-        order_changed = reordered = remaining != list(visible)[:len(remaining)]
-        if reordered and any("_db_id" not in event for event in visible.values()):
+        reordered = remaining != list(visible)[:len(remaining)]
+        restore_scroll = reordered or columns_changed
+        first_column = column_keys[0]
+        if reordered and first_column == "id" and any("_db_id" not in event for event in visible.values()):
             table.clear()
             reordered = False
         for key, e in visible.items():
             event_id = e.get("_db_id", "—")
             if key in table.rows:
-                if table.get_cell(key, "id") != event_id:
+                if first_column == "id" and table.get_cell(key, "id") != event_id:
                     table.update_cell(key, "id", event_id, update_width=True)
                 continue
             timestamp = datetime.fromtimestamp(e.get("time", 0) / 1000).strftime("%Y-%m-%d %H:%M:%S")
-            method = event_method_label(e)
-            table.add_row(event_id, timestamp, Text(", ".join(e.get("profiles", [])), no_wrap=True, overflow="ellipsis"),
-                          Text(method, no_wrap=True, overflow="ellipsis"),
-                          e.get("outcome", "unknown"), key=key)
+            cells = {
+                "id": event_id,
+                "time": Text(timestamp, no_wrap=True),
+                "profile": Text(", ".join(e.get("profiles", [])), no_wrap=True, overflow="ellipsis"),
+                "method": Text(event_method_label(e), no_wrap=True, overflow="ellipsis"),
+                "outcome": Text(e.get("outcome", "unknown"), no_wrap=True),
+            }
+            table.add_row(*(cells[k] for k in column_keys), key=key)
         if reordered:
-            positions = {event["_db_id"]: i for i, event in enumerate(visible.values())}
-            table.sort("id", key=positions.__getitem__)
+            # Each row has its own cell object even when visible labels repeat.
+            positions = {id(table.get_cell(key, first_column)): i for i, key in enumerate(visible)}
+            table.sort(first_column, key=lambda cell: positions[id(cell)])
         has_events = bool(visible)
         split = self.query_one(MonitorEventSplit)
         if split.display != has_events:
@@ -1030,7 +1078,7 @@ class MonitorPane(Vertical):
         if visible:
             key = old if old in visible else next(iter(visible))
             table.move_cursor(row=table.get_row_index(key), scroll=reset or key != old)
-            if not reset and order_changed:
+            if not reset and restore_scroll:
                 target = table.get_row_index(top_key) if top_key in table.rows else old_top
                 # DataTable's cursor watcher also scrolls after a refresh.
                 table.call_after_refresh(table.scroll_to, y=target, animate=False, immediate=True)
@@ -1038,9 +1086,8 @@ class MonitorPane(Vertical):
         else:
             self.selected = None
             self.query_one("#monitor_event_text", Static).update("")
-            empty.update("No matching events." if query else
+            empty.update("No matching events." if self.display_event_query else
                          "No events yet. Enable a profile in Profiles and use the target app.")
-        self.refresh_event_status()
 
     @staticmethod
     def event_key(event):
@@ -1120,6 +1167,9 @@ class MonitorPane(Vertical):
     def on_button_pressed(self, event):
         event.stop()
         action = event.button.id.removeprefix("monitor_")
+        if action == "columns":
+            self.show_event_columns()
+            return
         p = self.profile()
         if action == "hook_details":
             self.show_hook()

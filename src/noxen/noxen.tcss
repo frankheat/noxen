@@ -247,7 +247,8 @@ TabPane {
     background: transparent;
     color: $accent;
 }
-#history_header #btn_columns {
+#history_header #btn_columns,
+#monitor_pane #monitor_columns {
     margin: 0;
     padding: 0 1;
     width: auto;
@@ -258,8 +259,11 @@ TabPane {
     color: $foreground;
     text-style: bold;
 }
+#monitor_pane #monitor_columns { margin-left: 1; }
 #history_header #btn_columns:hover,
-#history_header #btn_columns:focus {
+#history_header #btn_columns:focus,
+#monitor_pane #monitor_columns:hover,
+#monitor_pane #monitor_columns:focus {
     border: round $accent;
     background: transparent;
     color: $accent;
