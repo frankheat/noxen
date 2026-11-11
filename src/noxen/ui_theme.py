@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import re
 
+from rich.text import Text
 from textual.theme import Theme
 
 
@@ -38,6 +39,12 @@ LIGHT_COLORS = SemanticColors(
 
 def semantic_colors(dark: bool) -> SemanticColors:
     return DARK_COLORS if dark else LIGHT_COLORS
+
+
+def enabled_cell(enabled: bool, dark: bool) -> Text:
+    if enabled:
+        return Text("✓", style=f"bold {semantic_colors(dark).success}")
+    return Text("○", style="dim")
 
 
 def themed_markup(markup: str, dark: bool) -> str:

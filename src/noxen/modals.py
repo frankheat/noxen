@@ -25,7 +25,7 @@ from noxen.history_columns import (
     parse_history_column_width,
 )
 from noxen.textual_compat import is_select_empty
-from noxen.ui_theme import semantic_colors, themed_markup
+from noxen.ui_theme import enabled_cell, themed_markup
 
 
 class ExtraKeyModal(ModalScreen):
@@ -746,8 +746,7 @@ class FilterModal(ModalScreen):
         table.clear()
         for f in self._fm.export():
             enabled = f.get("enabled", True)
-            success = semantic_colors(self.app.current_theme.dark).success
-            on_cell = Text("✓", style=f"bold {success}") if enabled else Text("○", style="dim")
+            on_cell = enabled_cell(enabled, self.app.current_theme.dark)
             rule_str = " ".join(f"{k}={v}" for k, v in f["rule"].items())
             table.add_row(on_cell, str(f["id"]), f["type"], rule_str, key=str(f["id"]))
         self._selected_filter_id = None

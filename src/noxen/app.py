@@ -483,6 +483,7 @@ class NoxenApp(App):
             pass
         self._refresh_log_output()
         self._refresh_history_table()
+        self.query_one(MonitorPane).refresh_profile_indicators()
         if self._app_info:
             self._apply_app_info(self._app_info)
         if self._history_selected_entry:

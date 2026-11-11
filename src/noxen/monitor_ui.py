@@ -25,6 +25,7 @@ from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hoo
                            event_sort_value, load_profiles,
                            missing_default_hooks, new_profile, render_event_detail, signature, validate_hook,
                            validate_profiles)
+from noxen.ui_theme import enabled_cell
 
 ALL_HOOKS_ROW = ":all"
 
@@ -378,7 +379,7 @@ class MonitorPane(Vertical):
             self.app.notify(warning, severity="warning")
         profiles = self.query_one("#monitor_profiles", DataTable)
         self.query_one("#monitor_profile_panel").styles.width = self.PROFILE_LIST_WIDTH
-        profiles.add_column("On", width=2)
+        profiles.add_column("On", width=2, key="on")
         profiles.add_column("Profile", width=17)
         profiles.tooltip = "Click the On column or press Space to toggle a profile."
         self.refresh_profiles()
@@ -393,6 +394,12 @@ class MonitorPane(Vertical):
     def profile(self):
         return next((p for p in self.profiles if p["id"] == self.selected_profile), None)
 
+    def refresh_profile_indicators(self):
+        table = self.query_one("#monitor_profiles", DataTable)
+        dark = self.app.current_theme.dark
+        for profile in self.profiles:
+            table.update_cell(profile["id"], "on", enabled_cell(profile["enabled"], dark))
+
     def refresh_profiles(self, selected=None):
         table = self.query_one("#monitor_profiles", DataTable)
         current = selected or self.selected_profile
@@ -400,7 +407,7 @@ class MonitorPane(Vertical):
         table.clear()
         table.add_row("", "All hooks", key=ALL_HOOKS_ROW)
         for profile in self.profiles:
-            table.add_row("✓" if profile["enabled"] else "–",
+            table.add_row(enabled_cell(profile["enabled"], self.app.current_theme.dark),
                           Text(profile["name"], no_wrap=True, overflow="ellipsis"), key=profile["id"])
         if current is None and self.profiles:
             current = self.profiles[0]["id"]
