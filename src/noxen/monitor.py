@@ -306,6 +306,8 @@ def event_sort_value(event, column):
         return event.get("time", 0)
     if column == "profile":
         return ", ".join(event.get("profiles", [])).casefold()
+    if column == "class":
+        return (event.get("class") or "").casefold()
     if column == "method":
         return event_method_label(event).casefold()
     return event.get("outcome", "unknown").casefold()

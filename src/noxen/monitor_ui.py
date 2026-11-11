@@ -287,9 +287,10 @@ class MonitorPane(Vertical):
     EVENT_PAGE_SIZE = 200
     EVENT_COLUMNS = (
         ("id", "ID"), ("time", "Time"), ("profile", "Profile"),
-        ("method", "Method"), ("outcome", "Outcome"),
+        ("class", "Class"), ("method", "Method"), ("outcome", "Outcome"),
     )
     EVENT_COLUMN_KEYS = frozenset(key for key, _ in EVENT_COLUMNS)
+    DEFAULT_EVENT_COLUMNS = EVENT_COLUMN_KEYS - {"class"}
 
     DEFAULT_CSS = """
     MonitorPane { height: 1fr; }
@@ -367,7 +368,7 @@ class MonitorPane(Vertical):
         self.event_sort = ("id", True)
         self.display_event_sort = self.event_sort
         self.display_event_query = ""
-        self.event_visible_columns = self.EVENT_COLUMN_KEYS
+        self.event_visible_columns = self.DEFAULT_EVENT_COLUMNS
         self.event_column_widths = {}
         self.rendered_event_columns = ()
 
@@ -411,7 +412,7 @@ class MonitorPane(Vertical):
         if isinstance(visible, list):
             self.event_visible_columns = frozenset(
                 key for key in visible if isinstance(key, str) and key in self.EVENT_COLUMN_KEYS
-            ) or self.EVENT_COLUMN_KEYS
+            ) or self.DEFAULT_EVENT_COLUMNS
         self.event_column_widths = normalize_column_widths(columns.get("widths"), self.EVENT_COLUMN_KEYS)
         self.lost, self.saved_unsaved, self.interrupted_recordings = self.app.db.monitor_event_summary()
         self.profiles, warning = load_profiles(self.app.db.get_info("monitor_profiles"))
@@ -1064,6 +1065,7 @@ class MonitorPane(Vertical):
                 "id": event_id,
                 "time": Text(timestamp, no_wrap=True),
                 "profile": Text(", ".join(e.get("profiles", [])), no_wrap=True, overflow="ellipsis"),
+                "class": Text(e.get("class") or "—", no_wrap=True, overflow="ellipsis"),
                 "method": Text(event_method_label(e), no_wrap=True, overflow="ellipsis"),
                 "outcome": Text(e.get("outcome", "unknown"), no_wrap=True),
             }

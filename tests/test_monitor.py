@@ -209,8 +209,12 @@ class MonitorUITests(IsolatedAppTestCase):
                 session = SimpleNamespace()
                 pane.begin_session(session)
                 event = {"time": 1, "method": "check", "outcome": "returned"}
-                pane.receive(session, {"events": [dict(event, id=1), dict(event, id=2)]})
+                pane.receive(session, {"events": [
+                    dict(event, id=1, **{"class": "example.Zebra"}),
+                    dict(event, id=2, **{"class": "example.apple"}),
+                ]})
                 await wait_until(lambda: table.row_count == 2)
+                self.assertNotIn("class", table.columns)
                 selected = pane.selected
                 await pilot.click("#monitor_columns")
                 await pilot.click("#csm_show_id")
@@ -227,6 +231,26 @@ class MonitorUITests(IsolatedAppTestCase):
                 await wait_until(lambda: table.row_count == 3)
                 self.assertEqual([pane.display_events[row.key.value]["id"] for row in table.ordered_rows], [3, 2, 1])
                 self.assertEqual(pane.selected, selected)
+
+                await pilot.click("#monitor_columns")
+                await pilot.click("#csm_show_profile")
+                await pilot.click("#csm_show_class")
+                app.screen.query_one("#csm_width_class", Input).value = "24"
+                await pilot.click("#csm_btn_apply_widths")
+                await pilot.click("#csm_btn_close")
+                self.assertEqual(
+                    [column.key.value for column in table.ordered_columns],
+                    ["time", "profile", "class", "method", "outcome"],
+                )
+                class_x = 2 + sum(column.get_render_width(table) for column in table.ordered_columns[:2])
+                await pilot.click("#monitor_events", offset=(class_x, 1))
+                await wait_until(lambda: table.columns["class"].label.plain == "Class ↑")
+                self.assertEqual([table.get_row_at(i)[2].plain for i in range(3)],
+                                 ["—", "example.apple", "example.Zebra"])
+                await pilot.click("#monitor_events", offset=(class_x, 1))
+                await wait_until(lambda: table.columns["class"].label.plain == "Class ↓")
+                self.assertEqual([table.get_row_at(i)[2].plain for i in range(3)],
+                                 ["example.Zebra", "example.apple", "—"])
             app.db.close()
 
             reopened = NoxenApp(SimpleNamespace(project=path, new_project=None, skip_device_scan=True))
@@ -234,11 +258,17 @@ class MonitorUITests(IsolatedAppTestCase):
                 await pilot.click("#--content-tab-tab_monitor")
                 table = reopened.query_one("#monitor_events", DataTable)
                 await wait_until(lambda: table.row_count == 3)
-                self.assertEqual([column.key.value for column in table.ordered_columns], ["time", "method", "outcome"])
+                self.assertEqual(
+                    [column.key.value for column in table.ordered_columns],
+                    ["time", "profile", "class", "method", "outcome"],
+                )
                 self.assertEqual(table.columns["method"].width, 28)
+                self.assertEqual(table.columns["class"].width, 24)
                 await pilot.click("#monitor_columns")
                 await pilot.click("#csm_btn_reset_widths")
                 await pilot.click("#csm_show_time")
+                await pilot.click("#csm_show_profile")
+                await pilot.click("#csm_show_class")
                 await pilot.click("#csm_show_outcome")
                 await pilot.click("#csm_show_method")
                 await pilot.click("#csm_btn_close")
