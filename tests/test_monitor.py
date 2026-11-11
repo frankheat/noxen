@@ -194,10 +194,14 @@ class MonitorUITests(IsolatedAppTestCase):
                 table.move_cursor(row=1)
                 restore_button = app.query_one("#monitor_restore")
                 self.assertFalse(restore_button.display)
+                selected = signature(pane.profile()["hooks"][1])
+                await pilot.click("#monitor_hooks", offset=(17, 0))
+                self.assertEqual(table.get_row_at(table.cursor_row)[1].plain, selected)
                 for _ in range(2):
                     await pilot.click("#monitor_remove")
                 before = pane.profile()["hooks"][:]
                 self.assertEqual(len(before), 14)
+                self.assertNotIn(selected, {signature(hook) for hook in before})
                 await pilot.click("#monitor_profile_actions")
                 self.assertEqual(app.screen.query_one("#monitor_actions_menu").option_count, 3)
                 await pilot.press("escape")
@@ -332,6 +336,16 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertIn("android.content.ContentResolver.query(", details)
                 self.assertIn("Profile: Content Provider", details)
                 await pilot.press("escape")
+                await pilot.click("#monitor_hooks", offset=(17, 0))
+                profile_names = [hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)]
+                self.assertEqual(profile_names, sorted(profile_names, key=str.casefold))
+                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[1].plain, "Content Provider")
+                await pilot.click("#monitor_hooks", offset=(17, 0))
+                self.assertEqual([hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)],
+                                 sorted(profile_names, key=str.casefold, reverse=True))
+                self.assertEqual(hooks.columns["profile"].label.plain, "Profile ↓")
+                await pilot.click("#monitor_hooks", offset=(2, 0))
+                self.assertEqual(hooks.columns["state"].label.plain, "State ↑")
                 profiles.move_cursor(row=profiles.get_row_index("webview"))
                 await pilot.pause()
                 hooks = app.query_one('#monitor_hooks', DataTable)
@@ -345,6 +359,14 @@ class MonitorUITests(IsolatedAppTestCase):
                 await pilot.click('#monitor_hook_details')
                 self.assertIn("android.webkit.WebView.loadDataWithBaseURL(", app.screen.query_one(TextArea).text)
                 await pilot.press("escape")
+                selected = hooks.get_row_at(hooks.cursor_row)[1].plain
+                await pilot.click("#monitor_hooks", offset=(17, 0))
+                methods = [hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)]
+                self.assertEqual(methods, sorted(methods, key=str.casefold))
+                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[1].plain, selected)
+                await pilot.click("#monitor_edit")
+                self.assertEqual(app.screen.query_one("#monitor_method", Input).value, "loadDataWithBaseURL")
+                await pilot.click("#monitor_cancel")
                 await pilot.click('#monitor_new')
                 app.screen.query_one('#monitor_name', Input).value = 'My profile'
                 await pilot.click('#monitor_save')

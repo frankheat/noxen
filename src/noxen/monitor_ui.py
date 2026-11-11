@@ -292,6 +292,7 @@ class MonitorPane(Vertical):
         self.profiles = []
         self.selected_profile = None
         self.hook_rows = []
+        self.hook_sorts = {}
         self.session = None
         self.session_was_current = False
         self.revision = 0
@@ -407,14 +408,24 @@ class MonitorPane(Vertical):
         self.selected_profile = current
         self.refresh_hooks(reset_selection=changed)
 
-    def refresh_hooks(self, reset_selection=False):
+    def refresh_hooks(self, reset_selection=False, rebuild_columns=False):
         table = self.query_one("#monitor_hooks", DataTable)
         all_hooks = self.selected_profile == ALL_HOOKS_ROW
         previous = 0 if reset_selection else table.cursor_row
+        selected_key = None
+        if not reset_selection and 0 <= previous < table.row_count:
+            selected_key = table.ordered_rows[previous].key
         width = self.size.width
         profile = self.profile()
         profiles = self.profiles if all_hooks else [profile] if profile else []
         self.hook_rows = [(p, i) for p in profiles for i in range(len(p["hooks"]))]
+        sort_column, reverse = self.hook_sorts.get(self.selected_profile, (None, False))
+        if sort_column == "state":
+            self.hook_rows.sort(key=lambda row: self.hook_status(*row)[0].casefold(), reverse=reverse)
+        elif sort_column == "profile":
+            self.hook_rows.sort(key=lambda row: row[0]["name"].casefold(), reverse=reverse)
+        elif sort_column == "method":
+            self.hook_rows.sort(key=lambda row: signature(row[0]["hooks"][row[1]]).casefold(), reverse=reverse)
         signatures = [signature(p["hooks"][i]) for p, i in self.hook_rows]
 
         available = self.hook_panel_content_width()
@@ -426,15 +437,19 @@ class MonitorPane(Vertical):
             method_width = max(method_width, max(map(cell_len, signatures), default=0))
         method_column = table.columns.get("method")
         resize_columns = (
-            len(table.columns) != column_count or width != self._hooks_layout_width
+            rebuild_columns or reset_selection or len(table.columns) != column_count or width != self._hooks_layout_width
             or method_column is None or method_column.width != method_width
         )
         table.clear(columns=resize_columns)
         if resize_columns:
-            table.add_column("State", width=self.HOOK_STATE_WIDTH)
+            columns = [("state", "State", self.HOOK_STATE_WIDTH)]
             if all_hooks:
-                table.add_column("Profile", width=profile_width)
-            table.add_column("Method overload", width=method_width, key="method")
+                columns.append(("profile", "Profile", profile_width))
+            columns.append(("method", "Method overload", method_width))
+            for key, label, column_width in columns:
+                if key == sort_column:
+                    label += " ↓" if reverse else " ↑"
+                table.add_column(label, width=column_width, key=key)
             self._hooks_layout_width = width
         for (p, i), method in zip(self.hook_rows, signatures):
             state, _ = self.hook_status(p, i)
@@ -442,9 +457,10 @@ class MonitorPane(Vertical):
             if all_hooks:
                 cells.append(Text(p["name"], no_wrap=True, overflow="ellipsis"))
             cells.append(Text(method, no_wrap=True, overflow="ellipsis"))
-            table.add_row(*cells)
+            table.add_row(*cells, key=f"{p['id']}:{method}")
         if table.row_count:
-            table.move_cursor(row=min(previous, table.row_count - 1))
+            row = table.get_row_index(selected_key) if selected_key in table.rows else min(previous, table.row_count - 1)
+            table.move_cursor(row=row)
         table.display = bool(table.row_count)
         empty = self.query_one("#monitor_hooks_empty", Label)
         empty.display = not table.row_count
@@ -970,6 +986,15 @@ class MonitorPane(Vertical):
             self.selected_profile = key.value
             self.refresh_hooks(reset_selection=True)
 
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
+        if event.data_table.id != "monitor_hooks":
+            return
+        event.stop()
+        key = event.column_key.value
+        previous, reverse = self.hook_sorts.get(self.selected_profile, (None, False))
+        self.hook_sorts[self.selected_profile] = (key, key == previous and not reverse)
+        self.refresh_hooks(rebuild_columns=True)
+
     def on_key(self, event):
         if event.key == "space" and getattr(self.app.focused, "id", None) == "monitor_profiles":
             event.stop()
@@ -1069,8 +1094,10 @@ class MonitorPane(Vertical):
         target = next(x for x in profiles if x["id"] == p["id"])
         if action in ("add", "edit", "remove"):
             row = self.query_one("#monitor_hooks", DataTable).cursor_row
-            if action != "add" and not 0 <= row < len(target["hooks"]):
-                return
+            if action != "add":
+                if not 0 <= row < len(self.hook_rows):
+                    return
+                _, row = self.hook_rows[row]
             if action == "remove":
                 target["hooks"].pop(row)
                 self.save(profiles, p["id"])
