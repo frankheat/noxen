@@ -449,12 +449,20 @@ class NoxenApp(App):
     def action_clear_log(self):
         if self._active_tab == "tab_history":
             self.action_clear_history()
+        elif self._monitor_events_active():
+            self.query_one(MonitorPane).clear_events()
         elif self._active_tab == "tab_log":
             self._log_entries.clear()
             try:
                 self.query_one("#log_output", RichLog).clear()
             except Exception:
                 pass
+
+    def _monitor_events_active(self):
+        return (
+            self._active_tab == "tab_monitor" and not self.screen.is_modal
+            and self.query_one("#monitor_views", TabbedContent).active == "monitor_events_view"
+        )
 
     def action_toggle_theme(self):
         if self.theme == "noxen-dark":
@@ -2644,7 +2652,7 @@ class NoxenApp(App):
         if action in ("info_refresh", "info_toggle_rail"):
             return self._active_tab == "tab_info"
         if action == "clear_log":
-            return self._active_tab in ("tab_log", "tab_history")
+            return self._active_tab in ("tab_log", "tab_history") or self._monitor_events_active()
         if action == "toggle_command_bar":
             return self._active_tab in ("tab_history", "tab_intercept")
         if action in ("resize_panel_up", "resize_panel_down"):

@@ -260,6 +260,7 @@ class MonitorPane(Vertical):
     MonitorPane .monitor_table, MonitorPane .monitor_detail {
         height: 1fr; margin: 0 1; border: solid $foreground-muted;
     }
+    #monitor_events { margin-top: 1; }
     MonitorPane .monitor_empty {
         height: 1fr; padding: 1 2; color: $foreground-muted;
     }
@@ -299,14 +300,14 @@ class MonitorPane(Vertical):
         self.inbox = deque()
         self.lock = threading.Lock()
         self.rpc_lock = threading.Lock()
-        self.saved_count = self.lost = self.saved_unsaved = self.interrupted_recordings = 0
+        self.lost = self.saved_unsaved = self.interrupted_recordings = 0
         self.inbound_lost = 0
         self.pending_status = None
         self.dirty = False
         self.selected = None
         self.last_connection = None
         self.event_query = None
-        self.status_text = ""
+        self.status_text = None
         self._hooks_layout_width = 0
         self.recording = None
         self.recording_error = ""
@@ -329,7 +330,6 @@ class MonitorPane(Vertical):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
                     yield Button("Newer", id="monitor_newer", disabled=True)
                     yield Button("Older", id="monitor_older", disabled=True)
-                    yield Button("Clear events", id="monitor_clear")
                 yield Label("", id="monitor_status", markup=False)
                 yield Label("", id="monitor_events_empty", classes="monitor_empty")
                 yield DataTable(id="monitor_events", cursor_type="row", classes="monitor_table")
@@ -358,11 +358,12 @@ class MonitorPane(Vertical):
                         yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
 
     def on_mount(self):
-        self.saved_count, self.lost, self.saved_unsaved, self.interrupted_recordings = self.app.db.monitor_event_summary()
+        self.lost, self.saved_unsaved, self.interrupted_recordings = self.app.db.monitor_event_summary()
         self.profiles, warning = load_profiles(self.app.db.get_info("monitor_profiles"))
         if warning:
             self.app.notify(warning, severity="warning")
         events = self.query_one("#monitor_events", DataTable)
+        events.add_column("ID", key="id")
         for label, width in (("Time", 19), ("Profile", 16), ("Method", 21), ("Outcome", 10)):
             events.add_column(label, width=width)
         profiles = self.query_one("#monitor_profiles", DataTable)
@@ -731,7 +732,6 @@ class MonitorPane(Vertical):
                 )
                 for _ in batch:
                     recording.pending.popleft()
-                self.saved_count += len(batch)
                 self.recording_error = ""
                 self.retry_recording_at = 0.0
                 if not self.event_pages:
@@ -854,31 +854,33 @@ class MonitorPane(Vertical):
             self.recording = None
             self.recording_error = ""
             self.retry_recording_at = 0.0
-            self.saved_count = self.lost = self.saved_unsaved = self.interrupted_recordings = 0
+            self.lost = self.saved_unsaved = self.interrupted_recordings = 0
             self.events = []
             self.event_pages.clear()
             self.refresh_events()
             self.request_event_page()
 
     def refresh_event_status(self):
-        status = f"{self.saved_count} saved"
+        parts = []
         if self.event_pages:
-            status += f" · Page {len(self.event_pages) + 1}"
+            parts.append(f"Page {len(self.event_pages) + 1}")
         if self.lost:
-            status += f" · {self.lost} lost during capture"
+            parts.append(f"{self.lost} lost during capture")
         unsaved = self.saved_unsaved + (self.recording.unsaved if self.recording else 0)
         if unsaved:
-            status += f" · {unsaved} not saved"
+            parts.append(f"{unsaved} not saved")
         if self.recording_error and self.recording:
-            status += f" · Save failed · {len(self.recording.pending)} waiting to save"
+            parts.extend(("Save failed", f"{len(self.recording.pending)} waiting to save"))
         if self.interrupted_recordings:
-            status += f" · {self.interrupted_recordings} incomplete captures"
+            parts.append(f"{self.interrupted_recordings} incomplete captures")
+        status = " · ".join(parts)
         if status != self.status_text:
-            self.query_one("#monitor_status", Label).update(status)
+            label = self.query_one("#monitor_status", Label)
+            label.update(status)
+            label.display = bool(status)
             self.status_text = status
         self.query_one("#monitor_newer", Button).disabled = not self.event_pages
         self.query_one("#monitor_older", Button).disabled = self.older_event_id is None
-        self.query_one("#monitor_clear", Button).disabled = not (self.saved_count or self.recording or self.lost)
 
     def refresh_events(self, query="", before=None):
         table = self.query_one("#monitor_events", DataTable)
@@ -891,13 +893,16 @@ class MonitorPane(Vertical):
             if row.value not in visible:
                 table.remove_row(row)
         for key, e in visible.items():
+            event_id = e.get("_db_id", "—")
             if key in table.rows:
+                if table.get_cell(key, "id") != event_id:
+                    table.update_cell(key, "id", event_id, update_width=True)
                 continue
             timestamp = datetime.fromtimestamp(e.get("time", 0) / 1000).strftime("%Y-%m-%d %H:%M:%S")
             method = e.get("method", "Capture error")
             if method == "$init" and e.get("class"):
                 method = e["class"].rsplit(".", 1)[-1]
-            table.add_row(timestamp, Text(", ".join(e.get("profiles", [])), no_wrap=True, overflow="ellipsis"),
+            table.add_row(event_id, timestamp, Text(", ".join(e.get("profiles", [])), no_wrap=True, overflow="ellipsis"),
                           Text(method, no_wrap=True, overflow="ellipsis"),
                           e.get("outcome", "unknown"), key=key)
         table.display = self.query_one("#monitor_detail").display = bool(visible)
@@ -973,6 +978,7 @@ class MonitorPane(Vertical):
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated):
         event.stop()
+        self.app.refresh_bindings()
         if event.pane.id == "monitor_events_view":
             self.refresh_page_if_visible()
 
@@ -996,9 +1002,6 @@ class MonitorPane(Vertical):
         p = self.profile()
         if action == "hook_details":
             self.show_hook()
-            return
-        if action == "clear":
-            self.clear_events()
             return
         if self.app._connection_state == "connecting":
             return

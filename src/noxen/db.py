@@ -145,8 +145,8 @@ class ProjectDB:
         with self._lock:
             conn = self._require_connection()
             return conn.execute("""
-                SELECT (SELECT COUNT(*) FROM monitor_events), COALESCE(SUM(lost), 0),
-                       COALESCE(SUM(unsaved), 0), COALESCE(SUM(status != 'complete'), 0)
+                SELECT COALESCE(SUM(lost), 0), COALESCE(SUM(unsaved), 0),
+                       COALESCE(SUM(status != 'complete'), 0)
                 FROM monitor_recordings
             """).fetchone()
 
