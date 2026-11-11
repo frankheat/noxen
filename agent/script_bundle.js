@@ -1773,6 +1773,10 @@
       var URI = "android.net.Uri";
       var STRING = "java.lang.String";
       var FILE = "java.io.File";
+      var FILES = "java.nio.file.Files";
+      var PATH = "java.nio.file.Path";
+      var COPY_OPTIONS = "[Ljava.nio.file.CopyOption;";
+      var COPY_OPTION_TYPES = /* @__PURE__ */ new Set(["java.nio.file.StandardCopyOption", "java.nio.file.LinkOption"]);
       var FRAMEWORK_URIS = /* @__PURE__ */ new Set(["android.net.Uri$StringUri", "android.net.Uri$HierarchicalUri", "android.net.Uri$OpaqueUri"]);
       var FILE_CONSTRUCTORS = /* @__PURE__ */ new Set(["java.io.FileInputStream", "java.io.FileOutputStream", "java.io.RandomAccessFile"]);
       var SQL_BOXED_SCALARS = /* @__PURE__ */ new Set([
@@ -1792,8 +1796,12 @@
         return left != null && right != null && left.$isSameObject(right);
       }
       function forwardsTo(parent, spec, receiver, args) {
-        if (!parent || parent.spec.profile !== spec.profile || parent.spec.class !== spec.class || parent.spec.method !== spec.method || !sameObject(parent.receiver, receiver)) return false;
+        if (!parent || parent.spec.profile !== spec.profile || parent.spec.class !== spec.class || !sameObject(parent.receiver, receiver)) return false;
         const outer = parent.args;
+        if (parent.spec.method !== spec.method) {
+          const caller = parent.spec.method;
+          return spec.class === RESOLVER && spec.method === "openTypedAssetFileDescriptor" && (caller === "openInputStream" || caller === "openFileDescriptor" && outer[1] === "r") && sameObject(outer[0], args[0]) && args[1] === "*/*" && args[2] == null && (outer[2] == null ? args[3] == null : sameObject(outer[2], args[3]));
+        }
         if (spec.class === CIPHER) {
           const from2 = parent.spec.args, to = spec.args;
           if (spec.method === "getInstance")
@@ -1818,6 +1826,16 @@
         if (!sameObject(outer[0], args[0])) return false;
         if (spec.method === "openFileDescriptor")
           return outer.length === 2 && args.length === 3 && outer[1] === args[1] && args[2] == null;
+        if (spec.method === "openOutputStream")
+          return outer.length === 1 && args.length === 2 && args[1] === "w";
+        if (spec.method === "openTypedAssetFileDescriptor")
+          return outer.length === 3 && args.length === 4 && outer[1] === args[1] && sameObject(outer[2], args[2]) && args[3] == null;
+        if (spec.method === "insert")
+          return outer.length === 2 && args.length === 3 && sameObject(outer[1], args[1]) && args[2] == null;
+        if (spec.method === "update")
+          return outer.length === 4 && spec.args[2] === "android.os.Bundle" && sameObject(outer[1], args[1]);
+        if (spec.method === "delete")
+          return outer.length === 3 && spec.args[1] === "android.os.Bundle";
         if (spec.method !== "query" || !sameObject(outer[1], args[1])) return false;
         if (outer.length === 5 && args.length === 6)
           return outer[2] === args[2] && sameObject(outer[3], args[3]) && outer[4] === args[4] && args[5] == null;
@@ -1851,6 +1869,8 @@
             return textValue(type, String(v.toString()));
           if (type === FILE && v.$className === FILE)
             return textValue(type, String(v.getPath()));
+          if (type === PATH && v.$className === "sun.nio.fs.UnixPath")
+            return textValue(type, String(v.toString()));
           if (type === SOCKET_ADDRESS && v.$className === INET_SOCKET_ADDRESS) {
             const endpoint = Java2.cast(v, Java2.use(INET_SOCKET_ADDRESS));
             const host = endpoint.getHostString();
@@ -1879,6 +1899,14 @@
             return { type: arg.$className || type, opaque: true };
           if (spec.class === CIPHER && spec.method === "init" && index > 0 && arg != null)
             return { type: arg.$className || type, opaque: true };
+          if (spec.class === FILES && type === COPY_OPTIONS && Array.isArray(arg)) {
+            const items2 = arg.slice(0, 8).map((option) => safe(() => {
+              if (option == null) return { type: "null", value: null };
+              const optionType = option.$className || "java.nio.file.CopyOption";
+              return COPY_OPTION_TYPES.has(optionType) ? textValue(optionType, String(Java2.cast(option, Java2.use(optionType)).name())) : { type: optionType, opaque: true };
+            }, { captureError: true }));
+            return { type, items: items2, count: arg.length };
+          }
           const bindings = spec.class === SQLITE && (spec.method === "execSQL" && index === 1 && type === "[Ljava.lang.Object;" || spec.method === "rawQueryWithFactory" && index === 2 && type === "[Ljava.lang.String;");
           if (!bindings || !Array.isArray(arg)) return value(arg, type);
           const items = arg.slice(0, 16).map((binding) => safe(() => sqlBinding(binding), { captureError: true }));
@@ -1929,6 +1957,8 @@
               event.destination = inspect2(() => urlDestination(receiver));
             if (event.class === CIPHER && event.method === "init")
               event.transformation = inspect2(() => value(receiver.getAlgorithm(), STRING));
+            if (event.class === FILE && (event.method === "delete" || event.method === "renameTo"))
+              event.sourcePath = inspect2(() => value(receiver, FILE));
           }
           if (specs.some((s) => s.captureStack))
             event.stack = inspect2(() => Java2.backtrace({ limit: 16 }).frames.map((f) => f.signature));

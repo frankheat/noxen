@@ -113,6 +113,23 @@ test('file capture reads the stored path only from the framework File class', ()
   assert.equal(subclassReads, 0);
 });
 
+test('File.renameTo records source, destination and the original boolean result', () => {
+  const f = fixture(() => false, 'renameTo');
+  f.hook.class = 'java.io.File';
+  f.hook.args = ['java.io.File'];
+  f.method.returnType.className = 'boolean';
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+  const source = { $className: 'java.io.File', getPath: () => 'relative/source' };
+  const target = { $className: 'app.CustomFile', getPath() { assert.fail('unexpected app code'); } };
+  assert.equal(f.method.implementation.call(source, target), false);
+  f.flush();
+  const [event] = f.messages.at(-1).events;
+  assert.equal(event.sourcePath.value, 'relative/source');
+  assert.equal(event.arguments[0].opaque, true);
+  assert.equal(event.result.value, false);
+});
+
 test('URL preparation reads only selected stored fields', () => {
   const f = fixture(() => null, 'openConnection');
   f.hook.class = 'java.net.URL';
@@ -213,4 +230,38 @@ test('resolver delegation keeps the outer call and still reports a custom inner 
   long.implementation.call({}, unknown, 'r', null);
   flush();
   assert.deepEqual(messages.at(-1).events[0].arguments[0], { type: 'android.net.Uri', opaque: true });
+});
+
+test('resolver read stream folds a delegated typed open but keeps explicit typed calls', () => {
+  const messages = [];
+  const uri = { $className: 'android.net.Uri$StringUri', toString: () => 'content://example/item' };
+  const typed = {
+    handle: 'typed', implementation: null, returnType: { className: 'android.content.res.AssetFileDescriptor' },
+    apply() { return {}; },
+  };
+  const stream = {
+    handle: 'stream', implementation: null, returnType: { className: 'java.io.InputStream' },
+    apply(receiver, [uri]) { return typed.implementation.call(receiver, uri, '*/*', null, null); },
+  };
+  const Java = {
+    perform: fn => fn(),
+    use: () => ({
+      openInputStream: { overload: () => stream },
+      openTypedAssetFileDescriptor: { overload: () => typed },
+    }),
+  };
+  const monitor = createMonitor(Java, message => messages.push(message), () => {});
+  const base = { class: 'android.content.ContentResolver', profile: 'content-provider',
+    profileName: 'Content Provider', captureArguments: true, captureReturn: true };
+  monitor.configure([
+    { ...base, method: 'openInputStream', args: ['android.net.Uri'], index: 0 },
+    { ...base, method: 'openTypedAssetFileDescriptor',
+      args: ['android.net.Uri', 'java.lang.String', 'android.os.Bundle', 'android.os.CancellationSignal'], index: 1 },
+  ], 0);
+
+  const receiver = {};
+  stream.implementation.call(receiver, uri);
+  typed.implementation.call(receiver, uri, 'text/plain', null, null);
+  assert.deepEqual(monitor.stop().events.map(event => event.method),
+    ['openInputStream', 'openTypedAssetFileDescriptor']);
 });

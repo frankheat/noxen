@@ -40,6 +40,10 @@ _PREFERENCE_EDITS = {
 }
 _THROWABLE = "java.lang.Throwable"
 _FILE = "java.io.File"
+_FILES = "java.nio.file.Files"
+_PATH = "java.nio.file.Path"
+_COPY_OPTIONS = "[Ljava.nio.file.CopyOption;"
+_CONTENT_VALUES = "android.content.ContentValues"
 _FILE_INPUT = "java.io.FileInputStream"
 _FILE_OUTPUT = "java.io.FileOutputStream"
 _RANDOM_FILE = "java.io.RandomAccessFile"
@@ -119,9 +123,19 @@ def default_profiles():
         ("query", [_URI, _STRINGS, _BUNDLE, _CANCEL]),
         ("call", [_URI, _STRING, _STRING, _BUNDLE]),
         ("call", [_STRING, _STRING, _STRING, _BUNDLE]),
+        ("insert", [_URI, _CONTENT_VALUES]),
+        ("insert", [_URI, _CONTENT_VALUES, _BUNDLE]),
+        ("update", [_URI, _CONTENT_VALUES, _STRING, _STRINGS]),
+        ("update", [_URI, _CONTENT_VALUES, _BUNDLE]),
+        ("delete", [_URI, _STRING, _STRINGS]),
+        ("delete", [_URI, _BUNDLE]),
         ("openInputStream", [_URI]),
+        ("openOutputStream", [_URI]),
+        ("openOutputStream", [_URI, _STRING]),
         ("openFileDescriptor", [_URI, _STRING]),
         ("openFileDescriptor", [_URI, _STRING, _CANCEL]),
+        ("openTypedAssetFileDescriptor", [_URI, _STRING, _BUNDLE]),
+        ("openTypedAssetFileDescriptor", [_URI, _STRING, _BUNDLE, _CANCEL]),
     ]
     profiles = [
         {"id": pid, "name": name, "enabled": False,
@@ -157,6 +171,14 @@ def default_profiles():
             )
             for path_type in (_STRING, _FILE)
             for tail in tails
+        ] + [
+            validate_hook({"class": clazz, "method": method, "args": args})
+            for clazz, method, args in (
+                (_FILE, "delete", []),
+                (_FILE, "renameTo", [_FILE]),
+                (_FILES, "copy", [_PATH, _PATH, _COPY_OPTIONS]),
+                (_FILES, "move", [_PATH, _PATH, _COPY_OPTIONS]),
+            )
         ],
     })
     profiles.append({
@@ -370,6 +392,10 @@ def _argument_names(event):
             return ("Path", "Append")
         if clazz == _RANDOM_FILE:
             return ("Path", "Mode")
+    if clazz == _FILE and method == "renameTo" and types == [_FILE]:
+        return ("Destination",)
+    if clazz == _FILES and method in ("copy", "move") and types == [_PATH, _PATH, _COPY_OPTIONS]:
+        return ("Source", "Destination", "Options")
     if clazz == _CONTEXT_IMPL and method in ("grantUriPermission", "revokeUriPermission"):
         if types == [_STRING, _URI, "int"]:
             return ("Target package", "URI", "Mode flags")
@@ -385,8 +411,22 @@ def _argument_names(event):
         return ("URI", "Projection", "Selection", "Selection arguments", "Sort order", "Cancellation signal")
     if method == "call" and types:
         return ("URI" if types[0] == _URI else "Authority", "Command", "Argument", "Extras")
+    if method == "insert":
+        return ("URI", "Values", "Extras")
+    if method == "update":
+        if types == [_URI, _CONTENT_VALUES, _BUNDLE]:
+            return ("URI", "Values", "Extras")
+        return ("URI", "Values", "Selection", "Selection arguments")
+    if method == "delete":
+        if types == [_URI, _BUNDLE]:
+            return ("URI", "Extras")
+        return ("URI", "Selection", "Selection arguments")
     if method == "openFileDescriptor":
         return ("URI", "Mode", "Cancellation signal")
+    if method == "openTypedAssetFileDescriptor":
+        return ("URI", "MIME filter", "Options", "Cancellation signal")
+    if method == "openOutputStream":
+        return ("URI", "Mode")
     if method == "openInputStream":
         return ("URI",)
     return ()
@@ -446,15 +486,17 @@ def render_event_detail(event) -> Text:
             field("URL    ", display_value(event["destination"]))
     if event.get("class") == _CIPHER and "transformation" in event:
         field("Transformation", display_value(event["transformation"]))
+    if "sourcePath" in event:
+        field("Path" if event.get("method") == "delete" else "Source", display_value(event["sourcePath"]))
     if "arguments" in event:
         section("ARGUMENTS")
         names = _argument_names(event)
         for i, value in enumerate(event["arguments"]):
             name = names[i] if i < len(names) else i
-            if name == "Bindings" and isinstance(value.get("items"), list):
+            if name in ("Bindings", "Options") and isinstance(value.get("items"), list):
                 items = value["items"]
                 count = value["count"]
-                field("Bindings", count, f" (showing {len(items)})" if count > len(items) else "")
+                field(name, count, f" (showing {len(items)})" if count > len(items) else "")
                 for index, item in enumerate(items, 1):
                     typed_value("    ", f"[{index}] ", item, display_value(item))
                 continue
@@ -473,12 +515,19 @@ def render_event_detail(event) -> Text:
             field("Mode", "WRITE")
             if len(event["types"]) == 1:
                 field("Append", "false", " (default)")
+        elif names == ("URI", "Mode") and event.get("types") == [_URI]:
+            field("Mode", "w", " (default)")
         if not event["arguments"]:
             text.append("\n  No arguments", "dim")
     if "result" in event:
         section("RETURN")
         result = event["result"]
-        typed_value("  ", "", result, display_value(result))
+        label = ""
+        if event.get("class") == _RESOLVER:
+            label = {"insert": "Inserted URI ", "update": "Rows affected ", "delete": "Rows affected "}.get(
+                event.get("method"), ""
+            )
+        typed_value("  ", label, result, display_value(result))
     if "exception" in event:
         section("EXCEPTION")
         text.append(f"\n  {event['exception'].get('type', 'unknown')}")
