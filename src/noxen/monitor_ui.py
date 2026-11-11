@@ -21,7 +21,8 @@ from textual.widgets import Button, Checkbox, DataTable, Input, Label, OptionLis
 from textual.widgets.option_list import Option
 
 from noxen.modals import ExtraKeyModal
-from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, load_profiles,
+from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_method_label,
+                           event_sort_value, load_profiles,
                            missing_default_hooks, new_profile, render_event_detail, signature, validate_hook,
                            validate_profiles)
 
@@ -251,6 +252,10 @@ class MonitorPane(Vertical):
     RECORDING_BATCH = 512
     RECORDING_BUFFER = 4096
     EVENT_PAGE_SIZE = 200
+    EVENT_COLUMNS = (
+        ("id", "ID", None), ("time", "Time", 19), ("profile", "Profile", 16),
+        ("method", "Method", 21), ("outcome", "Outcome", 10),
+    )
 
     DEFAULT_CSS = """
     MonitorPane { height: 1fr; }
@@ -321,7 +326,9 @@ class MonitorPane(Vertical):
         self.event_pages = []
         self.event_page_task = None
         self.event_page_version = 0
-        self.older_event_id = None
+        self.next_event_cursor = None
+        self.event_sort = None
+        self.event_columns_sort = None
 
     def compose(self):
         with TabbedContent(id="monitor_views", initial="monitor_events_view"):
@@ -362,10 +369,6 @@ class MonitorPane(Vertical):
         self.profiles, warning = load_profiles(self.app.db.get_info("monitor_profiles"))
         if warning:
             self.app.notify(warning, severity="warning")
-        events = self.query_one("#monitor_events", DataTable)
-        events.add_column("ID", key="id")
-        for label, width in (("Time", 19), ("Profile", 16), ("Method", 21), ("Outcome", 10)):
-            events.add_column(label, width=width)
         profiles = self.query_one("#monitor_profiles", DataTable)
         self.query_one("#monitor_profile_panel").styles.width = self.PROFILE_LIST_WIDTH
         profiles.add_column("On", width=2)
@@ -784,7 +787,7 @@ class MonitorPane(Vertical):
 
     def request_event_page(self):
         self.event_page_version += 1
-        self.older_event_id = None
+        self.next_event_cursor = None
         self.dirty = True
         self.refresh_page_if_visible()
         self.refresh_event_status()
@@ -802,31 +805,53 @@ class MonitorPane(Vertical):
         version = self.event_page_version
         before = self.event_pages[-1] if self.event_pages else None
         query = self.query_one("#monitor_search", Input).value.casefold()
+        sort = self.event_sort
 
         def cancelled():
             return self.clearing or self.finishing or version != self.event_page_version
 
         try:
             events, has_older = await asyncio.to_thread(
-                self.app.db.monitor_event_page, query, before, self.EVENT_PAGE_SIZE, cancelled
+                self.app.db.monitor_event_page, query, before, self.EVENT_PAGE_SIZE, cancelled, sort=sort
             )
             if cancelled():
                 return
             visible = events
             if before is None and self.recording_error and self.recording:
-                visible_by_key = {self.event_key(event): event for event in events}
+                saved_keys = {self.event_key(event) for event in events}
+                pending_events = []
                 for event in self.recording.pending:
                     if not query or query in json.dumps(event).casefold():
                         pending = dict(event, _recording=self.recording.id)
-                        visible_by_key.setdefault(self.event_key(pending), pending)
-                visible = list(visible_by_key.values())[-self.EVENT_PAGE_SIZE:]
-            oldest_visible = next((event["_db_id"] for event in visible if "_db_id" in event), None)
-            self.older_event_id = None
-            if events:
+                        if self.event_key(pending) not in saved_keys:
+                            pending_events.append(pending)
+                if sort is None:
+                    visible = (events + pending_events)[-self.EVENT_PAGE_SIZE:]
+                elif pending_events:
+                    column, reverse = sort
+                    # An event awaiting an ID sorts as newer than saved events.
+                    pending_id = 1 << 63
+
+                    def page_key(event):
+                        if "_db_id" in event:
+                            return event["_sort_key"], event["_db_id"]
+                        value = pending_id if column == "id" else event_sort_value(event, column)
+                        return value, pending_id
+
+                    pending_limit = self.EVENT_PAGE_SIZE - bool(events)
+                    visible = sorted(events + pending_events[-pending_limit:], key=page_key,
+                                     reverse=reverse)[:self.EVENT_PAGE_SIZE]
+            self.next_event_cursor = None
+            if sort and events:
+                last = next(event for event in reversed(visible) if "_db_id" in event)
+                if has_older or last["_db_id"] != events[-1]["_db_id"]:
+                    self.next_event_cursor = (last["_sort_key"], last["_db_id"])
+            elif sort is None and events:
+                oldest_visible = next((event["_db_id"] for event in visible if "_db_id" in event), None)
                 if oldest_visible is None:
-                    self.older_event_id = events[-1]["_db_id"] + 1
+                    self.next_event_cursor = events[-1]["_db_id"] + 1
                 elif has_older or oldest_visible > events[0]["_db_id"]:
-                    self.older_event_id = oldest_visible
+                    self.next_event_cursor = oldest_visible
             self.events = visible
             self.refresh_events(query, before)
         except (OSError, sqlite3.Error, ValueError) as exc:
@@ -879,16 +904,33 @@ class MonitorPane(Vertical):
             label.update(status)
             label.display = bool(status)
             self.status_text = status
-        self.query_one("#monitor_newer", Button).disabled = not self.event_pages
-        self.query_one("#monitor_older", Button).disabled = self.older_event_id is None
+        newer = self.query_one("#monitor_newer", Button)
+        older = self.query_one("#monitor_older", Button)
+        newer.disabled = not self.event_pages
+        older.disabled = self.next_event_cursor is None
+        newer.label = "Previous" if self.event_sort else "Newer"
+        older.label = "Next" if self.event_sort else "Older"
 
     def refresh_events(self, query="", before=None):
         table = self.query_one("#monitor_events", DataTable)
         old = self.selected
         visible = {self.event_key(e): e for e in self.events}
-        if self.event_query != (query, before):
+        columns_changed = not table.columns or self.event_columns_sort != self.event_sort
+        rows_changed = self.event_query != (query, before)
+        if columns_changed:
+            table.clear(columns=True)
+            column, reverse = self.event_sort or (None, False)
+            for key, label, width in self.EVENT_COLUMNS:
+                if key == column:
+                    label += " ↓" if reverse else " ↑"
+                table.add_column(label, width=width, key=key)
+            self.event_columns_sort = self.event_sort
+        elif self.event_sort and not rows_changed:
+            remaining = [row.key.value for row in table.ordered_rows if row.key.value in visible]
+            rows_changed = remaining != list(visible)[:len(remaining)]
+        if rows_changed and not columns_changed:
             table.clear()
-            self.event_query = (query, before)
+        self.event_query = (query, before)
         for row in list(table.rows):
             if row.value not in visible:
                 table.remove_row(row)
@@ -899,9 +941,7 @@ class MonitorPane(Vertical):
                     table.update_cell(key, "id", event_id, update_width=True)
                 continue
             timestamp = datetime.fromtimestamp(e.get("time", 0) / 1000).strftime("%Y-%m-%d %H:%M:%S")
-            method = e.get("method", "Capture error")
-            if method == "$init" and e.get("class"):
-                method = e["class"].rsplit(".", 1)[-1]
+            method = event_method_label(e)
             table.add_row(event_id, timestamp, Text(", ".join(e.get("profiles", [])), no_wrap=True, overflow="ellipsis"),
                           Text(method, no_wrap=True, overflow="ellipsis"),
                           e.get("outcome", "unknown"), key=key)
@@ -910,7 +950,7 @@ class MonitorPane(Vertical):
         empty.display = not visible
         if visible:
             key = old if old in visible else next(reversed(visible))
-            table.move_cursor(row=table.get_row_index(key), scroll=key != old)
+            table.move_cursor(row=table.get_row_index(key), scroll=key != old or columns_changed or rows_changed)
             self.show_event(key)
         else:
             self.selected = None
@@ -949,6 +989,14 @@ class MonitorPane(Vertical):
             self.refresh_hooks(reset_selection=True)
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
+        if event.data_table.id == "monitor_events":
+            event.stop()
+            key = event.column_key.value
+            previous, reverse = self.event_sort or (None, False)
+            self.event_sort = (key, key == previous and not reverse)
+            self.event_pages.clear()
+            self.request_event_page()
+            return
         if event.data_table.id != "monitor_hooks":
             return
         event.stop()
@@ -995,8 +1043,8 @@ class MonitorPane(Vertical):
             self.event_pages.pop()
             self.request_event_page()
             return
-        if action == "older" and self.older_event_id is not None:
-            self.event_pages.append(self.older_event_id)
+        if action == "older" and self.next_event_cursor is not None:
+            self.event_pages.append(self.next_event_cursor)
             self.request_event_page()
             return
         p = self.profile()

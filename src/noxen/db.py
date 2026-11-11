@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from noxen.history_columns import normalize_history_column_widths
+from noxen.monitor import event_sort_value
 
 _MIGRATED_INTENT_COLUMNS = {
     "outcome": "TEXT",
@@ -150,11 +151,22 @@ class ProjectDB:
                 FROM monitor_recordings
             """).fetchone()
 
-    def monitor_event_page(self, query, before, limit, cancelled=None):
+    def monitor_event_page(self, query, before, limit, cancelled=None, *, sort=None):
+        column, reverse = sort or ("id", True)
+        direction = "DESC" if reverse else "ASC"
+        comparison = "<" if reverse else ">"
+        sort_key = "id" if column == "id" else "monitor_sort_key(payload)"
+        order_by = f"sort_key {direction}"
+        if column != "id":
+            order_by += f", id {direction}"
         conditions, params = [], []
         if before is not None:
-            conditions.append("id < ?")
-            params.append(before)
+            if column == "id":
+                conditions.append(f"id {comparison} ?")
+                params.append(before[1] if sort else before)
+            else:
+                conditions.append(f"({sort_key}, id) {comparison} (?, ?)")
+                params.extend(before)
         if query:
             conditions.append("instr(lower(payload), ?) > 0")
             params.append(query)
@@ -165,12 +177,22 @@ class ProjectDB:
         with closing(sqlite3.connect(uri, uri=True)) as conn:
             if cancelled is not None:
                 conn.set_progress_handler(cancelled, 1000)
+            if column != "id":
+                conn.create_function(
+                    "monitor_sort_key", 1,
+                    lambda payload: event_sort_value(json.loads(payload), column),
+                    deterministic=True,
+                )
             rows = conn.execute(
-                f"SELECT id, recording, payload FROM monitor_events {where} ORDER BY id DESC LIMIT ?",
+                f"""SELECT id, recording, payload, {sort_key} AS sort_key
+                    FROM monitor_events {where} ORDER BY {order_by} LIMIT ?""",
                 (*params, limit + 1),
             ).fetchall()
-        events = [dict(json.loads(payload), _db_id=row_id, _recording=recording)
-                  for row_id, recording, payload in reversed(rows[:limit])]
+        page = rows[:limit]
+        if sort is None:
+            page.reverse()
+        events = [dict(json.loads(payload), _db_id=row_id, _recording=recording, _sort_key=value)
+                  for row_id, recording, payload, value in page]
         return events, len(rows) > limit
 
     def clear_monitor_events(self):

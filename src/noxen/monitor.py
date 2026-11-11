@@ -294,6 +294,23 @@ def enabled_hooks(profiles):
             for p in profiles if p["enabled"] for i, h in enumerate(p["hooks"])]
 
 
+def event_method_label(event):
+    method = event.get("method", "Capture error")
+    if method == "$init" and event.get("class"):
+        return event["class"].rsplit(".", 1)[-1]
+    return method
+
+
+def event_sort_value(event, column):
+    if column == "time":
+        return event.get("time", 0)
+    if column == "profile":
+        return ", ".join(event.get("profiles", [])).casefold()
+    if column == "method":
+        return event_method_label(event).casefold()
+    return event.get("outcome", "unknown").casefold()
+
+
 def display_value(value):
     if not isinstance(value, dict):
         return "unavailable"
