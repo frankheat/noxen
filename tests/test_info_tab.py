@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from textual.widgets import ContentSwitcher, DataTable, Input, Label, RichLog, Switch
+from textual.widgets import ContentSwitcher, DataTable, Input, Label, RichLog, Switch, TabbedContent
 from textual.widgets.data_table import ColumnKey
 
 from tests.ui_test_case import IsolatedAppTestCase
@@ -61,7 +61,7 @@ class InfoTabTests(IsolatedAppTestCase):
                 receiver["enabledRuntime"] = 2
                 app._apply_app_info(snapshot)
                 app.query_one("TabbedContent").active = "tab_info"
-                app._switch_info_view("info_nav_components")
+                app.query_one("#info_views", TabbedContent).active = "info_view_components"
                 app.query_one("#info_comp_exposed", Switch).value = True
                 app.query_one("#info_comp_search", Input).value = "R1"
                 app._info_sort["info_comp_table"] = ("enabled", False)
@@ -86,7 +86,7 @@ class InfoTabTests(IsolatedAppTestCase):
                 app = NoxenApp(project_args(os.path.join(tmp, "p.noxen")))
                 async with app.run_test(size=(120, 40)) as pilot:
                     app.query_one("TabbedContent").active = "tab_info"
-                    app._switch_info_view("info_nav_components")
+                    app.query_one("#info_views", TabbedContent).active = "info_view_components"
                     await pilot.pause()
                     self.assertFalse(app.check_action("resize_panel_up", ()))
 
@@ -108,20 +108,20 @@ class InfoTabTests(IsolatedAppTestCase):
                     self.assertEqual(detail.size.height, initial_detail)
                     self.assertEqual(table.size.height, initial_table)
 
-                    app._switch_info_view("info_nav_permissions")
+                    app.query_one("#info_views", TabbedContent).active = "info_view_permissions"
                     await pilot.pause()
                     self.assertFalse(app.check_action("resize_panel_up", ()))
                     await pilot.press("alt+up")
                     await pilot.pause()
-                    app._switch_info_view("info_nav_components")
+                    app.query_one("#info_views", TabbedContent).active = "info_view_components"
                     await pilot.pause()
                     self.assertEqual(detail.size.height, initial_detail)
 
-                    app._switch_info_view("info_nav_overview")
+                    app.query_one("#info_views", TabbedContent).active = "info_view_overview"
                     await pilot.pause()
                     self.assertFalse(app.check_action("resize_panel_down", ()))
                     app._clear_info_tab()
-                    app._switch_info_view("info_nav_components")
+                    app.query_one("#info_views", TabbedContent).active = "info_view_components"
                     await pilot.pause()
                     self.assertFalse(app.check_action("resize_panel_up", ()))
             finally:
@@ -134,13 +134,22 @@ class InfoTabTests(IsolatedAppTestCase):
             try:
                 app = NoxenApp(project_args(os.path.join(tmp, "p.noxen")))
                 async with app.run_test(size=(120, 40)) as pilot:
-                    # empty until a snapshot arrives
-                    self.assertFalse(app.query_one("#info_switcher", ContentSwitcher).display)
+                    app.query_one("#main_tabs", TabbedContent).active = "tab_info"
+                    await pilot.pause()
+                    views = app.query_one("#info_views", TabbedContent)
+                    content = views.query_one(ContentSwitcher)
+                    self.assertFalse(content.display)
+                    self.assertTrue(await pilot.click("#--content-tab-info_view_components"))
+                    await pilot.pause()
+                    self.assertEqual(views.active, "info_view_components")
+                    self.assertEqual(app._active_tab, "tab_info")
+                    self.assertTrue(app.check_action("info_refresh", ()))
 
                     app._apply_app_info(SNAPSHOT)
                     await pilot.pause()
 
-                    self.assertTrue(app.query_one("#info_switcher", ContentSwitcher).display)
+                    self.assertTrue(content.display)
+                    self.assertEqual(views.active, "info_view_components")
                     self.assertFalse(app.query_one("#info_empty", Label).display)
                     self.assertEqual(app.query_one("#info_comp_table", DataTable).row_count, 3)
                     self.assertEqual(app.query_one("#info_perm_table", DataTable).row_count, 2)
@@ -150,15 +159,10 @@ class InfoTabTests(IsolatedAppTestCase):
                     await pilot.pause()
                     self.assertEqual(app.query_one("#info_comp_table", DataTable).row_count, 2)
 
-                    # nav switches the content
-                    app._switch_info_view("info_nav_components")
-                    await pilot.pause()
-                    self.assertEqual(app.query_one("#info_switcher", ContentSwitcher).current, "info_view_components")
-
                     # disconnect clears back to empty
                     app._clear_info_tab()
                     await pilot.pause()
-                    self.assertFalse(app.query_one("#info_switcher", ContentSwitcher).display)
+                    self.assertFalse(content.display)
                     self.assertIsNone(app._app_info)
             finally:
                 os.chdir(cwd)
@@ -173,7 +177,7 @@ class InfoTabTests(IsolatedAppTestCase):
                 async with app.run_test(size=(120, 40)) as pilot:
                     app._apply_app_info(SNAPSHOT)
                     app.query_one("TabbedContent").active = "tab_info"
-                    app._switch_info_view("info_nav_components")
+                    app.query_one("#info_views", TabbedContent).active = "info_view_components"
                     await pilot.pause()
                     table = app.query_one("#info_comp_table", DataTable)
 

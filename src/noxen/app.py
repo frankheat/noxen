@@ -16,7 +16,7 @@ from textual.worker import get_current_worker
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import (
-    Button, ContentSwitcher, DataTable, Footer, Input, Label,
+    Button, DataTable, Footer, Input, Label,
     OptionList, RichLog, Rule, Select, Static, Switch, TabbedContent, TabPane,
 )
 from textual.binding import Binding
@@ -313,7 +313,6 @@ class NoxenApp(App):
         Binding("alt+down", "resize_panel_down", "▼", show=True),
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
         Binding("ctrl+r", "info_refresh", "Refresh", show=True, priority=True),
-        Binding("ctrl+t", "info_toggle_rail", "Panel", show=True, priority=True),
         Binding("ctrl+f", "forward_current", "Forward", show=True, priority=True),
         Binding("ctrl+f", "apply_edit", "Apply & Forward", show=True, priority=True),
         Binding("ctrl+d", "drop_current", "Drop", show=True, priority=True),
@@ -1012,9 +1011,6 @@ class NoxenApp(App):
         elif event.button.id == "home_disconnect":
             self._disconnect_with_monitor()
             return
-        elif event.button.id in ("info_nav_overview", "info_nav_permissions", "info_nav_components"):
-            self._switch_info_view(event.button.id)
-            return
         elif event.button.id == "home_hooks_browse":
             self.app.push_screen(
                 FileBrowserModal("Select custom hooks file"),
@@ -1400,37 +1396,31 @@ class NoxenApp(App):
             with TabPane(" Monitor ", id="tab_monitor"):
                 yield MonitorPane(id="monitor_pane")
             with TabPane(" Info app ", id="tab_info"):
-                with Horizontal(id="info_split"):
-                    with Vertical(id="info_rail"):
-                        yield Button("Overview", id="info_nav_overview", classes="info-nav active")
-                        yield Button("Permissions", id="info_nav_permissions", classes="info-nav")
-                        yield Button("Components", id="info_nav_components", classes="info-nav")
-                    with Vertical(id="info_main"):
-                        yield Label("Connect to a target to inspect it.", id="info_empty")
-                        with ContentSwitcher(initial="info_view_overview", id="info_switcher"):
-                            with VerticalScroll(id="info_view_overview"):
-                                yield RichLog(id="info_overview_log", markup=True, highlight=False, auto_scroll=False)
-                            with Vertical(id="info_view_permissions"):
-                                with Horizontal(classes="info_controls"):
-                                    yield Input(id="info_perm_search", placeholder="Search permissions", select_on_focus=False)
-                                    yield Select(
-                                        [("All sources", "all"), ("requested", "requested"), ("defined", "defined")],
-                                        id="info_perm_source", value="all", allow_blank=False,
-                                    )
-                                yield DataTable(id="info_perm_table", cursor_type="row")
-                            with Vertical(id="info_view_components"):
-                                with Horizontal(classes="info_controls"):
-                                    yield Input(id="info_comp_search", placeholder="Search components", select_on_focus=False)
-                                    yield Select(
-                                        [("All types", "all"), ("activity", "activity"), ("service", "service"),
-                                         ("receiver", "receiver"), ("provider", "provider")],
-                                        id="info_comp_type", value="all", allow_blank=False,
-                                    )
-                                    with Horizontal(id="info_exposed_group", classes="switch-control"):
-                                        yield Switch(value=False, id="info_comp_exposed")
-                                        yield Label("Exposed only", classes="switch-control-label")
-                                yield DataTable(id="info_comp_table", cursor_type="row")
-                                yield RichLog(id="info_comp_detail", markup=True, highlight=False, auto_scroll=False)
+                with TabbedContent(initial="info_view_overview", id="info_views", classes="subtabs empty"):
+                    with TabPane("Overview", id="info_view_overview"):
+                        yield RichLog(id="info_overview_log", markup=True, highlight=False, auto_scroll=False)
+                    with TabPane("Permissions", id="info_view_permissions"):
+                        with Horizontal(classes="info_controls"):
+                            yield Input(id="info_perm_search", placeholder="Search permissions", select_on_focus=False)
+                            yield Select(
+                                [("All sources", "all"), ("requested", "requested"), ("defined", "defined")],
+                                id="info_perm_source", value="all", allow_blank=False,
+                            )
+                        yield DataTable(id="info_perm_table", cursor_type="row")
+                    with TabPane("Components", id="info_view_components"):
+                        with Horizontal(classes="info_controls"):
+                            yield Input(id="info_comp_search", placeholder="Search components", select_on_focus=False)
+                            yield Select(
+                                [("All types", "all"), ("activity", "activity"), ("service", "service"),
+                                 ("receiver", "receiver"), ("provider", "provider")],
+                                id="info_comp_type", value="all", allow_blank=False,
+                            )
+                            with Horizontal(id="info_exposed_group", classes="switch-control"):
+                                yield Switch(value=False, id="info_comp_exposed")
+                                yield Label("Exposed only", classes="switch-control-label")
+                        yield DataTable(id="info_comp_table", cursor_type="row")
+                        yield RichLog(id="info_comp_detail", markup=True, highlight=False, auto_scroll=False)
+                yield Label("Connect to a target to inspect it.", id="info_empty")
             with TabPane(" Log ", id="tab_log"):
                 with Horizontal(id="log_header"):
                     with Horizontal(id="log_verbose_group", classes="switch-control"):
@@ -2063,30 +2053,9 @@ class NoxenApp(App):
     def _init_info_tab(self) -> None:
         self._set_info_columns("info_perm_table")
         self._set_info_columns("info_comp_table")
-        self.query_one("#info_switcher", ContentSwitcher).display = False
-
-    def _switch_info_view(self, nav_id: str) -> None:
-        mapping = {
-            "info_nav_overview": "info_view_overview",
-            "info_nav_permissions": "info_view_permissions",
-            "info_nav_components": "info_view_components",
-        }
-        view = mapping.get(nav_id)
-        if not view:
-            return
-        self.query_one("#info_switcher", ContentSwitcher).current = view
-        for button in self.query(".info-nav"):
-            button.set_class(button.id == nav_id, "active")
-        self.refresh_bindings()
-        if view == "info_view_components" and self._app_info:
-            self.call_after_refresh(self._clamp_info_component_detail_to_available_space)
 
     def action_info_refresh(self) -> None:
         self._fetch_app_info_worker()
-
-    def action_info_toggle_rail(self) -> None:
-        rail = self.query_one("#info_rail")
-        rail.display = not rail.display
 
     @work(thread=True, exclusive=True, group="app_info")
     def _fetch_app_info_worker(self) -> None:
@@ -2132,7 +2101,7 @@ class NoxenApp(App):
         self._app_info = info
         try:
             self.query_one("#info_empty", Label).display = False
-            self.query_one("#info_switcher", ContentSwitcher).display = True
+            self.query_one("#info_views", TabbedContent).remove_class("empty")
             overview = self.query_one("#info_overview_log", RichLog)
             overview.clear()
             overview.write(self._render_markup(render_overview(info)))
@@ -2195,7 +2164,7 @@ class NoxenApp(App):
         self._app_info = None
         self._info_selected_component = None
         try:
-            self.query_one("#info_switcher", ContentSwitcher).display = False
+            self.query_one("#info_views", TabbedContent).add_class("empty")
             self.query_one("#info_empty", Label).display = True
             for widget_id in ("#info_perm_table", "#info_comp_table"):
                 self.query_one(widget_id, DataTable).clear()
@@ -2546,6 +2515,11 @@ class NoxenApp(App):
         if event.pane is None:
             return
         pane_id = event.pane.id
+        if event.tabbed_content.id == "info_views":
+            self.refresh_bindings()
+            if pane_id == "info_view_components" and self._app_info:
+                self.call_after_refresh(self._clamp_info_component_detail_to_available_space)
+            return
         self._active_tab = pane_id
         self.refresh_bindings()
         self._apply_history_command_bar_visibility()
@@ -2664,7 +2638,7 @@ class NoxenApp(App):
             return intercept_blocked and not self._edit_forward_pending
         if action in ("apply_edit", "cancel_edit"):
             return intercept_blocked and self._edit_mode and not self._edit_forward_pending
-        if action in ("info_refresh", "info_toggle_rail"):
+        if action == "info_refresh":
             return self._active_tab == "tab_info"
         if action == "clear_log":
             return self._active_tab in ("tab_log", "tab_history") or self._monitor_events_active()
@@ -2676,7 +2650,7 @@ class NoxenApp(App):
             if self._active_tab == "tab_info":
                 return bool(
                     self._app_info
-                    and self.query_one("#info_switcher", ContentSwitcher).current == "info_view_components"
+                    and self.query_one("#info_views", TabbedContent).active == "info_view_components"
                 )
             if self._monitor_events_active():
                 return bool(self.query_one(MonitorPane).display_events)

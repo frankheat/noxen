@@ -105,7 +105,7 @@ class InfoRefreshTests(IsolatedAppTestCase):
 
     def assert_empty(self, app):
         self.assertIsNone(app._app_info)
-        self.assertFalse(app.query_one("#info_switcher", ContentSwitcher).display)
+        self.assertFalse(app.query_one("#info_views > ContentSwitcher", ContentSwitcher).display)
         self.assertEqual(app.query_one("#info_comp_table", DataTable).row_count, 0)
 
     def warnings(self, app):
@@ -119,7 +119,7 @@ class InfoRefreshTests(IsolatedAppTestCase):
             await worker.wait()
             self.assertEqual(session.calls, 4)
             self.assertEqual(app._app_info, SNAPSHOT)
-            self.assertTrue(app.query_one("#info_switcher", ContentSwitcher).display)
+            self.assertTrue(app.query_one("#info_views > ContentSwitcher", ContentSwitcher).display)
             self.assertEqual(app.query_one("#info_comp_table", DataTable).row_count, 3)
             self.assertEqual(self.warnings(app), [])
 

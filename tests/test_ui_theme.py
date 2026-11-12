@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+from textual.widgets import TabbedContent
+
 from tests.ui_test_case import IsolatedAppTestCase
 
 from noxen.app import NoxenApp, markup_renderable
@@ -132,7 +134,7 @@ class ThemeRuntimeTests(IsolatedAppTestCase):
                         "components": [],
                     })
                     app.query_one("#main_tabs").active = "tab_info"
-                    app._switch_info_view("info_nav_permissions")
+                    app.query_one("#info_views", TabbedContent).active = "info_view_permissions"
                     await pilot.pause()
                     permission_search = app.query_one("#info_perm_search")
                     permission_search.focus()

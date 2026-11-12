@@ -376,7 +376,7 @@ class MonitorPane(Vertical):
         self.rendered_event_columns = ()
 
     def compose(self):
-        with TabbedContent(id="monitor_views", initial="monitor_events_view"):
+        with TabbedContent(id="monitor_views", initial="monitor_events_view", classes="subtabs"):
             with TabPane("Events", id="monitor_events_view"):
                 with Horizontal(classes="monitor_controls"):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
