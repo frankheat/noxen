@@ -922,6 +922,7 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertIn("android.content.ContentResolver.query(", details)
                 self.assertIn("Profile: Content Provider", details)
                 await pilot.press("escape")
+                self.assertIs(app.focused, hooks)
                 await pilot.click("#monitor_hooks", offset=(17, 0))
                 profile_names = [hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)]
                 self.assertEqual(profile_names, sorted(profile_names, key=str.casefold))
@@ -942,9 +943,12 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertEqual(hooks.cursor_row, 4)
                 await pilot.resize_terminal(80, 24)
                 self.assertEqual(list(hooks.columns.values())[1].width, narrow_width)
-                await pilot.click('#monitor_hook_details')
+                details_button = app.query_one("#monitor_hook_details")
+                details_button.focus()
+                await pilot.press("enter")
                 self.assertIn("android.webkit.WebView.loadDataWithBaseURL(", app.screen.query_one(TextArea).text)
                 await pilot.press("escape")
+                self.assertIs(app.focused, details_button)
                 selected = hooks.get_row_at(hooks.cursor_row)[1].plain
                 await pilot.click("#monitor_hooks", offset=(17, 0))
                 methods = [hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)]

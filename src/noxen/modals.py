@@ -28,6 +28,12 @@ from noxen.textual_compat import is_select_empty
 from noxen.ui_theme import enabled_cell, themed_markup
 
 
+class ModalButton(Button):
+    """Open a modal without moving keyboard focus on mouse clicks."""
+
+    FOCUS_ON_CLICK = False
+
+
 class ExtraKeyModal(ModalScreen):
     """Read a captured key without changing the editor draft."""
 

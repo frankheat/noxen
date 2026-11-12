@@ -22,7 +22,7 @@ from textual.widgets.option_list import Option
 
 from noxen.history_columns import normalize_column_widths
 from noxen.logging_ui import log_success
-from noxen.modals import ColumnSelectModal, ExtraKeyModal
+from noxen.modals import ColumnSelectModal, ExtraKeyModal, ModalButton
 from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_method_label,
                            event_search_text, event_sort_value, load_profiles,
                            missing_default_hooks, new_profile, render_event_detail, signature, validate_hook,
@@ -380,7 +380,7 @@ class MonitorPane(Vertical):
             with TabPane("Events", id="monitor_events_view"):
                 with Horizontal(classes="monitor_controls"):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
-                    yield Button("⊟", id="monitor_columns")
+                    yield ModalButton("⊟", id="monitor_columns")
                 yield Label("", id="monitor_status", markup=False)
                 yield Label("", id="monitor_events_empty", classes="monitor_empty")
                 with MonitorEventSplit():
@@ -392,20 +392,20 @@ class MonitorPane(Vertical):
                     with Vertical(id="monitor_profile_panel", classes="monitor_profile_panel") as profiles:
                         profiles.border_title = "Profiles"
                         with Horizontal(id="monitor_profile_actions_group", classes="monitor_controls"):
-                            yield Button("+ New profile", id="monitor_new")
-                            yield Button("⋯", id="monitor_profile_actions", tooltip="Profile actions")
+                            yield ModalButton("+ New profile", id="monitor_new")
+                            yield ModalButton("⋯", id="monitor_profile_actions", tooltip="Profile actions")
                         yield MonitorProfileTable(id="monitor_profiles", cursor_type="row", fixed_rows=1,
                                                   classes="monitor_table")
                     with Vertical(id="monitor_hook_panel", classes="monitor_profile_panel") as hooks:
                         hooks.border_title = "Hooks"
                         with Horizontal(id="monitor_hook_actions", classes="monitor_controls"):
                             with Horizontal():
-                                yield Button("+ Add", id="monitor_add")
-                                yield Button("Edit", id="monitor_edit")
+                                yield ModalButton("+ Add", id="monitor_add")
+                                yield ModalButton("Edit", id="monitor_edit")
                                 yield Button("Remove", id="monitor_remove")
-                                yield Button("Details", id="monitor_hook_details")
+                                yield ModalButton("Details", id="monitor_hook_details")
                             with Horizontal(id="monitor_hook_restore_group"):
-                                yield Button("Restore missing hooks", id="monitor_restore")
+                                yield ModalButton("Restore missing hooks", id="monitor_restore")
                         yield Label("", id="monitor_hooks_empty", classes="monitor_empty")
                         yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
 

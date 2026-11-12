@@ -90,6 +90,7 @@ from noxen.modals import (
     FileBrowserModal,
     HelpModal,
     FilterModal,
+    ModalButton,
     StackModal,
 )
 from noxen.rendering import (
@@ -139,6 +140,7 @@ class ExtraKeyLabel(Label):
     """Bounded plain-text preview; the original key stays available on demand."""
 
     BINDINGS = [("enter", "view_key", "View key")]
+    FOCUS_ON_CLICK = False
     COMPONENT_CLASSES = {"extra-key--ellipsis"}
     PREVIEW_LIMIT = 96
 
@@ -775,7 +777,7 @@ class NoxenApp(App):
             key_label = ExtraKeyLabel(key)
             key_widgets = [key_label]
             if key_label.truncated:
-                key_widgets.append(Button("View full key", id=f"ef_xview_{n}", classes="ef_x_key_view"))
+                key_widgets.append(ModalButton("View full key", id=f"ef_xview_{n}", classes="ef_x_key_view"))
             row = Horizontal(
                 Vertical(*key_widgets, classes="ef_x_key_cell"),
                 Label(type_label, classes="ef_x_type_label"),
@@ -1269,7 +1271,7 @@ class NoxenApp(App):
                                 placeholder="additional hook definitions (.json)",
                                 select_on_focus=False,
                             )
-                            yield Button("Browse", id="home_hooks_browse")
+                            yield ModalButton("Browse", id="home_hooks_browse")
                             yield Button("✕", id="home_hooks_clear")
 
                         with Horizontal(classes="connect_row"):
@@ -1280,7 +1282,7 @@ class NoxenApp(App):
                                 placeholder="additional Frida script (.js)",
                                 select_on_focus=False,
                             )
-                            yield Button("Browse", id="home_script_browse")
+                            yield ModalButton("Browse", id="home_script_browse")
                             yield Button("✕", id="home_script_clear")
 
                         with Horizontal(classes="connect_row", id="home_anr_row"):
@@ -1304,8 +1306,8 @@ class NoxenApp(App):
                     Button("✎", id="btn_edit", disabled=True),
                     Button("Cancel edit", id="btn_cancel_edit"),
                     Label("", id="intercept_header_spacer"),
-                    Button("Filters", id="btn_intercept_filters"),
-                    Button("Stack", id="btn_intercept_stack"),
+                    ModalButton("Filters", id="btn_intercept_filters"),
+                    ModalButton("Stack", id="btn_intercept_stack"),
                     id="intercept_header",
                 )
                 yield RichLog(id="intercept_output", markup=True, highlight=False, auto_scroll=False)
@@ -1386,11 +1388,11 @@ class NoxenApp(App):
                 )
             with TabPane(" History ", id="tab_history"):
                 with Horizontal(id="history_header"):
-                    yield Button("Filters", id="btn_history_filters")
-                    yield Button("Stack", id="btn_history_stack")
+                    yield ModalButton("Filters", id="btn_history_filters")
+                    yield ModalButton("Stack", id="btn_history_stack")
                     yield Label("", id="filter_bar_spacer")
                     yield Input(id="history_search", placeholder="Search", select_on_focus=False)
-                    yield Button("⊟", id="btn_columns")
+                    yield ModalButton("⊟", id="btn_columns")
                 yield HistoryTable(id="history_table")
                 yield RichLog(id="history_detail", markup=True, highlight=False, auto_scroll=False)
             with TabPane(" Monitor ", id="tab_monitor"):
