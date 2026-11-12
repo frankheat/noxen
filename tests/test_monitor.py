@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -198,6 +199,92 @@ class MonitorModelTests(unittest.TestCase):
 
 
 class MonitorUITests(IsolatedAppTestCase):
+    async def test_latest_event_search_restarts_without_timer_and_discards_stale_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "search.noxen")
+            app = NoxenApp(SimpleNamespace(project=None, new_project=path, skip_device_scan=True))
+            app.db.save_monitor_batch("search", "2026-01-01", [
+                {"id": 1, "session": 1, "time": 1, "method": "obsolete", "class": "Old"},
+                {"id": 2, "session": 1, "time": 1, "method": "latest", "class": "Zebra"},
+            ], 0, 0, "complete")
+            started, release = threading.Event(), threading.Event()
+            calls = []
+            read = app.db.monitor_event_page
+
+            def delayed_read(query, cursor, limit, cancelled, *, sort):
+                calls.append((query, sort))
+                if query == "obsolete":
+                    stale = read(query, cursor, limit, sort=sort)
+                    started.set()
+                    if not release.wait(5):
+                        raise TimeoutError("Test did not release the stale read")
+                    return stale
+                return read(query, cursor, limit, cancelled, sort=sort)
+
+            # Remove the periodic refresh so only the completion of the old
+            # read can start the last requested search.
+            with patch.object(MonitorPane, "drain", lambda self: None):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.click("#--content-tab-tab_monitor")
+                    pane = app.query_one(MonitorPane)
+                    pane.request_event_page()
+                    await wait_until(lambda: len(pane.display_events) == 2)
+                    field = app.query_one("#monitor_search", Input)
+                    with (
+                        patch.object(app.db, "monitor_event_page", delayed_read),
+                        patch.object(pane, "refresh_events", wraps=pane.refresh_events) as rendered,
+                    ):
+                        try:
+                            field.value = "obsolete"
+                            await wait_until(started.is_set)
+                            field.value = "intermediate"
+                            await wait_until(lambda: pane.event_query == "intermediate")
+                            field.value = "latest"
+                            await wait_until(lambda: pane.event_query == "latest")
+                            pane.event_sort = ("class", False)
+                            pane.request_event_page()
+                            app.db.save_monitor_batch("search", "2026-01-01", [
+                                {"id": 3, "session": 1, "time": 2, "method": "latest", "class": "Apple"},
+                            ], 0, 0, "complete")
+                        finally:
+                            release.set()
+                        await wait_until(lambda: pane.display_event_query == "latest")
+                        self.assertEqual(calls, [("obsolete", ("id", True)), ("latest", ("class", False))])
+                        rendered.assert_called_once_with("latest", reset=True)
+                        self.assertEqual([event["class"] for event in pane.display_events.values()], ["Apple", "Zebra"])
+
+                        calls.clear()
+                        rendered.reset_mock()
+                        started.clear()
+                        release.clear()
+                        try:
+                            field.value = "obsolete"
+                            await wait_until(started.is_set)
+                            field.value = "latest"
+                            await wait_until(lambda: pane.event_query == "latest")
+                            await pilot.click("#--content-tab-monitor_profiles_view")
+                        finally:
+                            release.set()
+                        await wait_until(lambda: pane.event_page_task is None)
+                        self.assertEqual(calls, [("obsolete", ("class", False))])
+                        rendered.assert_not_called()
+                        await pilot.click("#--content-tab-monitor_events_view")
+                        await wait_until(lambda: rendered.call_count == 1)
+                        rendered.assert_called_once_with("latest", reset=True)
+
+                        started.clear()
+                        release.clear()
+                        try:
+                            field.value = "obsolete"
+                            await wait_until(started.is_set)
+                            await pane.clear_events().wait()
+                            self.assertFalse(pane.display_events)
+                        finally:
+                            release.set()
+                        await wait_until(lambda: pane.event_page_task is None and not pane.event_reload)
+                        self.assertFalse(pane.display_events)
+            app.db.close()
+
     async def test_event_column_preferences_preserve_live_order_and_reopen(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "columns.noxen")

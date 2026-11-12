@@ -364,6 +364,7 @@ class MonitorPane(Vertical):
         self.display_events = {}
         self.event_page_task = None
         self.event_page_version = 0
+        self.event_query = ""
         self.next_event_cursor = None
         self.event_sort = ("id", True)
         self.display_event_sort = self.event_sort
@@ -859,52 +860,46 @@ class MonitorPane(Vertical):
         near_end = table.scroll_y + table.scrollable_content_region.height >= table.row_count - 16
         if self.event_reload:
             self.event_reload = self.dirty = False
-            mode = "reload"
+            mode, cursor = "reload", None
         elif self.next_event_cursor is not None and near_end:
-            mode = "more"
+            mode, cursor = "more", self.next_event_cursor
         elif self.dirty:
             self.dirty = False
-            mode = "updates"
+            mode, cursor = "updates", (self.event_watermark, self.event_watermark)
         else:
             return
-        self.event_page_task = asyncio.create_task(self.load_event_page(mode))
+        self.event_page_task = asyncio.create_task(self.load_event_page(
+            mode, self.event_page_version, self.event_query, self.event_sort, cursor,
+        ))
 
     @staticmethod
     def event_order_key(event):
         return event["_sort_key"], event["_db_id"]
 
-    async def load_event_page(self, mode):
-        version = self.event_page_version
-        query = self.query_one("#monitor_search", Input).value.casefold()
-        sort = self.event_sort
-
+    async def load_event_page(self, mode, version, query, sort, cursor):
         def cancelled():
             return self.clearing or self.finishing or version != self.event_page_version
 
-        if mode == "updates":
-            cursor, db_sort = (self.event_watermark, self.event_watermark), ("id", False)
-        else:
-            cursor = self.next_event_cursor if mode == "more" else None
-            db_sort = sort
+        db_sort = ("id", False) if mode == "updates" else sort
         try:
-            events, has_more, latest_id = await asyncio.to_thread(
-                self.app.db.monitor_event_page, query, cursor, self.EVENT_PAGE_SIZE, cancelled, sort=db_sort
-            )
-            if cancelled():
-                return
-            if mode == "reload":
-                self.events = events
-                self.event_watermark = latest_id
-            elif mode == "more":
-                self.events.extend(events)
-                self.event_depth = max(self.event_depth + self.EVENT_PAGE_SIZE, len(self.events))
-            else:
-                self.event_watermark = events[-1]["_db_id"] if has_more else latest_id
-                self.dirty |= has_more
-                has_more = self.merge_event_updates(events, sort)
+            if not cancelled():
+                events, has_more, latest_id = await asyncio.to_thread(
+                    self.app.db.monitor_event_page, query, cursor, self.EVENT_PAGE_SIZE, cancelled, sort=db_sort
+                )
+                if not cancelled():
+                    if mode == "reload":
+                        self.events = events
+                        self.event_watermark = latest_id
+                    elif mode == "more":
+                        self.events.extend(events)
+                        self.event_depth = max(self.event_depth + self.EVENT_PAGE_SIZE, len(self.events))
+                    else:
+                        self.event_watermark = events[-1]["_db_id"] if has_more else latest_id
+                        self.dirty |= has_more
+                        has_more = self.merge_event_updates(events, sort)
 
-            self.next_event_cursor = self.event_order_key(self.events[-1]) if has_more and self.events else None
-            self.refresh_events(query, reset=mode == "reload")
+                    self.next_event_cursor = self.event_order_key(self.events[-1]) if has_more and self.events else None
+                    self.refresh_events(query, reset=mode == "reload")
         except (OSError, sqlite3.Error, ValueError) as exc:
             if not cancelled():
                 if mode == "more":
@@ -912,6 +907,10 @@ class MonitorPane(Vertical):
                 self.app.notify(str(exc), title="Could not read Monitor events", severity="error", markup=False)
         finally:
             self.event_page_task = None
+        # Only explicit reloads bypass the timer. Live updates and scrolling
+        # still share the usual refresh cadence.
+        if self.event_reload and self.is_mounted:
+            self.refresh_page_if_visible()
 
     def merge_event_updates(self, incoming, sort):
         more = self.next_event_cursor is not None
@@ -952,6 +951,7 @@ class MonitorPane(Vertical):
         async with self.recording_lock:
             self.drain()
             self.clearing = True
+            self.request_event_page()
             try:
                 if self.recording_task is not None:
                     await self.recording_task
@@ -967,7 +967,7 @@ class MonitorPane(Vertical):
             self.lost = self.saved_unsaved = self.interrupted_recordings = 0
             self.events = []
             self.refresh_events(reset=True)
-            self.request_event_page()
+            self.refresh_page_if_visible()
 
     def refresh_event_status(self):
         parts = []
@@ -1168,7 +1168,10 @@ class MonitorPane(Vertical):
     def on_input_changed(self, event):
         event.stop()
         if event.input.id == "monitor_search" and event.value == event.input.value:
-            self.request_event_page()
+            query = event.value.casefold()
+            if query != self.event_query:
+                self.event_query = query
+                self.request_event_page()
 
     def on_button_pressed(self, event):
         event.stop()
