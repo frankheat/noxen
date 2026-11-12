@@ -22,6 +22,10 @@ function captureStamp() {
   return stamp;
 }
 
+function inspectIntent(fn) {
+  return monitor === null ? fn() : monitor.withoutRecording(fn);
+}
+
 var lock = null;
 var ObjectJava = null;
 var UriJava = null; 
@@ -1172,7 +1176,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
       modQueue = [];
     }
 
-    var infoIntent = dumpIntent(intent);
+    var infoIntent = inspectIntent(() => dumpIntent(intent));
 
     // --- SEND STACK TRACE ---
     send({
@@ -1218,10 +1222,10 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
       shouldDrop = true;
     } else if (mode === "forward") {
       if (modQueue.length > 0) {
-        var modificationResult = applyModifications(intent);
+        var modificationResult = inspectIntent(() => applyModifications(intent));
         var resultingIntent = null;
         try {
-          resultingIntent = dumpIntent(intent, true);
+          resultingIntent = inspectIntent(() => dumpIntent(intent, true));
         } catch (snapshotError) {
           modificationResult.ok = false;
           modificationResult.error = (modificationResult.error || "") +
@@ -1381,7 +1385,7 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
     if (methodName === "getIntent") {
         var resultIntent = method.apply(this, arguments);
         const stamp = captureStamp();
-        var as = buildAttackSurface(methodName, resultIntent, this, null, null);
+        var as = inspectIntent(() => buildAttackSurface(methodName, resultIntent, this, null, null));
         var shouldDrop = processIntercept(this.$className, methodName, resultIntent, null, as, stamp);
         if (shouldDrop) return null;
         return resultIntent;
@@ -1413,7 +1417,7 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
       if (permArg !== null && permArg !== undefined) sendPermission = String(permArg);
     }
 
-    var as = buildAttackSurface(methodName, intent, this, firstArg, sendPermission);
+    var as = inspectIntent(() => buildAttackSurface(methodName, intent, this, firstArg, sendPermission));
     var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as, stamp);
 
     if (shouldDrop) return defaultReturn(returnType);

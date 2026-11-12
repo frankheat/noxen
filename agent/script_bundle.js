@@ -1789,6 +1789,9 @@
       var SOCKET_ADDRESS = "java.net.SocketAddress";
       var INET_SOCKET_ADDRESS = "java.net.InetSocketAddress";
       var URI = "android.net.Uri";
+      var INTENT = "android.content.Intent";
+      var COMPONENT_NAME = "android.content.ComponentName";
+      var CLASS = "java.lang.Class";
       var STRING = "java.lang.String";
       var STRINGS = "[Ljava.lang.String;";
       var MAX_PROCESS_ARGUMENTS = 32;
@@ -1823,6 +1826,10 @@
       }
       function isWebSetting(spec) {
         return spec.profile === "webview" && spec.class === WEB_SETTINGS && spec.args.length === 1 && Object.prototype.hasOwnProperty.call(WEB_SETTING_TYPES, spec.method) && WEB_SETTING_TYPES[spec.method] === spec.args[0];
+      }
+      function webObservationKey(hooks) {
+        if (!hooks.some((s) => s.profile === "webview" && s.class === WEB_VIEW && s.method === "getSettings" && !s.args.length)) return "";
+        return hooks.filter(isWebSetting).map((s) => s.method + ":" + s.captureArguments).sort().join(",");
       }
       function isProcessExecution(spec) {
         return spec.profile === "process-execution" && (spec.class === RUNTIME && spec.method === "exec" && (spec.args[0] === STRING || spec.args[0] === STRINGS) && spec.args.length <= 3 && (spec.args.length < 2 || spec.args[1] === STRINGS) && (spec.args.length < 3 || spec.args[2] === FILE) || spec.class === PROCESS_BUILDER && spec.method === "start" && !spec.args.length);
@@ -1913,9 +1920,11 @@
       function createMonitor(Java2, sendMessage, schedule, captureStamp2 = () => ({ time: Date.now() })) {
         const installed = /* @__PURE__ */ new Map();
         const forwardingFrames = /* @__PURE__ */ new Map();
-        let revision = -1, queue = [], dropped = 0, sequence = 0, inspecting = false;
+        const inspectionDepth = /* @__PURE__ */ new Map();
+        let requestedRevision = -1, revision = -1, queue = [], dropped = 0, sequence = 0;
         let stopped = false, activeCalls = 0;
         let webViews = [], webSettingsHooks = [], statuses = [], webViewId = 0;
+        let webObservation = "", webGeneration = 0;
         let javaSystem, weakReference;
         let javaBuffer;
         function safe(fn, fallback) {
@@ -1967,6 +1976,12 @@
         }
         function argumentValue(spec, args, index) {
           const type = spec.args[index], arg = args[index];
+          if (spec.class === INTENT && arg != null && arg.$className === type) {
+            if (spec.method === "setComponent" && type === COMPONENT_NAME)
+              return textValue(type, String(Java2.cast(arg, Java2.use(type)).flattenToString()));
+            if (spec.method === "getParcelableExtra" && type === CLASS)
+              return textValue(type, String(Java2.cast(arg, Java2.use(type)).getName()));
+          }
           if (spec.class === IN_MEMORY_DEX && spec.method === "$init" && index === 0) {
             if (type === BYTE_BUFFER) return dexBuffer(arg);
             if (type === BYTE_BUFFERS && Array.isArray(arg)) {
@@ -2020,13 +2035,19 @@
             event.workingDirectory = inspect2(() => value(receiver.directory(), FILE));
           }
         }
-        function inspect2(fn) {
-          inspecting = true;
+        function withoutRecording(fn) {
+          const thread = safe(() => Process.getCurrentThreadId(), null);
+          const depth = inspectionDepth.get(thread) || 0;
+          inspectionDepth.set(thread, depth + 1);
           try {
-            return safe(fn, { captureError: true });
+            return fn();
           } finally {
-            inspecting = false;
+            if (depth) inspectionDepth.set(thread, depth);
+            else inspectionDepth.delete(thread);
           }
+        }
+        function inspect2(fn) {
+          return withoutRecording(() => safe(fn, { captureError: true }));
         }
         function objectHash(object) {
           javaSystem ??= Java2.use("java.lang.System");
@@ -2055,8 +2076,8 @@
         function publishStatus() {
           sendMessage({ noxenEvent: "monitor_status", revision, statuses });
         }
-        function observeWebResult(spec, receiver, args, result, callRevision) {
-          if (!spec || stopped || callRevision !== revision) return;
+        function observeWebResult(spec, receiver, args, result, generation) {
+          if (!spec || stopped || generation !== webGeneration) return;
           inspect2(() => {
             if (spec.class === WEB_VIEW && spec.method === "getSettings" && result != null) {
               const view = findWebView(receiver);
@@ -2111,9 +2132,9 @@
           const webSpec = webSettingsHooks.length ? specs.find((spec) => spec.profile === "webview" && spec.class === WEB_VIEW || isWebSetting(spec)) : null;
           if (queue.length >= MAX_QUEUED_EVENTS) {
             dropped++;
-            const callRevision = revision;
+            const generation = webGeneration;
             const result = method.apply(receiver, args);
-            observeWebResult(webSpec, receiver, args, result, callRevision);
+            observeWebResult(webSpec, receiver, args, result, generation);
             return result;
           }
           activeCalls++;
@@ -2124,6 +2145,7 @@
           }
         }
         function recordCall(method, receiver, args, specs, thread, webSpec) {
+          const generation = webGeneration;
           const event = {
             ...captureStamp2(),
             id: ++sequence,
@@ -2159,9 +2181,14 @@
             throw error;
           }
           event.outcome = "returned";
-          observeWebResult(webSpec, receiver, args, result, event.revision);
+          observeWebResult(webSpec, receiver, args, result, generation);
           if (specs.some((s) => s.captureReturn))
-            event.result = inspect2(() => value(result, method.returnType.className));
+            event.result = inspect2(() => {
+              const type = method.returnType.className;
+              if (event.class === INTENT && event.method === "getParcelableExtra" && result != null)
+                return { type: result.$className || type, opaque: true };
+              return value(result, type);
+            });
           if (!stopped) emit(event);
           return result;
         }
@@ -2192,9 +2219,10 @@
               if (method.implementation !== null) throw new Error("Method already hooked; Intercept or extra-script conflict");
               record = { specs: [], method };
               record.wrapper = function() {
-                if (stopped || inspecting || !record.specs.length) return method.apply(this, arguments);
+                if (stopped || !record.specs.length) return method.apply(this, arguments);
                 const specs = record.specs;
                 const thread = safe(() => Process.getCurrentThreadId(), null);
+                if (inspectionDepth.has(thread)) return method.apply(this, arguments);
                 const builtin = specs.find((s) => s.profile === "content-provider" && s.class === RESOLVER || s.profile === "file" && s.method === "$init" && FILE_CONSTRUCTORS.has(s.class) || s.profile === "crypto" && s.class === CIPHER || s.profile === "dynamic-code-loading" && s.class === IN_MEMORY_DEX && s.method === "$init" || isProcessExecution(s));
                 if (!builtin || thread === null)
                   return captureCall(method, this, arguments, specs, thread);
@@ -2212,25 +2240,43 @@
               method.implementation = record.wrapper;
               record.replacement = method.implementation;
               installed.set(key, record);
-            } else if (record.method.implementation !== record.replacement) {
-              throw new Error("Monitor hook was replaced by another script");
             }
-            if (!record.specs.includes(spec)) record.specs.push(spec);
-            status.state = "Active";
-            status.detail = "";
+            enableInstalledHook(record, spec, status);
           } catch (e) {
             status.detail = String(e).slice(0, 512);
           }
         }
+        function enableInstalledHook(record, spec, status) {
+          if (record.method.implementation !== record.replacement)
+            throw new Error("Monitor hook was replaced by another script");
+          if (!record.specs.includes(spec)) record.specs.push(spec);
+          status.state = "Active";
+          status.detail = "";
+        }
         function configure(hooks, nextRevision) {
           if (stopped) return false;
-          revision = nextRevision;
+          requestedRevision = nextRevision;
           Java2.perform(function() {
-            if (stopped || nextRevision !== revision) return;
-            installed.forEach((record) => {
+            if (stopped || nextRevision !== requestedRevision) return;
+            revision = nextRevision;
+            const nextObservation = webObservationKey(hooks);
+            const preserveWebViews = nextObservation && nextObservation === webObservation;
+            const webRecords = /* @__PURE__ */ new Map();
+            if (!preserveWebViews) {
+              webViews = [];
+              webGeneration++;
+            }
+            webObservation = nextObservation;
+            for (const record of installed.values()) {
+              if (preserveWebViews) {
+                for (const spec of record.specs) {
+                  if (!isWebSetting(spec)) continue;
+                  if (!webRecords.has(spec.method)) webRecords.set(spec.method, []);
+                  webRecords.get(spec.method).push(record);
+                }
+              }
               record.specs = [];
-            });
-            webViews = [];
+            }
             webSettingsHooks = [];
             statuses = hooks.map((spec) => {
               const status = { profile: spec.profile, index: spec.index, state: "Error", detail: "" };
@@ -2238,6 +2284,16 @@
                 status.state = "Pending";
                 status.detail = "Waiting for WebView.getSettings() to reveal the concrete settings class";
                 webSettingsHooks.push({ spec, status });
+                for (const record of webRecords.get(spec.method) || []) {
+                  try {
+                    enableInstalledHook(record, spec, status);
+                  } catch (error) {
+                    if (status.state !== "Active") {
+                      status.state = "Error";
+                      status.detail = String(error).slice(0, 512);
+                    }
+                  }
+                }
               } else {
                 installHook(spec, status);
               }
@@ -2254,7 +2310,7 @@
           dropped = 0;
           return final;
         }
-        return { configure, stop };
+        return { configure, stop, withoutRecording };
       }
       module.exports = { createMonitor };
     }
@@ -14005,6 +14061,9 @@ std_string_c_str (StdString * self)
     }
     return stamp;
   }
+  function inspectIntent(fn) {
+    return monitor === null ? fn() : monitor.withoutRecording(fn);
+  }
   var lock = null;
   var ObjectJava = null;
   var UriJava = null;
@@ -15115,7 +15174,7 @@ std_string_c_str (StdString * self)
         resumeRequested = false;
         modQueue = [];
       }
-      var infoIntent = dumpIntent(intent);
+      var infoIntent = inspectIntent(() => dumpIntent(intent));
       send({
         ...stamp,
         "noxenEvent": "intent",
@@ -15151,10 +15210,10 @@ std_string_c_str (StdString * self)
         shouldDrop = true;
       } else if (mode === "forward") {
         if (modQueue.length > 0) {
-          var modificationResult = applyModifications(intent);
+          var modificationResult = inspectIntent(() => applyModifications(intent));
           var resultingIntent = null;
           try {
-            resultingIntent = dumpIntent(intent, true);
+            resultingIntent = inspectIntent(() => dumpIntent(intent, true));
           } catch (snapshotError) {
             modificationResult.ok = false;
             modificationResult.error = (modificationResult.error || "") + " (resulting Intent could not be captured: " + String(snapshotError).slice(0, 150) + ")";
@@ -15291,7 +15350,7 @@ std_string_c_str (StdString * self)
       if (methodName === "getIntent") {
         var resultIntent = method.apply(this, arguments);
         const stamp2 = captureStamp();
-        var as = buildAttackSurface(methodName, resultIntent, this, null, null);
+        var as = inspectIntent(() => buildAttackSurface(methodName, resultIntent, this, null, null));
         var shouldDrop = processIntercept(this.$className, methodName, resultIntent, null, as, stamp2);
         if (shouldDrop) return null;
         return resultIntent;
@@ -15317,7 +15376,7 @@ std_string_c_str (StdString * self)
         var permArg = arguments[broadcastPermIndex];
         if (permArg !== null && permArg !== void 0) sendPermission = String(permArg);
       }
-      var as = buildAttackSurface(methodName, intent, this, firstArg, sendPermission);
+      var as = inspectIntent(() => buildAttackSurface(methodName, intent, this, firstArg, sendPermission));
       var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as, stamp);
       if (shouldDrop) return defaultReturn(returnType);
       return method.apply(this, arguments);

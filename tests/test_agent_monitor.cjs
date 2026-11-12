@@ -15,9 +15,61 @@ function fixture(original = x => x, methodName = 'run') {
   const monitor = createMonitor(Java, m => messages.push(m), fn => { flush = fn; });
   const hook = { class: 'Example', method: methodName, args: ['java.lang.String'], profile: 'a',
     profileName: 'A', index: 0, captureArguments: true, captureReturn: true, captureStack: false };
-  return { method, monitor, hook, messages, flush: () => flush(), calls: () => calls,
+  return { Java, method, monitor, hook, messages, flush: () => flush(), calls: () => calls,
     settle: () => { while (pending.length) pending.shift()(); } };
 }
+
+test('suppression is nested, local to the current thread and restored on error', () => {
+  const f = fixture();
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+  const previous = global.Process;
+  let thread = 1;
+  global.Process = { getCurrentThreadId: () => thread };
+  const call = text => f.method.implementation(text);
+  const error = new Error('inspection failed');
+  try {
+    assert.throws(() => f.monitor.withoutRecording(() => {
+      assert.equal(call('outer'), 'outer');
+      f.monitor.withoutRecording(() => assert.equal(call('inner'), 'inner'));
+      assert.equal(call('outer again'), 'outer again');
+      thread = 2;
+      assert.equal(call('other thread'), 'other thread');
+      thread = 1;
+      throw error;
+    }), thrown => thrown === error);
+    assert.equal(call('after'), 'after');
+    assert.deepEqual(f.monitor.stop().events.map(event => event.arguments[0].value), ['other thread', 'after']);
+  } finally {
+    global.Process = previous;
+  }
+});
+
+test('Intent parcelable getter observes the returned type without traversing the object', () => {
+  const result = { $className: 'android.content.Intent', getExtras() { assert.fail('must stay opaque'); } };
+  const f = fixture(key => key === 'next' ? result : null, 'getParcelableExtra');
+  f.monitor.configure([Object.assign(f.hook, { class: 'android.content.Intent' })], 0);
+  f.settle();
+  assert.equal(f.method.implementation('next'), result);
+  assert.equal(f.method.implementation('missing'), null);
+  const [present, missing] = f.monitor.stop().events;
+  assert.deepEqual(present.result, { type: 'android.content.Intent', opaque: true });
+  assert.equal(missing.result.value, null);
+
+  const typed = fixture(() => result, 'getParcelableExtra');
+  typed.Java.cast = value => value;
+  typed.monitor.configure([Object.assign(typed.hook, {
+    class: 'android.content.Intent', args: ['java.lang.String', 'java.lang.Class'],
+  })], 0);
+  typed.settle();
+  const expected = { $className: 'java.lang.Class', getName: () => 'android.content.Intent' };
+  assert.equal(typed.method.implementation('next', expected), result);
+  const [event] = typed.monitor.stop().events;
+  assert.deepEqual(event.arguments[1], {
+    type: 'java.lang.Class', value: 'android.content.Intent', truncated: false,
+  });
+  assert.deepEqual(event.result, { type: 'android.content.Intent', opaque: true });
+});
 
 test('preserves exact return, this, args and exception; unknown objects are opaque', () => {
   const exception = { $className: 'TestException' };
@@ -266,7 +318,7 @@ test('resolver read stream folds a delegated typed open but keeps explicit typed
     ['openInputStream', 'openTypedAssetFileDescriptor']);
 });
 
-test('WebView load snapshots stay tied to the view even when identity hashes collide', () => {
+test('WebView observations survive unrelated hook edits and distinguish colliding identities', () => {
   const messages = [];
   const exception = { $className: 'java.lang.IllegalArgumentException' };
   const implementation = { getName: () => 'app.Settings', getClassLoader: () => null };
@@ -278,25 +330,31 @@ test('WebView load snapshots stay tied to the view even when identity hashes col
   const setter = makeMethod('setJavaScriptEnabled', (_, [value]) => {
     if (value === 'invalid') throw exception;
   });
+  const read = makeMethod('getDataString', () => 'data');
   const Java = {
     perform: fn => fn(),
+    backtrace: () => ({ frames: [{ signature: 'app.Activity.open()' }] }),
     use: clazz => {
       if (clazz === 'java.lang.System') return { identityHashCode: () => 1 };
       if (clazz === 'java.lang.ref.WeakReference') return { $new: object => ({ get: () => object }) };
       if (clazz === 'android.webkit.WebView') return {
         getSettings: { overload: () => getter }, loadUrl: { overload: () => load },
       };
+      if (clazz === 'android.content.Intent') return { getDataString: { overload: () => read } };
       assert.equal(clazz, 'app.Settings');
       return { setJavaScriptEnabled: { overload: () => setter } };
     },
   };
   const monitor = createMonitor(Java, message => messages.push(structuredClone(message)), () => {});
   const base = { profile: 'webview', profileName: 'WebView', captureArguments: true, captureReturn: false };
-  monitor.configure([
+  const webHooks = [
     { ...base, class: 'android.webkit.WebView', method: 'getSettings', args: [], index: 0 },
     { ...base, class: 'android.webkit.WebView', method: 'loadUrl', args: ['java.lang.String'], index: 1 },
     { ...base, class: 'android.webkit.WebSettings', method: 'setJavaScriptEnabled', args: ['boolean'], index: 2 },
-  ], 0);
+  ];
+  const intent = { ...base, profile: 'intent', profileName: 'Intent', index: 0,
+    class: 'android.content.Intent', method: 'getDataString', args: [] };
+  monitor.configure([...webHooks, intent], 0);
   assert.equal(messages.at(-1).statuses[2].state, 'Pending');
   function view() {
     return { $isSameObject(other) { return this === other; },
@@ -313,13 +371,25 @@ test('WebView load snapshots stay tied to the view even when identity hashes col
   assert.throws(() => setter.implementation.call(a.settings, 'invalid'), error => error === exception);
   load.implementation.call(a, 'a after failed change');
   load.implementation.call(b, 'b');
+  monitor.configure([...webHooks, { ...intent, captureStack: true }], 1);
+  assert.equal(messages.at(-1).revision, 1);
+  assert.equal(messages.at(-1).statuses[2].state, 'Active');
+  load.implementation.call(a, 'a after reconfigure');
+  read.implementation.call({});
   setter.implementation.call(a.settings, false);
   load.implementation.call(a, 'a after successful change');
+  monitor.configure(webHooks.map(spec => spec.index === 2 ? { ...spec, captureArguments: false } : spec), 2);
+  assert.equal(messages.at(-1).statuses[2].state, 'Pending');
+  getter.implementation.call(a);
+  setter.implementation.call(a.settings, true);
+  load.implementation.call(a, 'a without setting capture');
 
-  const events = monitor.stop().events.filter(event => event.method === 'loadUrl');
-  assert.deepEqual(events.map(event => event.webViewId), [1, 1, 1, 2, 1]);
+  const captured = monitor.stop().events;
+  assert.deepEqual(captured.find(event => event.method === 'getDataString').stack, ['app.Activity.open()']);
+  const events = captured.filter(event => event.method === 'loadUrl');
+  assert.deepEqual(events.map(event => event.webViewId), [1, 1, 1, 2, 1, 1, 3]);
   assert.deepEqual(events.map(event => event.webViewSettings.setJavaScriptEnabled),
-    [undefined, true, true, false, false]);
+    [undefined, true, true, false, true, false, undefined]);
 });
 
 test('process capture bounds argument vectors and leaves application lists opaque', () => {

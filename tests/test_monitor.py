@@ -310,6 +310,8 @@ class MonitorModelTests(unittest.TestCase):
         self.assertEqual(load_profiles(json.dumps(version_eight)), (profiles, None))
         version_nine = {"version": 9, "profiles": profiles[:10]}
         self.assertEqual(load_profiles(json.dumps(version_nine)), (profiles, None))
+        version_ten = {"version": 10, "profiles": profiles[:11]}
+        self.assertEqual(load_profiles(json.dumps(version_ten)), (profiles, None))
         current = {"version": PROFILE_FORMAT_VERSION, "profiles": profiles[:1]}
         self.assertEqual(load_profiles(json.dumps(current)), (profiles[:1], None))
         self.assertEqual(enabled_hooks(profiles), [])
@@ -413,8 +415,74 @@ class MonitorModelTests(unittest.TestCase):
         })
         self.assertIn("Priority [int] : 5 (WARN)", println)
 
+    def test_intent_profile_reports_requested_flags_and_parcelable_type(self):
+        detail = event_detail({
+            "class": "android.content.Intent", "method": "addFlags", "types": ["int"],
+            "arguments": [{"type": "int", "value": 1}],
+        })
+        self.assertIn("Flags [int] : 0x00000001 (FLAG_GRANT_READ_URI_PERMISSION)", detail)
+        detail = event_detail({
+            "class": "android.content.Intent", "method": "getParcelableExtra",
+            "types": ["java.lang.String", "java.lang.Class"],
+            "arguments": [{"type": "java.lang.String", "value": "next"},
+                          {"type": "java.lang.Class", "value": "android.content.Intent"}],
+            "result": {"type": "android.content.Intent", "opaque": True},
+        })
+        self.assertIn('Key [java.lang.String] : "next"', detail)
+        self.assertIn('Expected class [java.lang.Class] : "android.content.Intent"', detail)
+        self.assertIn("[android.content.Intent] : opaque object", detail)
+
 
 class MonitorUITests(IsolatedAppTestCase):
+    async def test_hook_edit_keeps_resolved_states_until_the_current_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "hook-edit.noxen")
+            app = NoxenApp(SimpleNamespace(project=None, new_project=path, skip_device_scan=True))
+            profile = next(p for p in default_profiles() if p["id"] == "intent")
+            profile["enabled"] = True
+            profile["hooks"] = profile["hooks"][:2]
+            app.db.set_info("monitor_profiles", json.dumps({
+                "version": PROFILE_FORMAT_VERSION, "profiles": [profile],
+            }))
+            async with app.run_test(size=(110, 36)) as pilot:
+                pane = app.query_one(MonitorPane)
+                requests = []
+                session = SimpleNamespace(
+                    configure_monitor=lambda hooks, revision: requests.append((hooks, revision)),
+                    cleanup=lambda: None,
+                )
+                app.frida_session = session
+                pane.begin_session(session)
+
+                def report(revision, states):
+                    pane.receive(session, {"noxenEvent": "monitor_status", "revision": revision,
+                        "statuses": [{"profile": "intent", "index": index, "state": state, "detail": ""}
+                                     for index, state in enumerate(states)]})
+
+                await pilot.click("#--content-tab-tab_monitor")
+                await pilot.click("#--content-tab-monitor_profiles_view")
+                table = app.query_one("#monitor_hooks", DataTable)
+                report(0, ["Active", "Active"])
+                pane.drain()
+                table.move_cursor(row=0)
+                await pilot.click("#monitor_edit")
+                app.screen.query_one("#captureStack", Switch).value = True
+                await pilot.click("#monitor_save")
+                await wait_until(lambda: bool(requests))
+                self.assertTrue(requests[-1][0][0]["captureStack"])
+                self.assertEqual([table.get_row_at(i)[0] for i in range(2)], ["Active", "Active"])
+
+                await pilot.click("#monitor_edit")
+                app.screen.query_one("#monitor_method", Input).value = "getAction"
+                app.screen.query_one("#monitor_args", Input).value = ""
+                await pilot.click("#monitor_save")
+                await wait_until(lambda: len(requests) == 2)
+                self.assertEqual([table.get_row_at(i)[0] for i in range(2)], ["Pending", "Active"])
+                report(2, ["Error", "Active"])
+                report(1, ["Active", "Active"])
+                pane.drain()
+                self.assertEqual([table.get_row_at(i)[0] for i in range(2)], ["Error", "Active"])
+
     async def test_capture_order_column_is_optional_and_sorts_numerically_in_both_tables(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "capture-columns.noxen")

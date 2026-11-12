@@ -6,12 +6,13 @@ import uuid
 
 from rich.text import Text
 
-from noxen.rendering import (capture_datetime, capture_order_label, capture_order_sort_value, detail_field_prefix,
+from noxen.rendering import (capture_datetime, capture_order_label, capture_order_sort_value, decode_intent_flags, detail_field_prefix,
                              format_capture_time, format_uri_grant_flags)
 
 MAX_PROFILES = 32
 MAX_HOOKS = 128
-PROFILE_FORMAT_VERSION = 10
+PROFILE_FORMAT_VERSION = 11
+_INTENT = "android.content.Intent"
 _RESOLVER = "android.content.ContentResolver"
 _SQLITE = "android.database.sqlite.SQLiteDatabase"
 _ANDROID_LOG = "android.util.Log"
@@ -296,6 +297,25 @@ def default_profiles():
             )
         ],
     })
+    profiles.append({
+        "id": "intent", "name": "Intent", "enabled": False,
+        "hooks": [
+            validate_hook({"class": _INTENT, "method": method, "args": args,
+                           "captureReturn": method.startswith("get")})
+            for method, args in (
+                ("getStringExtra", [_STRING]),
+                ("getData", []),
+                ("getDataString", []),
+                ("getParcelableExtra", [_STRING]),
+                ("getParcelableExtra", [_STRING, "java.lang.Class"]),
+                ("setComponent", ["android.content.ComponentName"]),
+                ("setPackage", [_STRING]),
+                ("setFlags", ["int"]),
+                ("addFlags", ["int"]),
+                ("removeFlags", ["int"]),
+            )
+        ],
+    })
     return profiles
 
 
@@ -417,6 +437,15 @@ def display_value(value):
 def _argument_names(event):
     clazz = event.get("class")
     method, types = event.get("method"), event.get("types", [])
+    if clazz == _INTENT:
+        if method in ("getStringExtra", "getParcelableExtra"):
+            return ("Key", "Expected class")
+        if method == "setComponent":
+            return ("Component",)
+        if method == "setPackage":
+            return ("Package",)
+        if method in ("setFlags", "addFlags", "removeFlags"):
+            return ("Flags",)
     if clazz == _WEB_SETTINGS and method in _WEB_SETTING_LABELS:
         return (_WEB_SETTING_LABELS[method],)
     if clazz == _DEX_CLASS_LOADER and method == "$init":
@@ -592,6 +621,10 @@ def render_event_detail(event) -> Text:
             flags = value.get("value")
             if name == "Mode flags" and type(flags) is int:
                 rendered = f"0x{flags & 0xffffffff:08X} ({format_uri_grant_flags(flags)})"
+            if event.get("class") == _INTENT and name == "Flags" and type(flags) is int:
+                rendered = f"0x{flags & 0xffffffff:08X}"
+                if labels := decode_intent_flags(flags):
+                    rendered += f" ({' | '.join(labels)})"
             if name == "Context flags" and type(flags) is int:
                 labels = " | ".join(label for bit, label in _PACKAGE_CONTEXT_FLAGS.items() if flags & bit)
                 rendered = f"0x{flags & 0xffffffff:08X}"

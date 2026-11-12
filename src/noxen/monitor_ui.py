@@ -540,7 +540,7 @@ class MonitorPane(Vertical):
             return "Disabled", ""
         if self.session is None or self.session is not self.app.frida_session:
             return "Not connected", ""
-        return self.statuses.get((profile["id"], row), ("Pending", ""))
+        return self.statuses.get((profile["id"], signature(profile["hooks"][row])), ("Pending", ""))
 
     def show_hook(self):
         row = self.query_one("#monitor_hooks", DataTable).cursor_row
@@ -651,6 +651,8 @@ class MonitorPane(Vertical):
             self.app.notify(str(exc), severity="error")
             return
         self.profiles = profiles
+        enabled = {(hook["profile"], signature(hook)) for hook in enabled_hooks(profiles)}
+        self.statuses = {key: status for key, status in self.statuses.items() if key in enabled}
         self.refresh_profiles(selected)
         self.apply_configuration()
 
@@ -693,7 +695,8 @@ class MonitorPane(Vertical):
             if session is not self.session:
                 return
             if payload.get("noxenEvent") == "monitor_status":
-                self.pending_status = payload
+                if payload.get("revision") == self.revision:
+                    self.pending_status = payload
                 return
             for event in payload.get("events", []):
                 self.app.db.observe_capture_order(event)
@@ -704,8 +707,6 @@ class MonitorPane(Vertical):
 
     def apply_configuration(self):
         self.revision += 1
-        self.statuses.clear()
-        self.refresh_hooks()
         if self.session is self.app.frida_session and self.session is not None:
             self.configure_worker(self.session, enabled_hooks(self.profiles), self.revision)
 
@@ -747,7 +748,15 @@ class MonitorPane(Vertical):
         for payload in messages:
             if payload.get("noxenEvent") == "monitor_status":
                 if payload.get("revision") == self.revision:
-                    self.statuses = {(s["profile"], s["index"]): (s["state"], s["detail"]) for s in payload["statuses"]}
+                    keys = {
+                        (hook["profile"], hook["index"]): (hook["profile"], signature(hook))
+                        for hook in enabled_hooks(self.profiles)
+                    }
+                    self.statuses = {
+                        keys[key]: (s["state"], s["detail"])
+                        for s in payload["statuses"]
+                        if (key := (s["profile"], s["index"])) in keys
+                    }
                     self.refresh_hooks()
             else:
                 lost += payload.get("dropped", 0)

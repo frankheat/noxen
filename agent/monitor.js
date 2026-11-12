@@ -26,6 +26,9 @@ const URL_CLASS = 'java.net.URL';
 const SOCKET_ADDRESS = 'java.net.SocketAddress';
 const INET_SOCKET_ADDRESS = 'java.net.InetSocketAddress';
 const URI = 'android.net.Uri';
+const INTENT = 'android.content.Intent';
+const COMPONENT_NAME = 'android.content.ComponentName';
+const CLASS = 'java.lang.Class';
 const STRING = 'java.lang.String';
 const STRINGS = '[Ljava.lang.String;';
 const MAX_PROCESS_ARGUMENTS = 32;
@@ -57,6 +60,12 @@ function isWebSetting(spec) {
   return spec.profile === 'webview' && spec.class === WEB_SETTINGS && spec.args.length === 1
     && Object.prototype.hasOwnProperty.call(WEB_SETTING_TYPES, spec.method)
     && WEB_SETTING_TYPES[spec.method] === spec.args[0];
+}
+
+function webObservationKey(hooks) {
+  if (!hooks.some(s => s.profile === 'webview' && s.class === WEB_VIEW
+      && s.method === 'getSettings' && !s.args.length)) return '';
+  return hooks.filter(isWebSetting).map(s => s.method + ':' + s.captureArguments).sort().join(',');
 }
 
 function isProcessExecution(spec) {
@@ -177,9 +186,11 @@ function forwardsTo(parent, spec, receiver, args) {
 function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time: Date.now() })) {
   const installed = new Map();
   const forwardingFrames = new Map();
-  let revision = -1, queue = [], dropped = 0, sequence = 0, inspecting = false;
+  const inspectionDepth = new Map();
+  let requestedRevision = -1, revision = -1, queue = [], dropped = 0, sequence = 0;
   let stopped = false, activeCalls = 0;
   let webViews = [], webSettingsHooks = [], statuses = [], webViewId = 0;
+  let webObservation = '', webGeneration = 0;
   let javaSystem, weakReference;
   let javaBuffer;
   function safe(fn, fallback) { try { return fn(); } catch (_) { return fallback; } }
@@ -231,6 +242,12 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
   }
   function argumentValue(spec, args, index) {
     const type = spec.args[index], arg = args[index];
+    if (spec.class === INTENT && arg != null && arg.$className === type) {
+      if (spec.method === 'setComponent' && type === COMPONENT_NAME)
+        return textValue(type, String(Java.cast(arg, Java.use(type)).flattenToString()));
+      if (spec.method === 'getParcelableExtra' && type === CLASS)
+        return textValue(type, String(Java.cast(arg, Java.use(type)).getName()));
+    }
     if (spec.class === IN_MEMORY_DEX && spec.method === '$init' && index === 0) {
       if (type === BYTE_BUFFER) return dexBuffer(arg);
       if (type === BYTE_BUFFERS && Array.isArray(arg)) {
@@ -292,9 +309,19 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
       event.workingDirectory = inspect(() => value(receiver.directory(), FILE));
     }
   }
+  function withoutRecording(fn) {
+    const thread = safe(() => Process.getCurrentThreadId(), null);
+    const depth = inspectionDepth.get(thread) || 0;
+    inspectionDepth.set(thread, depth + 1);
+    try {
+      return fn();
+    } finally {
+      if (depth) inspectionDepth.set(thread, depth);
+      else inspectionDepth.delete(thread);
+    }
+  }
   function inspect(fn) {
-    inspecting = true;
-    try { return safe(fn, { captureError: true }); } finally { inspecting = false; }
+    return withoutRecording(() => safe(fn, { captureError: true }));
   }
   function objectHash(object) {
     javaSystem ??= Java.use('java.lang.System');
@@ -323,8 +350,8 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
   function publishStatus() {
     sendMessage({ noxenEvent: 'monitor_status', revision: revision, statuses: statuses });
   }
-  function observeWebResult(spec, receiver, args, result, callRevision) {
-    if (!spec || stopped || callRevision !== revision) return;
+  function observeWebResult(spec, receiver, args, result, generation) {
+    if (!spec || stopped || generation !== webGeneration) return;
     inspect(() => {
       if (spec.class === WEB_VIEW && spec.method === 'getSettings' && result != null) {
         const view = findWebView(receiver);
@@ -377,9 +404,9 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
       (spec.profile === 'webview' && spec.class === WEB_VIEW) || isWebSetting(spec)) : null;
     if (queue.length >= MAX_QUEUED_EVENTS) {
       dropped++;
-      const callRevision = revision;
+      const generation = webGeneration;
       const result = method.apply(receiver, args);
-      observeWebResult(webSpec, receiver, args, result, callRevision);
+      observeWebResult(webSpec, receiver, args, result, generation);
       return result;
     }
     activeCalls++;
@@ -390,6 +417,7 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
     }
   }
   function recordCall(method, receiver, args, specs, thread, webSpec) {
+    const generation = webGeneration;
     const event = { ...captureStamp(), id: ++sequence, revision: revision,
       profiles: specs.map(s => s.profileName),
       class: specs[0].class, method: specs[0].method, types: specs[0].args,
@@ -418,9 +446,14 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
       throw error;
     }
     event.outcome = 'returned';
-    observeWebResult(webSpec, receiver, args, result, event.revision);
+    observeWebResult(webSpec, receiver, args, result, generation);
     if (specs.some(s => s.captureReturn))
-      event.result = inspect(() => value(result, method.returnType.className));
+      event.result = inspect(() => {
+        const type = method.returnType.className;
+        if (event.class === INTENT && event.method === 'getParcelableExtra' && result != null)
+          return { type: result.$className || type, opaque: true };
+        return value(result, type);
+      });
     if (!stopped) emit(event);
     return result;
   }
@@ -448,9 +481,10 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
         if (method.implementation !== null) throw new Error('Method already hooked; Intercept or extra-script conflict');
         record = { specs: [], method: method };
         record.wrapper = function () {
-          if (stopped || inspecting || !record.specs.length) return method.apply(this, arguments);
+          if (stopped || !record.specs.length) return method.apply(this, arguments);
           const specs = record.specs;
           const thread = safe(() => Process.getCurrentThreadId(), null);
+          if (inspectionDepth.has(thread)) return method.apply(this, arguments);
           const builtin = specs.find(s =>
             (s.profile === 'content-provider' && s.class === RESOLVER)
             || (s.profile === 'file' && s.method === '$init' && FILE_CONSTRUCTORS.has(s.class))
@@ -473,21 +507,42 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
         method.implementation = record.wrapper;
         record.replacement = method.implementation;
         installed.set(key, record);
-      } else if (record.method.implementation !== record.replacement) {
-        throw new Error('Monitor hook was replaced by another script');
       }
-      if (!record.specs.includes(spec)) record.specs.push(spec);
-      status.state = 'Active';
-      status.detail = '';
+      enableInstalledHook(record, spec, status);
     } catch (e) { status.detail = String(e).slice(0, 512); }
   }
+  function enableInstalledHook(record, spec, status) {
+    if (record.method.implementation !== record.replacement)
+      throw new Error('Monitor hook was replaced by another script');
+    if (!record.specs.includes(spec)) record.specs.push(spec);
+    status.state = 'Active';
+    status.detail = '';
+  }
+
   function configure(hooks, nextRevision) {
     if (stopped) return false;
-    revision = nextRevision;
+    requestedRevision = nextRevision;
     Java.perform(function () {
-      if (stopped || nextRevision !== revision) return;
-      installed.forEach(record => { record.specs = []; });
-      webViews = [];
+      if (stopped || nextRevision !== requestedRevision) return;
+      revision = nextRevision;
+      const nextObservation = webObservationKey(hooks);
+      const preserveWebViews = nextObservation && nextObservation === webObservation;
+      const webRecords = new Map();
+      if (!preserveWebViews) {
+        webViews = [];
+        webGeneration++;
+      }
+      webObservation = nextObservation;
+      for (const record of installed.values()) {
+        if (preserveWebViews) {
+          for (const spec of record.specs) {
+            if (!isWebSetting(spec)) continue;
+            if (!webRecords.has(spec.method)) webRecords.set(spec.method, []);
+            webRecords.get(spec.method).push(record);
+          }
+        }
+        record.specs = [];
+      }
       webSettingsHooks = [];
       statuses = hooks.map(spec => {
         const status = { profile: spec.profile, index: spec.index, state: 'Error', detail: '' };
@@ -495,6 +550,16 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
           status.state = 'Pending';
           status.detail = 'Waiting for WebView.getSettings() to reveal the concrete settings class';
           webSettingsHooks.push({ spec: spec, status: status });
+          for (const record of webRecords.get(spec.method) || []) {
+            try {
+              enableInstalledHook(record, spec, status);
+            } catch (error) {
+              if (status.state !== 'Active') {
+                status.state = 'Error';
+                status.detail = String(error).slice(0, 512);
+              }
+            }
+          }
         } else {
           installHook(spec, status);
         }
@@ -511,6 +576,6 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
     dropped = 0;
     return final;
   }
-  return { configure, stop };
+  return { configure, stop, withoutRecording };
 }
 module.exports = { createMonitor };
