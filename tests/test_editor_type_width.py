@@ -27,6 +27,7 @@ class EditorTypeWidthTests(IsolatedAppTestCase):
             app._enter_edit_mode()
             app._add_edit_extra_row("", "string", "", is_new=True)
             await pilot.pause()
+            form = app.query_one("#edit_form")
             selector = app.query_one(".ef_x_type_select", Select)
             current = selector.query_one("SelectCurrent")
             option_label = current.query_one("#label")
@@ -37,8 +38,10 @@ class EditorTypeWidthTests(IsolatedAppTestCase):
                 app.theme = theme
                 for width in (120, 80, 72, 60):
                     with self.subTest(theme=theme, width=width):
-                        await pilot.resize_terminal(width, 60)
+                        await pilot.resize_terminal(width, 45 if width == 60 else 60)
                         await pilot.pause()
+                        if width == 60:
+                            self.assertTrue(form.show_vertical_scrollbar)
                         self.assertEqual(selector.region.width, 16)
                         self.assertEqual(header.region.width, 16)
                         self.assertEqual(option_label.content_region.x, header.content_region.x)
