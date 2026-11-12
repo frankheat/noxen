@@ -4,11 +4,35 @@ const RESOLVER = 'android.content.ContentResolver';
 const SQLITE = 'android.database.sqlite.SQLiteDatabase';
 const ANDROID_LOG = 'android.util.Log';
 const CIPHER = 'javax.crypto.Cipher';
+const RUNTIME = 'java.lang.Runtime';
+const PROCESS_BUILDER = 'java.lang.ProcessBuilder';
+const IN_MEMORY_DEX = 'dalvik.system.InMemoryDexClassLoader';
+const BYTE_BUFFER = 'java.nio.ByteBuffer';
+const BYTE_BUFFERS = '[Ljava.nio.ByteBuffer;';
+const MAX_DEX_BUFFERS = 8;
+const WEB_VIEW = 'android.webkit.WebView';
+const WEB_SETTINGS = 'android.webkit.WebSettings';
+const WEB_SETTING_TYPES = {
+  setJavaScriptEnabled: 'boolean',
+  setAllowFileAccess: 'boolean',
+  setAllowContentAccess: 'boolean',
+  setAllowFileAccessFromFileURLs: 'boolean',
+  setAllowUniversalAccessFromFileURLs: 'boolean',
+  setMixedContentMode: 'int',
+};
+const WEB_LOAD_METHODS = new Set(['loadUrl', 'postUrl', 'loadData', 'loadDataWithBaseURL']);
+const MAX_TRACKED_WEB_VIEWS = 128;
 const URL_CLASS = 'java.net.URL';
 const SOCKET_ADDRESS = 'java.net.SocketAddress';
 const INET_SOCKET_ADDRESS = 'java.net.InetSocketAddress';
 const URI = 'android.net.Uri';
 const STRING = 'java.lang.String';
+const STRINGS = '[Ljava.lang.String;';
+const MAX_PROCESS_ARGUMENTS = 32;
+const PROCESS_LIST_TYPES = new Set([
+  'java.util.ArrayList', 'java.util.Arrays$ArrayList',
+  'java.util.Collections$EmptyList', 'java.util.Collections$SingletonList',
+]);
 const FILE = 'java.io.File';
 const FILES = 'java.nio.file.Files';
 const PATH = 'java.nio.file.Path';
@@ -29,11 +53,62 @@ function sameObject(a, b) {
   return left != null && right != null && left.$isSameObject(right);
 }
 
+function isWebSetting(spec) {
+  return spec.profile === 'webview' && spec.class === WEB_SETTINGS && spec.args.length === 1
+    && Object.prototype.hasOwnProperty.call(WEB_SETTING_TYPES, spec.method)
+    && WEB_SETTING_TYPES[spec.method] === spec.args[0];
+}
+
+function isProcessExecution(spec) {
+  return spec.profile === 'process-execution'
+    && ((spec.class === RUNTIME && spec.method === 'exec'
+      && (spec.args[0] === STRING || spec.args[0] === STRINGS) && spec.args.length <= 3
+      && (spec.args.length < 2 || spec.args[1] === STRINGS)
+      && (spec.args.length < 3 || spec.args[2] === FILE))
+      || (spec.class === PROCESS_BUILDER && spec.method === 'start' && !spec.args.length));
+}
+
+function commandString(value) {
+  if (typeof value === 'string' || value == null) return value;
+  return value.$className === STRING ? String(value.toString()) : undefined;
+}
+
+function builderCommand(builder) {
+  const list = builder.command();
+  return list && PROCESS_LIST_TYPES.has(list.$className) ? list : null;
+}
+
+function processForwardsTo(parent, spec, receiver, args) {
+  if (parent.spec.class !== RUNTIME) return false;
+  const outer = parent.args;
+  const inputType = parent.spec.args[0];
+  if (spec.class === RUNTIME) {
+    if (args.length !== 3 || !sameObject(parent.receiver, receiver)) return false;
+    if (!sameObject(outer[1] ?? null, args[1]) || !sameObject(outer[2] ?? null, args[2])) return false;
+    // Runtime's string overload tokenizes before dispatching to the vector overload.
+    if (inputType === STRING && spec.args[0] === STRINGS) return true;
+    return outer.length < 3 && inputType === spec.args[0] && sameObject(outer[0], args[0]);
+  }
+  if (inputType !== STRINGS || outer.length !== 3 || !Array.isArray(outer[0])) return false;
+  const list = builderCommand(receiver);
+  if (!list || !sameObject(outer[2], receiver.directory())) return false;
+  const count = list.size();
+  if (count !== outer[0].length) return false;
+  // The framework constructs this builder directly from the vector. Check a
+  // bounded prefix as well, so a different nested start is recorded separately.
+  for (let i = 0; i < Math.min(count, MAX_PROCESS_ARGUMENTS); i++) {
+    const element = commandString(list.get(i));
+    if (element === undefined || element !== commandString(outer[0][i])) return false;
+  }
+  return true;
+}
+
 // Match only known overload forwarding on the same Java object. Nested calls
 // keep their own frame, even when their built-in event is folded.
 function forwardsTo(parent, spec, receiver, args) {
-  if (!parent || parent.spec.profile !== spec.profile || parent.spec.class !== spec.class
-      || !sameObject(parent.receiver, receiver)) return false;
+  if (!parent || parent.spec.profile !== spec.profile) return false;
+  if (isProcessExecution(spec)) return processForwardsTo(parent, spec, receiver, args);
+  if (parent.spec.class !== spec.class || !sameObject(parent.receiver, receiver)) return false;
   const outer = parent.args;
   if (parent.spec.method !== spec.method) {
     // ContentResolver read opens can delegate through openAssetFileDescriptor.
@@ -50,6 +125,14 @@ function forwardsTo(parent, spec, receiver, args) {
     return spec.method === 'init' && to.length === from.length + 1
       && to[to.length - 1] === 'java.security.SecureRandom' && outer[0] === args[0]
       && from.slice(1).every((type, i) => type === to[i + 1] && sameObject(outer[i + 1], args[i + 1]));
+  }
+  if (spec.class === IN_MEMORY_DEX) {
+    if (spec.args[0] !== BYTE_BUFFERS || outer.length !== 2
+        || !sameObject(outer[1], args[args.length - 1])
+        || (args.length === 3 && args[1] != null)) return false;
+    if (parent.spec.args[0] === BYTE_BUFFER)
+      return Array.isArray(args[0]) && args[0].length === 1 && sameObject(outer[0], args[0][0]);
+    return args.length === 3 && sameObject(outer[0], args[0]);
   }
   if (spec.method === '$init') {
     const from = parent.spec.args[0], to = spec.args[0];
@@ -96,6 +179,9 @@ function createMonitor(Java, sendMessage, schedule) {
   const forwardingFrames = new Map();
   let revision = -1, queue = [], dropped = 0, sequence = 0, inspecting = false;
   let stopped = false, activeCalls = 0;
+  let webViews = [], webSettingsHooks = [], statuses = [], webViewId = 0;
+  let javaSystem, weakReference;
+  let javaBuffer;
   function safe(fn, fallback) { try { return fn(); } catch (_) { return fallback; } }
   function textValue(type, text, limit = 2048) {
     return { type: type, value: text.slice(0, limit), truncated: text.length > limit };
@@ -145,6 +231,14 @@ function createMonitor(Java, sendMessage, schedule) {
   }
   function argumentValue(spec, args, index) {
     const type = spec.args[index], arg = args[index];
+    if (spec.class === IN_MEMORY_DEX && spec.method === '$init' && index === 0) {
+      if (type === BYTE_BUFFER) return dexBuffer(arg);
+      if (type === BYTE_BUFFERS && Array.isArray(arg)) {
+        const items = arg.slice(0, MAX_DEX_BUFFERS).map(buffer =>
+          safe(() => dexBuffer(buffer), { type: BYTE_BUFFER, captureError: true }));
+        return { type: type, items: items, count: arg.length };
+      }
+    }
     if (spec.class === ANDROID_LOG && type === 'java.lang.Throwable' && arg != null)
       return { type: arg.$className || type, opaque: true };
     if (spec.class === CIPHER && spec.method === 'init' && index > 0 && arg != null)
@@ -167,9 +261,111 @@ function createMonitor(Java, sendMessage, schedule) {
     const items = arg.slice(0, 16).map(binding => safe(() => sqlBinding(binding), { captureError: true }));
     return { type: type, items: items, count: arg.length };
   }
+  function dexBuffer(buffer) {
+    if (buffer == null) return { type: BYTE_BUFFER, value: null };
+    // Buffer.remaining() is final and reads position and limit without changing either.
+    javaBuffer ??= Java.use('java.nio.Buffer');
+    return { type: BYTE_BUFFER, remainingBytes: Java.cast(buffer, javaBuffer).remaining() };
+  }
+  function processArguments(event, receiver, args) {
+    function vector(count, get) {
+      const items = [];
+      for (let i = 0; i < Math.min(count, MAX_PROCESS_ARGUMENTS); i++) {
+        items.push(safe(() => {
+          const item = commandString(get(i));
+          if (item === undefined) return { type: STRING, opaque: true };
+          return item === null ? { type: STRING, value: null } : textValue(STRING, item, 512);
+        }, { type: STRING, captureError: true }));
+      }
+      return { type: STRINGS, items: items, count: count };
+    }
+    const commandType = event.types[0];
+    if (event.class === RUNTIME) {
+      event.processCommand = inspect(() => commandType === STRINGS && Array.isArray(args[0])
+        ? vector(args[0].length, index => args[0][index]) : value(args[0], commandType));
+      event.workingDirectory = inspect(() => value(args[2], FILE));
+    } else {
+      event.processCommand = inspect(() => {
+        const command = builderCommand(receiver);
+        return command ? vector(command.size(), index => command.get(index)) : { type: STRINGS, opaque: true };
+      });
+      event.workingDirectory = inspect(() => value(receiver.directory(), FILE));
+    }
+  }
   function inspect(fn) {
     inspecting = true;
     try { return safe(fn, { captureError: true }); } finally { inspecting = false; }
+  }
+  function objectHash(object) {
+    javaSystem ??= Java.use('java.lang.System');
+    return javaSystem.identityHashCode(object);
+  }
+  function weakIdentity(object, hash) {
+    weakReference ??= Java.use('java.lang.ref.WeakReference');
+    return { hash: hash, ref: weakReference.$new(object) };
+  }
+  function matchesIdentity(identity, object, hash) {
+    return identity && identity.hash === hash && sameObject(identity.ref.get(), object);
+  }
+  function findWebView(receiver) {
+    const hash = objectHash(receiver);
+    let view = webViews.find(entry => matchesIdentity(entry, receiver, hash));
+    if (!view) {
+      view = { ...weakIdentity(receiver, hash), id: ++webViewId, settings: null };
+      if (webViews.length === MAX_TRACKED_WEB_VIEWS) webViews.shift();
+      webViews.push(view);
+    }
+    return view;
+  }
+  function matchingWebSettings(receiver, hash) {
+    return webViews.filter(view => matchesIdentity(view.settings, receiver, hash));
+  }
+  function publishStatus() {
+    sendMessage({ noxenEvent: 'monitor_status', revision: revision, statuses: statuses });
+  }
+  function observeWebResult(spec, receiver, args, result, callRevision) {
+    if (!spec || stopped || callRevision !== revision) return;
+    inspect(() => {
+      if (spec.class === WEB_VIEW && spec.method === 'getSettings' && result != null) {
+        const view = findWebView(receiver);
+        const hash = objectHash(result);
+        if (matchesIdentity(view.settings, result, hash)) return;
+        const [existing] = matchingWebSettings(result, hash);
+        view.settings = existing?.settings ?? { ...weakIdentity(result, hash), values: {} };
+        if (existing) return;
+        const implementation = result.getClass();
+        const className = String(implementation.getName());
+        const loader = implementation.getClassLoader();
+        const factory = loader == null ? Java : Java.ClassFactory.get(loader);
+        let changed = false;
+        for (const { spec: setting, status } of webSettingsHooks) {
+          const resolved = { ...status };
+          installHook(setting, resolved, factory, className);
+          if (status.state === 'Active' || (status.state === resolved.state && status.detail === resolved.detail))
+            continue;
+          Object.assign(status, resolved);
+          changed = true;
+        }
+        if (changed) publishStatus();
+      } else if (isWebSetting(spec) && spec.captureArguments) {
+        const [view] = matchingWebSettings(receiver, objectHash(receiver));
+        if (view && (typeof args[0] === 'boolean' || Number.isInteger(args[0])))
+          view.settings.values[spec.method] = args[0];
+      }
+    });
+  }
+  function annotateWebEvent(event, spec, receiver) {
+    if (!spec) return;
+    inspect(() => {
+      if (spec.class === WEB_VIEW) {
+        const view = findWebView(receiver);
+        event.webViewId = view.id;
+        if (WEB_LOAD_METHODS.has(spec.method)) event.webViewSettings = { ...view.settings?.values };
+      } else {
+        const matches = matchingWebSettings(receiver, objectHash(receiver));
+        if (matches.length === 1) event.webViewId = matches[0].id;
+      }
+    });
   }
   function emit(event) {
     if (queue.length >= MAX_QUEUED_EVENTS) { dropped++; return; }
@@ -177,20 +373,31 @@ function createMonitor(Java, sendMessage, schedule) {
   }
   function captureCall(method, receiver, args, specs, thread) {
     if (!specs.length) return method.apply(receiver, args);
-    if (queue.length >= MAX_QUEUED_EVENTS) { dropped++; return method.apply(receiver, args); }
+    const webSpec = webSettingsHooks.length ? specs.find(spec =>
+      (spec.profile === 'webview' && spec.class === WEB_VIEW) || isWebSetting(spec)) : null;
+    if (queue.length >= MAX_QUEUED_EVENTS) {
+      dropped++;
+      const callRevision = revision;
+      const result = method.apply(receiver, args);
+      observeWebResult(webSpec, receiver, args, result, callRevision);
+      return result;
+    }
     activeCalls++;
     try {
-      return recordCall(method, receiver, args, specs, thread);
+      return recordCall(method, receiver, args, specs, thread, webSpec);
     } finally {
       activeCalls--;
     }
   }
-  function recordCall(method, receiver, args, specs, thread) {
+  function recordCall(method, receiver, args, specs, thread, webSpec) {
     const event = { id: ++sequence, time: Date.now(), revision: revision,
       profiles: specs.map(s => s.profileName),
       class: specs[0].class, method: specs[0].method, types: specs[0].args,
       thread: thread === null ? 'unknown' : String(thread) };
-    if (specs.some(s => s.captureArguments)) {
+    annotateWebEvent(event, webSpec, receiver);
+    if (specs.some(s => s.captureArguments) && specs.some(isProcessExecution)) {
+      processArguments(event, receiver, args);
+    } else if (specs.some(s => s.captureArguments)) {
       event.arguments = specs[0].args.map((_, i) => inspect(() => argumentValue(specs[0], args, i)));
       if (event.class === URL_CLASS && event.method === 'openConnection')
         event.destination = inspect(() => urlDestination(receiver));
@@ -211,6 +418,7 @@ function createMonitor(Java, sendMessage, schedule) {
       throw error;
     }
     event.outcome = 'returned';
+    observeWebResult(webSpec, receiver, args, result, event.revision);
     if (specs.some(s => s.captureReturn))
       event.result = inspect(() => value(result, method.returnType.className));
     if (!stopped) emit(event);
@@ -223,63 +431,76 @@ function createMonitor(Java, sendMessage, schedule) {
     try { sendMessage({ noxenEvent: 'monitor_batch', events: batch, dropped: lost }); }
     catch (_) { dropped += batch.length + lost; }
   }, 100);
+  function installHook(spec, status, factory = Java, className = spec.class) {
+    try {
+      let klass, method;
+      try {
+        klass = factory.use(className);
+        method = klass[spec.method].overload.apply(klass[spec.method], spec.args);
+      } catch (error) {
+        status.state = 'Not found';
+        throw error;
+      }
+      const key = String(method.handle);
+      let record = installed.get(key);
+      if (!record) {
+        if (installed.size >= 128) throw new Error('Session hook limit reached; reconnect to install other methods');
+        if (method.implementation !== null) throw new Error('Method already hooked; Intercept or extra-script conflict');
+        record = { specs: [], method: method };
+        record.wrapper = function () {
+          if (stopped || inspecting || !record.specs.length) return method.apply(this, arguments);
+          const specs = record.specs;
+          const thread = safe(() => Process.getCurrentThreadId(), null);
+          const builtin = specs.find(s =>
+            (s.profile === 'content-provider' && s.class === RESOLVER)
+            || (s.profile === 'file' && s.method === '$init' && FILE_CONSTRUCTORS.has(s.class))
+            || (s.profile === 'crypto' && s.class === CIPHER)
+            || (s.profile === 'dynamic-code-loading' && s.class === IN_MEMORY_DEX && s.method === '$init')
+            || isProcessExecution(s));
+          if (!builtin || thread === null)
+            return captureCall(method, this, arguments, specs, thread);
+          const parent = forwardingFrames.get(thread);
+          const forwarded = inspect(() => forwardsTo(parent, builtin, this, arguments)) === true;
+          const active = forwarded ? specs.filter(s => s !== builtin) : specs;
+          forwardingFrames.set(thread, { spec: builtin, receiver: this, args: arguments });
+          try {
+            return captureCall(method, this, arguments, active, thread);
+          } finally {
+            if (parent) forwardingFrames.set(thread, parent);
+            else forwardingFrames.delete(thread);
+          }
+        };
+        method.implementation = record.wrapper;
+        record.replacement = method.implementation;
+        installed.set(key, record);
+      } else if (record.method.implementation !== record.replacement) {
+        throw new Error('Monitor hook was replaced by another script');
+      }
+      if (!record.specs.includes(spec)) record.specs.push(spec);
+      status.state = 'Active';
+      status.detail = '';
+    } catch (e) { status.detail = String(e).slice(0, 512); }
+  }
   function configure(hooks, nextRevision) {
     if (stopped) return false;
     revision = nextRevision;
     Java.perform(function () {
       if (stopped || nextRevision !== revision) return;
       installed.forEach(record => { record.specs = []; });
-      const statuses = [];
-      hooks.forEach(spec => {
+      webViews = [];
+      webSettingsHooks = [];
+      statuses = hooks.map(spec => {
         const status = { profile: spec.profile, index: spec.index, state: 'Error', detail: '' };
-        try {
-          let klass, method;
-          try {
-            klass = Java.use(spec.class);
-            method = klass[spec.method].overload.apply(klass[spec.method], spec.args);
-          } catch (error) {
-            status.state = 'Not found';
-            throw error;
-          }
-          const key = String(method.handle);
-          let record = installed.get(key);
-          if (!record) {
-            if (installed.size >= 128) throw new Error('Session hook limit reached; reconnect to install other methods');
-            if (method.implementation !== null) throw new Error('Method already hooked; Intercept or extra-script conflict');
-            record = { specs: [], method: method };
-            record.wrapper = function () {
-              if (stopped || inspecting || !record.specs.length) return method.apply(this, arguments);
-              const specs = record.specs;
-              const thread = safe(() => Process.getCurrentThreadId(), null);
-              const builtin = specs.find(s =>
-                (s.profile === 'content-provider' && s.class === RESOLVER)
-                || (s.profile === 'file' && s.method === '$init' && FILE_CONSTRUCTORS.has(s.class))
-                || (s.profile === 'crypto' && s.class === CIPHER));
-              if (!builtin || thread === null)
-                return captureCall(method, this, arguments, specs, thread);
-              const parent = forwardingFrames.get(thread);
-              const forwarded = inspect(() => forwardsTo(parent, builtin, this, arguments)) === true;
-              const active = forwarded ? specs.filter(s => s !== builtin) : specs;
-              forwardingFrames.set(thread, { spec: builtin, receiver: this, args: arguments });
-              try {
-                return captureCall(method, this, arguments, active, thread);
-              } finally {
-                if (parent) forwardingFrames.set(thread, parent);
-                else forwardingFrames.delete(thread);
-              }
-            };
-            method.implementation = record.wrapper;
-            record.replacement = method.implementation;
-            installed.set(key, record);
-          } else if (record.method.implementation !== record.replacement) {
-            throw new Error('Monitor hook was replaced by another script');
-          }
-          record.specs.push(spec);
-          status.state = 'Active';
-        } catch (e) { status.detail = String(e).slice(0, 512); }
-        statuses.push(status);
+        if (isWebSetting(spec)) {
+          status.state = 'Pending';
+          status.detail = 'Waiting for WebView.getSettings() to reveal the concrete settings class';
+          webSettingsHooks.push({ spec: spec, status: status });
+        } else {
+          installHook(spec, status);
+        }
+        return status;
       });
-      sendMessage({ noxenEvent: 'monitor_status', revision: nextRevision, statuses: statuses });
+      publishStatus();
     });
     return true;
   }

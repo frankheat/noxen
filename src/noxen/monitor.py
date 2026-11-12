@@ -10,7 +10,7 @@ from noxen.rendering import format_uri_grant_flags
 
 MAX_PROFILES = 32
 MAX_HOOKS = 128
-PROFILE_FORMAT_VERSION = 8
+PROFILE_FORMAT_VERSION = 10
 _RESOLVER = "android.content.ContentResolver"
 _SQLITE = "android.database.sqlite.SQLiteDatabase"
 _ANDROID_LOG = "android.util.Log"
@@ -18,6 +18,25 @@ _PREFERENCES_EDITOR = "android.app.SharedPreferencesImpl$EditorImpl"
 _URL = "java.net.URL"
 _SOCKET = "java.net.Socket"
 _CIPHER = "javax.crypto.Cipher"
+_RUNTIME = "java.lang.Runtime"
+_PROCESS_BUILDER = "java.lang.ProcessBuilder"
+_DEX_CLASS_LOADER = "dalvik.system.DexClassLoader"
+_IN_MEMORY_DEX_CLASS_LOADER = "dalvik.system.InMemoryDexClassLoader"
+_CLASS_LOADER = "java.lang.ClassLoader"
+_BYTE_BUFFER = "java.nio.ByteBuffer"
+_BYTE_BUFFERS = "[Ljava.nio.ByteBuffer;"
+_PACKAGE_CONTEXT_FLAGS = {1: "CONTEXT_INCLUDE_CODE", 2: "CONTEXT_IGNORE_SECURITY", 4: "CONTEXT_RESTRICTED"}
+_WEBVIEW = "android.webkit.WebView"
+_WEB_SETTINGS = "android.webkit.WebSettings"
+_WEB_SETTING_LABELS = {
+    "setJavaScriptEnabled": "JavaScript",
+    "setAllowFileAccess": "File access",
+    "setAllowContentAccess": "Content URI access",
+    "setAllowFileAccessFromFileURLs": "File access from file URLs",
+    "setAllowUniversalAccessFromFileURLs": "Universal access from file URLs",
+    "setMixedContentMode": "Mixed content",
+}
+_MIXED_CONTENT_MODES = {0: "ALWAYS_ALLOW", 1: "NEVER_ALLOW", 2: "COMPATIBILITY_MODE"}
 _CIPHER_MODES = {1: "ENCRYPT", 2: "DECRYPT", 3: "WRAP", 4: "UNWRAP"}
 _KEY = "java.security.Key"
 _CERTIFICATE = "java.security.cert.Certificate"
@@ -142,10 +161,20 @@ def default_profiles():
          "hooks": [validate_hook({"class": clazz, "method": method, "args": args})
                    for method, args in definitions]}
         for pid, name, clazz, definitions in (
-            ("webview", "WebView", "android.webkit.WebView", methods),
+            ("webview", "WebView", _WEBVIEW, methods),
             ("content-provider", "Content Provider", _RESOLVER, resolver_methods),
         )
     ]
+    profiles[0]["hooks"].append(validate_hook({
+        "class": _WEBVIEW, "method": "getSettings", "captureReturn": False,
+    }))
+    profiles[0]["hooks"].extend(
+        validate_hook({
+            "class": _WEB_SETTINGS, "method": method,
+            "args": ["int" if method == "setMixedContentMode" else "boolean"], "captureReturn": False,
+        })
+        for method in _WEB_SETTING_LABELS
+    )
     profiles.append({
         "id": "uri-grants", "name": "URI Grants", "enabled": False,
         "hooks": [
@@ -244,6 +273,28 @@ def default_profiles():
             for method, args in cipher_methods
         ],
     })
+    profiles.append({
+        "id": "process-execution", "name": "Process Execution", "enabled": False,
+        "hooks": [
+            validate_hook({"class": _RUNTIME, "method": "exec", "args": [command, *tail]})
+            for command in (_STRING, _STRINGS)
+            for tail in ([], [_STRINGS], [_STRINGS, _FILE])
+        ] + [validate_hook({"class": _PROCESS_BUILDER, "method": "start"})],
+    })
+    profiles.append({
+        "id": "dynamic-code-loading", "name": "Dynamic Code Loading", "enabled": False,
+        "hooks": [
+            validate_hook({"class": clazz, "method": method, "args": args,
+                           "captureReturn": method != "$init"})
+            for clazz, method, args in (
+                (_DEX_CLASS_LOADER, "$init", [_STRING, _STRING, _STRING, _CLASS_LOADER]),
+                (_IN_MEMORY_DEX_CLASS_LOADER, "$init", [_BYTE_BUFFER, _CLASS_LOADER]),
+                (_IN_MEMORY_DEX_CLASS_LOADER, "$init", [_BYTE_BUFFERS, _CLASS_LOADER]),
+                (_IN_MEMORY_DEX_CLASS_LOADER, "$init", [_BYTE_BUFFERS, _STRING, _CLASS_LOADER]),
+                (_CONTEXT_IMPL, "createPackageContext", [_STRING, "int"]),
+            )
+        ],
+    })
     return profiles
 
 
@@ -340,6 +391,8 @@ def display_value(value):
         return "unavailable"
     if value.get("captureError"):
         return "unavailable (capture failed)"
+    if type(remaining := value.get("remainingBytes")) is int:
+        return f"{remaining} bytes remaining"
     if value.get("opaque"):
         return "opaque object"
     if value.get("type") == "void":
@@ -354,6 +407,19 @@ def display_value(value):
 def _argument_names(event):
     clazz = event.get("class")
     method, types = event.get("method"), event.get("types", [])
+    if clazz == _WEB_SETTINGS and method in _WEB_SETTING_LABELS:
+        return (_WEB_SETTING_LABELS[method],)
+    if clazz == _DEX_CLASS_LOADER and method == "$init":
+        return ("DEX path", "Optimized directory argument", "Native library path", "Parent loader")
+    if clazz == _IN_MEMORY_DEX_CLASS_LOADER and method == "$init" and types:
+        if types[0] == _BYTE_BUFFER:
+            return ("DEX buffer", "Parent loader")
+        if types == [_BYTE_BUFFERS, _STRING, _CLASS_LOADER]:
+            return ("DEX buffers", "Native library path", "Parent loader")
+        if types == [_BYTE_BUFFERS, _CLASS_LOADER]:
+            return ("DEX buffers", "Parent loader")
+    if clazz == _CONTEXT_IMPL and method == "createPackageContext" and types == [_STRING, "int"]:
+        return ("Package", "Context flags")
     if clazz == _CIPHER:
         if method == "getInstance":
             return ("Transformation", "Requested provider")
@@ -468,6 +534,8 @@ def render_event_detail(event) -> Text:
     field("Method ", event.get("method", "unknown"), f"({types})")
     field("Thread ", event.get("thread", "unknown"))
     field("Outcome", event.get("outcome", "unknown"))
+    if "webViewId" in event:
+        field("WebView ID", event["webViewId"])
     if event.get("target"):
         field("Target ", event["target"])
     if event.get("class") == _ANDROID_LOG and event.get("method") in _LOG_LEVELS:
@@ -493,7 +561,7 @@ def render_event_detail(event) -> Text:
         names = _argument_names(event)
         for i, value in enumerate(event["arguments"]):
             name = names[i] if i < len(names) else i
-            if name in ("Bindings", "Options") and isinstance(value.get("items"), list):
+            if name in ("Bindings", "Options", "DEX buffers") and isinstance(value.get("items"), list):
                 items = value["items"]
                 count = value["count"]
                 field(name, count, f" (showing {len(items)})" if count > len(items) else "")
@@ -504,10 +572,17 @@ def render_event_detail(event) -> Text:
             flags = value.get("value")
             if name == "Mode flags" and type(flags) is int:
                 rendered = f"0x{flags & 0xffffffff:08X} ({format_uri_grant_flags(flags)})"
+            if name == "Context flags" and type(flags) is int:
+                labels = " | ".join(label for bit, label in _PACKAGE_CONTEXT_FLAGS.items() if flags & bit)
+                rendered = f"0x{flags & 0xffffffff:08X}"
+                if labels:
+                    rendered += f" ({labels})"
             if name == "Priority" and type(flags) is int and flags in _LOG_PRIORITIES:
                 rendered = f"{flags} ({_LOG_PRIORITIES[flags]})"
             if name == "Mode" and event.get("class") == _CIPHER and type(flags) is int and flags in _CIPHER_MODES:
                 rendered = f"{flags} ({_CIPHER_MODES[flags]})"
+            if event.get("class") == _WEB_SETTINGS and event.get("method") == "setMixedContentMode" and type(flags) is int:
+                rendered = _MIXED_CONTENT_MODES.get(flags, rendered)
             typed_value("  ", f"{name} ", value, rendered)
         if names == ("Path",):
             field("Mode", "READ")
@@ -519,6 +594,31 @@ def render_event_detail(event) -> Text:
             field("Mode", "w", " (default)")
         if not event["arguments"]:
             text.append("\n  No arguments", "dim")
+    if isinstance(settings := event.get("webViewSettings"), dict):
+        section("WEBVIEW SETTINGS OBSERVED")
+        for method, label in _WEB_SETTING_LABELS.items():
+            value = settings.get(method)
+            if method == "setMixedContentMode" and type(value) is int:
+                field(label, _MIXED_CONTENT_MODES.get(value, value))
+            elif type(value) is bool:
+                field(label, str(value).lower())
+        if not settings:
+            text.append("\n  No settings observed for this WebView.", "dim")
+    if isinstance(command := event.get("processCommand"), dict):
+        section("COMMAND")
+        items = command.get("items")
+        if isinstance(items, list):
+            count = command["count"]
+            field("Argument vector", count, f" (showing {len(items)})" if count > len(items) else "")
+            for index, item in enumerate(items):
+                typed_value("    ", f"[{index}] ", item, display_value(item))
+        else:
+            name = "Command string" if command.get("type") == _STRING else "Argument vector"
+            typed_value("  ", f"{name} ", command, display_value(command))
+        directory = event.get("workingDirectory")
+        if isinstance(directory, dict):
+            rendered = "inherited" if "value" in directory and directory["value"] is None else display_value(directory)
+            field("Working directory", rendered)
     if "result" in event:
         section("RETURN")
         result = event["result"]

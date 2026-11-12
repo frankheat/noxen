@@ -141,12 +141,16 @@ class MonitorModelTests(unittest.TestCase):
         version_six = {"version": 6, "profiles": profiles[:6]}
         self.assertEqual(load_profiles(json.dumps(version_six)), ([*profiles[:6], *profiles[7:]], None))
         version_seven = {"version": 7, "profiles": profiles[:7]}
-        self.assertEqual(load_profiles(json.dumps(version_seven)), ([*profiles[:7], profiles[8]], None))
+        self.assertEqual(load_profiles(json.dumps(version_seven)), ([*profiles[:7], *profiles[8:]], None))
+        version_eight = {"version": 8, "profiles": profiles[:9]}
+        self.assertEqual(load_profiles(json.dumps(version_eight)), (profiles, None))
+        version_nine = {"version": 9, "profiles": profiles[:10]}
+        self.assertEqual(load_profiles(json.dumps(version_nine)), (profiles, None))
         current = {"version": PROFILE_FORMAT_VERSION, "profiles": profiles[:1]}
         self.assertEqual(load_profiles(json.dumps(current)), (profiles[:1], None))
         self.assertEqual(enabled_hooks(profiles), [])
         profiles[0]['enabled'] = True
-        self.assertEqual(len(enabled_hooks(profiles)), 8)
+        self.assertEqual(len(enabled_hooks(profiles)), 15)
         self.assertEqual(argument_type('java.lang.String[][]'), '[[Ljava.lang.String;')
         self.assertEqual(argument_type('int[]'), '[I')
         for value in ('void', '', 'java.lang.String...', 'void[]'):
@@ -171,6 +175,54 @@ class MonitorModelTests(unittest.TestCase):
         })
         self.assertIn('Target package [java.lang.String] : "dev.example.target"', detail)
         self.assertIn("Mode flags [int] : 0x00000081 (READ | PREFIX)", detail)
+
+    def test_webview_detail_shows_only_observed_settings(self):
+        event = {"class": "android.webkit.WebView", "method": "loadUrl", "webViewId": 3}
+        self.assertNotIn("WEBVIEW SETTINGS OBSERVED", event_detail(event))
+        self.assertIn("No settings observed", event_detail(dict(event, webViewSettings={})))
+        detail = event_detail(dict(event, webViewSettings={
+            "setJavaScriptEnabled": False, "setMixedContentMode": 1,
+        }))
+        self.assertIn("WebView ID : 3", detail)
+        self.assertIn("JavaScript : false", detail)
+        self.assertIn("Mixed content : NEVER_ALLOW", detail)
+        self.assertNotIn("File access", detail)
+
+    def test_process_detail_preserves_argument_boundaries_and_inherited_directory(self):
+        detail = event_detail({
+            "class": "java.lang.ProcessBuilder", "method": "start",
+            "processCommand": {
+                "type": "[Ljava.lang.String;", "count": 3,
+                "items": [
+                    {"type": "java.lang.String", "value": "/system/bin/echo"},
+                    {"type": "java.lang.String", "value": "one argument"},
+                ],
+            },
+            "workingDirectory": {"type": "java.io.File", "value": None},
+        })
+        self.assertIn("Argument vector : 3 (showing 2)", detail)
+        self.assertIn('[1] [java.lang.String] : "one argument"', detail)
+        self.assertIn("Working directory : inherited", detail)
+
+    def test_dynamic_code_detail_shows_buffer_size_and_context_flags(self):
+        detail = event_detail({
+            "class": "dalvik.system.InMemoryDexClassLoader", "method": "$init",
+            "types": ["[Ljava.nio.ByteBuffer;", "java.lang.ClassLoader"],
+            "arguments": [
+                {"type": "[Ljava.nio.ByteBuffer;", "count": 1,
+                 "items": [{"type": "java.nio.ByteBuffer", "remainingBytes": 432}]},
+                {"type": "java.lang.ClassLoader", "opaque": True},
+            ],
+        })
+        self.assertIn("DEX buffers : 1", detail)
+        self.assertIn("[1] [java.nio.ByteBuffer] : 432 bytes remaining", detail)
+        self.assertIn("Parent loader [java.lang.ClassLoader] : opaque object", detail)
+        detail = event_detail({
+            "class": "android.app.ContextImpl", "method": "createPackageContext",
+            "types": ["java.lang.String", "int"],
+            "arguments": [{"type": "java.lang.String", "value": "example.app"}, {"type": "int", "value": 0x103}],
+        })
+        self.assertIn("Context flags [int] : 0x00000103 (CONTEXT_INCLUDE_CODE | CONTEXT_IGNORE_SECURITY)", detail)
 
     def test_android_log_throwable_overload_and_println_priority(self):
         detail = event_detail({
@@ -647,7 +699,8 @@ class MonitorUITests(IsolatedAppTestCase):
                     (True, False, True),
                 )
                 await pilot.click('#monitor_cancel')
-                self.assertEqual(len(json.loads(app.db.get_info('monitor_profiles'))["profiles"]), 10)
+                self.assertEqual(len(json.loads(app.db.get_info('monitor_profiles'))["profiles"]),
+                                 len(default_profiles()) + 1)
                 await pilot.click("#--content-tab-monitor_events_view")
                 session = SimpleNamespace()
                 pane.begin_session(session)

@@ -281,7 +281,7 @@ class MonitorEventSplit(Vertical):
 
 class MonitorPane(Vertical):
     HOOK_STATE_WIDTH = 13
-    PROFILE_LIST_WIDTH = 29
+    PROFILE_LIST_WIDTH = 30
     RECORDING_BATCH = 512
     RECORDING_BUFFER = 4096
     EVENT_PAGE_SIZE = 200
@@ -422,7 +422,7 @@ class MonitorPane(Vertical):
         profiles = self.query_one("#monitor_profiles", DataTable)
         self.query_one("#monitor_profile_panel").styles.width = self.PROFILE_LIST_WIDTH
         profiles.add_column("On", width=2, key="on")
-        profiles.add_column("Profile", width=17)
+        profiles.add_column("Profile", width=20)
         self.refresh_profiles()
         self.refresh_events()
         self.dirty = True

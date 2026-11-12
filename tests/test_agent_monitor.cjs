@@ -265,3 +265,122 @@ test('resolver read stream folds a delegated typed open but keeps explicit typed
   assert.deepEqual(monitor.stop().events.map(event => event.method),
     ['openInputStream', 'openTypedAssetFileDescriptor']);
 });
+
+test('WebView load snapshots stay tied to the view even when identity hashes collide', () => {
+  const messages = [];
+  const exception = { $className: 'java.lang.IllegalArgumentException' };
+  const implementation = { getName: () => 'app.Settings', getClassLoader: () => null };
+  const makeMethod = (name, apply) => ({
+    handle: name, implementation: null, apply, returnType: { className: 'void' },
+  });
+  const getter = makeMethod('getSettings', view => view.settings);
+  const load = makeMethod('loadUrl', () => undefined);
+  const setter = makeMethod('setJavaScriptEnabled', (_, [value]) => {
+    if (value === 'invalid') throw exception;
+  });
+  const Java = {
+    perform: fn => fn(),
+    use: clazz => {
+      if (clazz === 'java.lang.System') return { identityHashCode: () => 1 };
+      if (clazz === 'java.lang.ref.WeakReference') return { $new: object => ({ get: () => object }) };
+      if (clazz === 'android.webkit.WebView') return {
+        getSettings: { overload: () => getter }, loadUrl: { overload: () => load },
+      };
+      assert.equal(clazz, 'app.Settings');
+      return { setJavaScriptEnabled: { overload: () => setter } };
+    },
+  };
+  const monitor = createMonitor(Java, message => messages.push(structuredClone(message)), () => {});
+  const base = { profile: 'webview', profileName: 'WebView', captureArguments: true, captureReturn: false };
+  monitor.configure([
+    { ...base, class: 'android.webkit.WebView', method: 'getSettings', args: [], index: 0 },
+    { ...base, class: 'android.webkit.WebView', method: 'loadUrl', args: ['java.lang.String'], index: 1 },
+    { ...base, class: 'android.webkit.WebSettings', method: 'setJavaScriptEnabled', args: ['boolean'], index: 2 },
+  ], 0);
+  assert.equal(messages.at(-1).statuses[2].state, 'Pending');
+  function view() {
+    return { $isSameObject(other) { return this === other; },
+      settings: { getClass: () => implementation, $isSameObject(other) { return this === other; } } };
+  }
+  const a = view(), b = view();
+  load.implementation.call(a, 'first');
+  getter.implementation.call(a);
+  getter.implementation.call(b);
+  assert.equal(messages.at(-1).statuses[2].state, 'Active');
+  setter.implementation.call(a.settings, true);
+  setter.implementation.call(b.settings, false);
+  load.implementation.call(a, 'a');
+  assert.throws(() => setter.implementation.call(a.settings, 'invalid'), error => error === exception);
+  load.implementation.call(a, 'a after failed change');
+  load.implementation.call(b, 'b');
+  setter.implementation.call(a.settings, false);
+  load.implementation.call(a, 'a after successful change');
+
+  const events = monitor.stop().events.filter(event => event.method === 'loadUrl');
+  assert.deepEqual(events.map(event => event.webViewId), [1, 1, 1, 2, 1]);
+  assert.deepEqual(events.map(event => event.webViewSettings.setJavaScriptEnabled),
+    [undefined, true, true, false, false]);
+});
+
+test('process capture bounds argument vectors and leaves application lists opaque', () => {
+  const process = {};
+  const f = fixture(() => process, 'start');
+  f.hook.class = 'java.lang.ProcessBuilder';
+  f.hook.args = [];
+  f.hook.profile = 'process-execution';
+  f.method.returnType.className = 'java.lang.Process';
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+
+  const args = ['/bin/echo', 'a single argument', ...Array(35).fill('x'.repeat(600))];
+  const list = { $className: 'java.util.ArrayList', size: () => args.length, get: i => args[i] };
+  const custom = { $className: 'app.CommandList',
+    size() { assert.fail('unexpected app code'); }, get() { assert.fail('unexpected app code'); } };
+  const directory = { $className: 'java.io.File', getPath: () => 'relative' };
+  assert.equal(f.method.implementation.call({command: () => list, directory: () => directory}), process);
+  assert.equal(f.method.implementation.call({command: () => custom, directory: () => null}), process);
+  const [known, opaque] = f.monitor.stop().events;
+  assert.equal(known.workingDirectory.value, 'relative');
+  assert.equal(known.processCommand.count, 37);
+  assert.equal(known.processCommand.items.length, 32);
+  assert.equal(known.processCommand.items[1].value, 'a single argument');
+  assert.equal(known.processCommand.items[2].value.length, 512);
+  assert.equal(known.processCommand.items[2].truncated, true);
+  assert.deepEqual(opaque.processCommand, { type: '[Ljava.lang.String;', opaque: true });
+  assert.equal(opaque.workingDirectory.value, null);
+});
+
+test('in-memory DEX capture reads only remaining sizes from a bounded buffer list', () => {
+  const clazz = 'dalvik.system.InMemoryDexClassLoader';
+  const bufferType = 'java.nio.ByteBuffer';
+  const arrayType = '[Ljava.nio.ByteBuffer;';
+  const parent = {};
+  const buffers = Array.from({ length: 10 }, (_, index) => ({
+    remaining: () => 100 + index,
+    get() { assert.fail('unexpected buffer read'); },
+    position() { assert.fail('unexpected position access'); },
+  }));
+  const method = { handle: 'memory-dex', implementation: null, returnType: { className: 'void' },
+    apply(_, args) { assert.equal(args[0], buffers); assert.equal(args[1], parent); } };
+  const bufferClass = {};
+  const Java = {
+    perform: fn => fn(),
+    use(name) {
+      if (name === 'java.nio.Buffer') return bufferClass;
+      assert.equal(name, clazz);
+      return { $init: { overload: () => method } };
+    },
+    cast(object, type) { assert.equal(type, bufferClass); return object; },
+  };
+  const monitor = createMonitor(Java, () => {}, () => {});
+  monitor.configure([{
+    class: clazz, method: '$init', args: [arrayType, 'java.lang.ClassLoader'],
+    profile: 'dynamic-code-loading', profileName: 'Dynamic Code Loading', index: 0, captureArguments: true,
+  }], 0);
+  method.implementation(buffers, parent);
+  const [event] = monitor.stop().events;
+  assert.equal(event.arguments[0].count, 10);
+  assert.deepEqual(event.arguments[0].items, Array.from({ length: 8 }, (_, index) =>
+    ({ type: bufferType, remainingBytes: 100 + index })));
+  assert.equal(event.arguments[1].opaque, true);
+});
