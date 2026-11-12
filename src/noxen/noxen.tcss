@@ -11,6 +11,10 @@ ModalScreen:light {
 MonitorActionsMenu, MonitorActionsMenu:light {
     background: transparent;
 }
+Toast:light {
+    background: #E5E9E7;
+    color: $foreground;
+}
 Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     scrollbar-background: $surface;
     scrollbar-color: $foreground-muted;
@@ -408,6 +412,8 @@ DataTable > .datatable--header-hover {
 SelectOverlay {
     border: tall $foreground-muted;
 }
+.compact_select { height: 1; }
+.compact_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
 OptionList > .option-list--option-highlighted {
     background: $primary;
     color: $button-color-foreground;
@@ -469,9 +475,6 @@ OptionList > .option-list--option-highlighted {
     width: 30;
     content-align: left middle;
 }
-.settings_switch_row Label {
-    width: 28;
-}
 Switch {
     border: none;
     background: transparent;
@@ -493,10 +496,13 @@ Switch.-on > .switch--slider {
     background: $panel;
 }
 #settings_depth_error {
+    display: none;
     height: 1;
     color: $error;
     margin-left: 30;
 }
+#settings_theme { width: 11; }
+#settings_theme > SelectCurrent { padding-left: 2; }
 #settings_save {
     width: auto;
     min-width: 0;

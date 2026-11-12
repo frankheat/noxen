@@ -631,8 +631,6 @@ class FilterModal(ModalScreen):
     #hfm_pairs_container { height: auto; margin-top: 1; }
     .hfm_pair_row { height: 1; margin-bottom: 1; align: left middle; }
     .hfm_field_label { width: auto; margin-right: 1; content-align: left middle; }
-    .hfm_field_select { height: 1; }
-    .hfm_field_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
     .hfm_pair_row Input { width: 1fr; }
     .hfm_pair_rm {
         width: 3;
@@ -705,7 +703,7 @@ class FilterModal(ModalScreen):
             id="hfm_sel_type",
             value="ignore",
             allow_blank=False,
-            classes="hfm_field_select",
+            classes="compact_select",
         )
         self._fit_select_width(type_select)
         with VerticalScroll(id="hfm_dialog"):
@@ -788,7 +786,7 @@ class FilterModal(ModalScreen):
             id=f"hfm_pk_{pid}",
             value=self.CONDITION_OPTIONS[0][1],
             allow_blank=False,
-            classes="hfm_field_select",
+            classes="compact_select",
         )
         self._fit_select_width(key_select)
         row = Horizontal(

@@ -3,11 +3,12 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from textual.widgets import TabbedContent
+from textual.widgets import Select, TabbedContent
 
 from tests.ui_test_case import IsolatedAppTestCase
 
 from noxen.app import NoxenApp, markup_renderable
+from noxen.settings import DARK_THEME, LIGHT_THEME, load_settings
 from noxen.ui_theme import (
     DARK_COLORS,
     LIGHT_COLORS,
@@ -68,6 +69,40 @@ class ThemePaletteTests(unittest.TestCase):
 
 
 class ThemeRuntimeTests(IsolatedAppTestCase):
+    async def test_save_theme_applies_it_and_restores_it_in_a_new_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(
+                project=None,
+                new_project=os.path.join(tmp, "first.noxen"),
+                skip_device_scan=True,
+            )
+            app = NoxenApp(args)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.click("#--content-tab-tab_settings")
+                theme = app.query_one("#settings_theme", Select)
+                self.assertEqual(theme.value, DARK_THEME)
+                await pilot.click("#settings_theme")
+                await pilot.press("end", "enter")
+                self.assertEqual(theme.value, LIGHT_THEME)
+                self.assertEqual(app.theme, DARK_THEME)
+                await pilot.click("#settings_save")
+                await pilot.pause()
+                self.assertEqual(app.theme, LIGHT_THEME)
+                self.assertEqual(load_settings()["theme"], LIGHT_THEME)
+
+                app.action_toggle_theme()
+                await pilot.pause()
+                self.assertEqual(app.theme, DARK_THEME)
+                self.assertEqual(theme.value, LIGHT_THEME)
+                self.assertEqual(load_settings()["theme"], LIGHT_THEME)
+
+            args.new_project = os.path.join(tmp, "second.noxen")
+            restarted = NoxenApp(args)
+            async with restarted.run_test(size=(120, 40)):
+                self.assertEqual(restarted.theme, LIGHT_THEME)
+                self.assertEqual(restarted.screen.styles.background.hex, "#FFFFFF")
+                self.assertEqual(restarted.query_one("#settings_theme", Select).value, LIGHT_THEME)
+
     async def test_theme_action_uses_paired_noxen_palettes(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:

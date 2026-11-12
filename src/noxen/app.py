@@ -101,7 +101,7 @@ from noxen.rendering import (
     render_edit_context,
     format_uri_grant_flags,
 )
-from noxen.settings import load_settings, save_settings
+from noxen.settings import DARK_THEME, LIGHT_THEME, load_settings, save_settings
 from noxen.system_server_session import SystemServerConfig, SystemServerSession
 from noxen.textual_compat import SELECT_EMPTY, is_select_empty
 from noxen.ui_theme import register_noxen_themes, semantic_colors, themed_markup
@@ -324,10 +324,10 @@ class NoxenApp(App):
     def __init__(self, cli_args):
         super().__init__()
         register_noxen_themes(self)
-        self.theme = "noxen-dark"
+        self._settings = load_settings()
+        self.theme = self._settings["theme"]
         self._skip_startup_device_scan = bool(getattr(cli_args, "skip_device_scan", False))
         self._session_config: SessionConfig | None = None
-        self._settings = load_settings()
         self.show_stack = self._settings["stack"]
         self.stack_depth = self._settings["stack_depth"]
         self._all_intents = []
@@ -469,11 +469,15 @@ class NoxenApp(App):
         )
 
     def action_toggle_theme(self):
-        if self.theme == "noxen-dark":
-            self.theme = "noxen-light"
-        else:
-            self.theme = "noxen-dark"
-        self.call_after_refresh(self._refresh_theme_content)
+        self._apply_theme(LIGHT_THEME if self.theme == DARK_THEME else DARK_THEME)
+
+    def _apply_theme(self, theme: str) -> None:
+        if self.theme != theme:
+            self.theme = theme
+            self.call_after_refresh(self._refresh_theme_content)
+
+    def _show_settings_depth_error(self, invalid: bool) -> None:
+        self.query_one("#settings_depth_error", Label).display = invalid
 
     def _render_markup(self, markup: str) -> Text:
         return app_markup_renderable(self, markup)
@@ -1125,17 +1129,29 @@ class NoxenApp(App):
             return
         elif event.button.id == "settings_save":
             try:
-                val = int(self.query_one("#settings_depth_input", Input).value.strip())
-                if val < 1:
+                depth = int(self.query_one("#settings_depth_input", Input).value.strip())
+                if depth < 1:
                     raise ValueError
-                self._settings["stack_depth"] = val
-                self.query_one("#settings_depth_error", Label).update("")
             except ValueError:
-                self.query_one("#settings_depth_error", Label).update("Enter a positive integer")
+                self._show_settings_depth_error(True)
                 return
-            self._settings["intercept"] = self.query_one("#settings_intercept", Switch).value
-            self._settings["stack"] = self.query_one("#settings_stack", Switch).value
-            save_settings(self._settings)
+            self._show_settings_depth_error(False)
+            theme = self.query_one("#settings_theme", Select).value
+            settings = {
+                **self._settings,
+                "stack_depth": depth,
+                "intercept": self.query_one("#settings_intercept", Switch).value,
+                "stack": self.query_one("#settings_stack", Switch).value,
+                "theme": theme,
+            }
+            try:
+                save_settings(settings)
+            except OSError:
+                LOGGER.warning("Unable to save settings", exc_info=True)
+                self.notify("Unable to save settings", severity="error", timeout=3)
+                return
+            self._settings = settings
+            self._apply_theme(theme)
             self.notify("Settings saved", severity="information", timeout=2)
             return
         self.query_one("#intercept_command_input", Input).focus()
@@ -1448,10 +1464,10 @@ class NoxenApp(App):
                 with VerticalScroll(id="settings_pane"):
                     yield Label("Startup Settings", id="settings_title")
                     yield Rule(classes="section_separator")
-                    with Horizontal(classes="settings_row settings_switch_row"):
+                    with Horizontal(classes="settings_row"):
                         yield Label("Intercept on startup")
                         yield Switch(value=self._settings["intercept"], id="settings_intercept")
-                    with Horizontal(classes="settings_row settings_switch_row"):
+                    with Horizontal(classes="settings_row"):
                         yield Label("Stack trace on startup")
                         yield Switch(value=self._settings["stack"], id="settings_stack")
                     with Horizontal(classes="settings_row"):
@@ -1461,7 +1477,16 @@ class NoxenApp(App):
                             id="settings_depth_input",
                             select_on_focus=False,
                         )
-                    yield Label("", id="settings_depth_error")
+                    yield Label("Enter a positive integer", id="settings_depth_error")
+                    with Horizontal(classes="settings_row"):
+                        yield Label("Theme")
+                        yield Select(
+                            [("Dark", DARK_THEME), ("Light", LIGHT_THEME)],
+                            id="settings_theme",
+                            value=self._settings["theme"],
+                            allow_blank=False,
+                            classes="compact_select",
+                        )
                     yield Rule(classes="section_separator")
                     yield Button("Save", id="settings_save")
         with Vertical(id="history_bar_container"):
@@ -2981,9 +3006,9 @@ class NoxenApp(App):
                     raise ValueError
                 self._settings["stack_depth"] = val
                 save_settings(self._settings)
-                self.query_one("#settings_depth_error", Label).update("")
+                self._show_settings_depth_error(False)
             except ValueError:
-                self.query_one("#settings_depth_error", Label).update("Enter a positive integer")
+                self._show_settings_depth_error(True)
             return
 
         if inp_id == "history_command_input":

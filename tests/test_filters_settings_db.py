@@ -9,7 +9,7 @@ from noxen.db import ProjectDB
 from noxen.filters import FilterManager
 from noxen.history_columns import parse_history_column_width
 from noxen.rendering import render_intent_detail
-from noxen.settings import load_settings, save_settings, settings_file_path
+from noxen.settings import DARK_THEME, LIGHT_THEME, load_settings, save_settings, settings_file_path
 
 
 class FilterManagerTests(unittest.TestCase):
@@ -129,6 +129,7 @@ class SettingsTests(unittest.TestCase):
                     "intercept": True,
                     "intercept_command_bar": True,
                     "history_command_bar": True,
+                    "theme": DARK_THEME,
                 },
             )
 
@@ -141,6 +142,7 @@ class SettingsTests(unittest.TestCase):
                 "intercept": False,
                 "intercept_command_bar": False,
                 "history_command_bar": True,
+                "theme": LIGHT_THEME,
             }, path)
             self.assertEqual(
                 load_settings(path),
@@ -150,6 +152,7 @@ class SettingsTests(unittest.TestCase):
                     "intercept": False,
                     "intercept_command_bar": False,
                     "history_command_bar": True,
+                    "theme": LIGHT_THEME,
                 },
             )
 
@@ -162,6 +165,7 @@ class SettingsTests(unittest.TestCase):
                 f.write("intercept=disabled\n")
                 f.write("intercept_command_bar=hidden\n")
                 f.write("history_command_bar=visible\n")
+                f.write("theme=unsupported\n")
 
             self.assertEqual(
                 load_settings(path),
@@ -171,6 +175,7 @@ class SettingsTests(unittest.TestCase):
                     "intercept": True,
                     "intercept_command_bar": True,
                     "history_command_bar": True,
+                    "theme": DARK_THEME,
                 },
             )
 
@@ -192,6 +197,7 @@ class SettingsTests(unittest.TestCase):
                     "intercept": False,
                     "intercept_command_bar": False,
                     "history_command_bar": False,
+                    "theme": DARK_THEME,
                 },
             )
 

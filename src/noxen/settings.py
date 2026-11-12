@@ -5,6 +5,8 @@ from pathlib import Path
 
 APP_NAME = "noxen"
 SETTINGS_FILENAME = "settings.txt"
+DARK_THEME = "noxen-dark"
+LIGHT_THEME = "noxen-light"
 
 DEFAULT_SETTINGS = {
     "stack": False,
@@ -12,6 +14,7 @@ DEFAULT_SETTINGS = {
     "intercept": True,
     "intercept_command_bar": True,
     "history_command_bar": True,
+    "theme": DARK_THEME,
 }
 
 
@@ -79,6 +82,8 @@ def load_settings(path: str | Path | None = None) -> dict:
                     parsed = _parse_on_off(value)
                     if parsed is not None:
                         settings["history_command_bar"] = parsed
+                elif key == "theme" and value in (DARK_THEME, LIGHT_THEME):
+                    settings["theme"] = value
     except OSError:
         pass
     return settings
@@ -95,6 +100,7 @@ def save_settings(settings: dict, path: str | Path | None = None):
         f"intercept={'on' if settings['intercept'] else 'off'}",
         f"intercept_command_bar={'on' if settings['intercept_command_bar'] else 'off'}",
         f"history_command_bar={'on' if settings['history_command_bar'] else 'off'}",
+        f"theme={settings['theme']}",
     ]
     with path.open("w") as f:
         f.write("\n".join(lines) + "\n")

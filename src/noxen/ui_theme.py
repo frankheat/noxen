@@ -4,6 +4,8 @@ import re
 from rich.text import Text
 from textual.theme import Theme
 
+from noxen.settings import DARK_THEME, LIGHT_THEME
+
 
 @dataclass(frozen=True)
 class SemanticColors:
@@ -75,7 +77,7 @@ LIGHT_BACKGROUND = "#FFFFFF"
 
 
 NOXEN_DARK_THEME = Theme(
-    name="noxen-dark",
+    name=DARK_THEME,
     primary="#32B77A",
     secondary="#65B8E8",
     warning=DARK_COLORS.warning,
@@ -100,7 +102,7 @@ NOXEN_DARK_THEME = Theme(
 
 
 NOXEN_LIGHT_THEME = Theme(
-    name="noxen-light",
+    name=LIGHT_THEME,
     primary=LIGHT_COLORS.success,
     secondary=LIGHT_COLORS.info,
     warning=LIGHT_COLORS.warning,
