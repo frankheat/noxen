@@ -17,7 +17,7 @@ from textual import work
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, Label, OptionList, Static, Switch, TabbedContent, TabPane
+from textual.widgets import Button, DataTable, Input, Label, OptionList, Rule, Static, Switch, TabbedContent, TabPane
 from textual.widgets.option_list import Option
 
 from noxen.history_columns import normalize_column_widths
@@ -273,7 +273,9 @@ class MonitorEventSplit(Vertical):
         table = self.query_one("#monitor_events", DataTable)
         # Keep at least three content rows in each pane when space permits.
         minimum = 3 + detail.styles.gutter.height
-        maximum = self.size.height - table.styles.gutter.height - 3
+        separator_height = self.query_one(Rule).outer_size.height
+        panel_margins = table.styles.margin.height + detail.styles.margin.height
+        maximum = self.size.height - separator_height - panel_margins - table.styles.gutter.height - 3
         if maximum < minimum:
             detail.styles.height = None
             return
@@ -297,28 +299,24 @@ class MonitorPane(Vertical):
     DEFAULT_CSS = """
     MonitorPane { height: 1fr; }
     #monitor_views, #monitor_views > ContentSwitcher, #monitor_events_view { height: 1fr; }
-    MonitorPane .monitor_controls { height: 3; padding: 0 1; align: left middle; background: $panel; }
+    MonitorPane .monitor_controls { height: 3; padding: 0 1; align: left middle; }
     MonitorPane .monitor_controls Button { width: auto; min-width: 10; margin-left: 1; }
     #monitor_search { width: 1fr; height: 3; }
     MonitorPane .monitor_table, MonitorPane .monitor_detail {
-        height: 1fr; margin: 0 1; border: solid $foreground-muted;
+        height: 1fr; margin: 1 1;
     }
-    MonitorEventSplit { height: 1fr; margin-top: 1; }
+    MonitorEventSplit { height: 1fr; }
     MonitorPane .monitor_empty {
         height: 1fr; padding: 1 2; color: $foreground-muted;
     }
-    MonitorPane .monitor_detail { padding: 0 1; background: $surface; }
-    #monitor_profile_body { height: 1fr; padding: 0 1; background: $background; }
-    MonitorPane .monitor_profile_panel {
-        height: 1fr; border: solid $foreground-muted; border-title-color: $foreground;
-    }
-    #monitor_profile_panel { margin-right: 1; }
+    MonitorPane .monitor_detail { background: $surface; }
+    #monitor_profile_body { height: 1fr; padding: 0 1; }
+    MonitorPane .monitor_profile_panel { height: 1fr; }
+    .monitor_profile_title { height: 1; margin: 0 1; text-style: bold; }
+    #monitor_profile_separator { margin: 0; }
     #monitor_hook_panel { width: 1fr; }
-    MonitorPane .monitor_profile_panel .monitor_controls {
-        margin-bottom: 1;
-    }
     MonitorPane .monitor_profile_panel .monitor_table {
-        width: 1fr; margin: 0; border: none; scrollbar-gutter: stable;
+        width: 1fr; margin: 1 1; scrollbar-gutter: stable;
     }
     #monitor_hook_actions { height: auto; }
     #monitor_hook_actions.stacked { layout: vertical; }
@@ -383,22 +381,28 @@ class MonitorPane(Vertical):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
                     yield ModalButton("⊟", id="monitor_columns")
                 yield Label("", id="monitor_status", markup=False)
+                yield Rule(classes="section_separator")
                 yield Label("", id="monitor_events_empty", classes="monitor_empty")
                 with MonitorEventSplit():
                     yield DataTable(id="monitor_events", cursor_type="row", classes="monitor_table")
+                    yield Rule(classes="section_separator")
                     with VerticalScroll(id="monitor_detail", classes="monitor_detail"):
                         yield Static(id="monitor_event_text", markup=False)
+                yield Rule(classes="section_separator")
             with TabPane("Profiles", id="monitor_profiles_view"):
                 with Horizontal(id="monitor_profile_body"):
-                    with Vertical(id="monitor_profile_panel", classes="monitor_profile_panel") as profiles:
-                        profiles.border_title = "Profiles"
+                    with Vertical(id="monitor_profile_panel", classes="monitor_profile_panel"):
+                        yield Label("Profiles", classes="monitor_profile_title")
                         with Horizontal(id="monitor_profile_actions_group", classes="monitor_controls"):
                             yield ModalButton("+ New profile", id="monitor_new")
                             yield ModalButton("⋯", id="monitor_profile_actions", tooltip="Profile actions")
+                        yield Rule(classes="section_separator")
                         yield MonitorProfileTable(id="monitor_profiles", cursor_type="row", fixed_rows=1,
                                                   classes="monitor_table")
-                    with Vertical(id="monitor_hook_panel", classes="monitor_profile_panel") as hooks:
-                        hooks.border_title = "Hooks"
+                        yield Rule(classes="section_separator")
+                    yield Rule("vertical", id="monitor_profile_separator", classes="section_separator")
+                    with Vertical(id="monitor_hook_panel", classes="monitor_profile_panel"):
+                        yield Label("Hooks", classes="monitor_profile_title")
                         with Horizontal(id="monitor_hook_actions", classes="monitor_controls"):
                             with Horizontal():
                                 yield ModalButton("+ Add", id="monitor_add")
@@ -407,8 +411,10 @@ class MonitorPane(Vertical):
                                 yield ModalButton("Details", id="monitor_hook_details")
                             with Horizontal(id="monitor_hook_restore_group"):
                                 yield ModalButton("Restore missing hooks", id="monitor_restore")
+                        yield Rule(classes="section_separator")
                         yield Label("", id="monitor_hooks_empty", classes="monitor_empty")
                         yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
+                        yield Rule(classes="section_separator")
 
     def on_mount(self):
         columns = self.app.db.load_monitor_event_columns()
@@ -531,10 +537,10 @@ class MonitorPane(Vertical):
 
     def hook_panel_content_width(self):
         body = self.query_one("#monitor_profile_body")
-        profiles = self.query_one("#monitor_profile_panel")
-        hooks = self.query_one("#monitor_hook_panel")
+        table = self.query_one("#monitor_hooks", DataTable)
+        # The vertical rule between the panels occupies one column.
         return (self.size.width - body.styles.gutter.width - self.PROFILE_LIST_WIDTH
-                - profiles.styles.margin.width - hooks.styles.gutter.width)
+                - 1 - table.styles.margin.width)
 
     def hook_status(self, profile, row):
         if not profile["enabled"]:

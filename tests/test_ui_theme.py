@@ -79,11 +79,27 @@ class ThemeRuntimeTests(IsolatedAppTestCase):
                     skip_device_scan=True,
                 )
                 app = NoxenApp(args)
+
+                def assert_uniform_background():
+                    background = app.screen.styles.background
+                    for selector in (
+                        "#home_form", "#intercept_header", "#intercept_output", "#edit_form",
+                        "#history_search", "#history_table", "#history_detail", "#tab_history",
+                        "#monitor_search", "#monitor_events", "#monitor_profiles",
+                        "#monitor_hooks", "#monitor_detail", "#log_verbose_group", "#log_output",
+                        "#history_input_bar", "#intercept_input_bar", "#info_perm_search",
+                        "#info_perm_table", "#info_comp_table", "#info_comp_detail", "#tab_info",
+                        "Footer",
+                    ):
+                        with self.subTest(theme=app.theme, selector=selector):
+                            self.assertEqual(app.query_one(selector).background_colors[1], background)
+
                 async with app.run_test(size=(120, 40)) as pilot:
                     self.assertEqual(app.theme, "noxen-dark")
                     self.assertEqual(app.current_theme.background, NOXEN_DARK_THEME.background)
-                    self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#1B2723")
+                    self.assertEqual(app.query_one("#session_bar").styles.background, app.screen.styles.background)
                     self.assertEqual(app.query_one("#session_info").styles.color.hex, "#E8EFEC99")
+                    assert_uniform_background()
 
                     app.action_toggle_theme()
                     await pilot.pause()
@@ -92,26 +108,15 @@ class ThemeRuntimeTests(IsolatedAppTestCase):
                     self.assertEqual(app.theme, "noxen-light")
                     self.assertEqual(app.current_theme.background, NOXEN_LIGHT_THEME.background)
                     self.assertFalse(app.current_theme.dark)
-                    self.assertEqual(app.screen.styles.background.hex, "#F3F6F4")
+                    self.assertEqual(app.screen.styles.background.hex, "#FFFFFF")
                     self.assertEqual(app.screen.styles.color.hex, "#17211D")
-                    self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#E7ECE9")
-                    self.assertEqual(app.query_one("#session_info").styles.color.hex, "#17211D99")
+                    self.assertEqual(app.query_one("#session_bar").styles.background, app.screen.styles.background)
+                    self.assertEqual(app.query_one("#session_info").styles.color.hex, LIGHT_COLORS.muted)
                     self.assertEqual(
                         app.query_one("#log_verbose_label").styles.color.hex,
                         "#17211D",
                     )
-                    self.assertEqual(
-                        app.query_one("#history_search").styles.background.hex,
-                        "#E7ECE9",
-                    )
-                    self.assertEqual(
-                        app.query_one("#tab_history").styles.background.hex,
-                        "#FFFFFF",
-                    )
-                    self.assertEqual(
-                        app.query_one("#tab_info").styles.background.hex,
-                        "#FFFFFF",
-                    )
+                    assert_uniform_background()
                     self.assertEqual(
                         app.query_one("#settings_save").styles.color.hex,
                         "#17211D",
@@ -142,6 +147,15 @@ class ThemeRuntimeTests(IsolatedAppTestCase):
                     self.assertEqual(
                         permission_search.styles.border.top[1],
                         app.query_one("#history_search").styles.border.top[1],
+                    )
+                    table = app.query_one("#info_perm_table")
+                    table.focus()
+                    await pilot.pause()
+                    self.assertTrue(table.has_focus)
+                    self.assertEqual(table.styles.background_tint.a, 0)
+                    self.assertEqual(
+                        table.get_component_styles("datatable--header").background_tint.a,
+                        0,
                     )
             finally:
                 os.chdir(cwd)

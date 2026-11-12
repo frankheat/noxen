@@ -70,6 +70,10 @@ def themed_markup(markup: str, dark: bool) -> str:
     return re.sub(r"(?<!\\)\[([^\]]+)\]", replace_tag, markup)
 
 
+DARK_BACKGROUND = "#0E1412"
+LIGHT_BACKGROUND = "#FFFFFF"
+
+
 NOXEN_DARK_THEME = Theme(
     name="noxen-dark",
     primary="#32B77A",
@@ -79,14 +83,12 @@ NOXEN_DARK_THEME = Theme(
     success=DARK_COLORS.success,
     accent="#D5A934",
     foreground="#E8EFEC",
-    background="#0E1412",
-    surface="#131C19",
-    panel="#1B2723",
+    background=DARK_BACKGROUND,
+    surface=DARK_BACKGROUND,
+    panel=DARK_BACKGROUND,
     boost="#24352F",
     dark=True,
     variables={
-        "content-background": "#0E1412",
-        "footer-background": "#1B2723",
         "footer-foreground": "#C9D5D0",
         "footer-key-foreground": DARK_COLORS.warning,
         "input-selection-background": "#A23F76 55%",
@@ -106,14 +108,15 @@ NOXEN_LIGHT_THEME = Theme(
     success=LIGHT_COLORS.success,
     accent="#6B5708",
     foreground="#17211D",
-    background="#F3F6F4",
-    surface="#FFFFFF",
-    panel="#E7ECE9",
-    boost="#DCE5E1",
+    background=LIGHT_BACKGROUND,
+    surface=LIGHT_BACKGROUND,
+    panel=LIGHT_BACKGROUND,
+    boost="#EFF1F0",
     dark=False,
     variables={
-        "content-background": "#FFFFFF",
-        "footer-background": "#E0E6E3",
+        "foreground-muted": LIGHT_COLORS.muted,
+        "text-muted": LIGHT_COLORS.muted,
+        "block-hover-background": "#EFF1F0",
         "footer-foreground": "#26332E",
         "footer-key-foreground": LIGHT_COLORS.success,
         "input-selection-background": "#8B2E63 35%",

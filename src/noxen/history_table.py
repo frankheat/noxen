@@ -65,13 +65,11 @@ class HistoryTable(ScrollView, can_focus=True):
     HistoryTable {
         background: $surface;
         color: $foreground;
-        &:focus { background-tint: $foreground 5%; }
         & > .history-table--header {
             background: $panel;
             color: $foreground;
             text-style: bold;
         }
-        &:focus > .history-table--header { background-tint: $foreground 5%; }
         & > .history-table--header-hover { background: $primary-muted; }
         & > .history-table--cursor {
             background: $table-selection-background;

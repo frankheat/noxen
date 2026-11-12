@@ -42,7 +42,7 @@ class HistoryViewTests(IsolatedAppTestCase):
             table.move_cursor(row=6)
             await pilot.pause()
             selected = table.selected_id
-            await pilot.click('#history_table', offset=(2, 1))
+            await pilot.click('#history_table', offset=(2, 0))
             self.assertEqual(app._sort_column, 'id')
             self.assertFalse(app._sort_reverse)
             self.assertEqual(table.entry_at(0)['id'], 1)
@@ -52,7 +52,7 @@ class HistoryViewTests(IsolatedAppTestCase):
             await pilot.pause()
             self.assertEqual(table.selected_id, selected)
             self.assert_detail(app, table)
-            await pilot.click('#history_table', offset=(3, 1))
+            await pilot.click('#history_table', offset=(3, 0))
             self.assertEqual(app._sort_column, 'action')
             self.assertIn('↑', table.columns['action'].label)
             self.assert_detail(app, table)

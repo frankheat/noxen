@@ -627,27 +627,12 @@ class FilterModal(ModalScreen):
         margin-top: 1;
     }
     #hfm_remove_row { height: auto; margin-top: 1; }
-    #hfm_remove_row Button {
-        height: 1;
-        border: none;
-        padding: 0 1;
-        color: $foreground;
-        background: transparent;
-    }
-    #hfm_btn_remove:hover, #hfm_btn_remove:focus {
-        color: $error;
-        background: $boost;
-        background-tint: $surface 0%;
-    }
     #hfm_type_row   { height: auto; margin-top: 1; align: left middle; }
-    #hfm_type_row Label { width: auto; margin-right: 1; content-align: left middle; }
-    #hfm_sel_type { height: 1; }
-    #hfm_sel_type > SelectCurrent { border: none; height: 1; padding: 0 1; }
     #hfm_pairs_container { height: auto; margin-top: 1; }
     .hfm_pair_row { height: 1; margin-bottom: 1; align: left middle; }
-    .hfm_pair_label { width: auto; margin-right: 1; content-align: left middle; }
-    .hfm_pair_sel { height: 1; }
-    .hfm_pair_sel > SelectCurrent { border: none; height: 1; padding: 0 1; }
+    .hfm_field_label { width: auto; margin-right: 1; content-align: left middle; }
+    .hfm_field_select { height: 1; }
+    .hfm_field_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
     .hfm_pair_row Input { width: 1fr; }
     .hfm_pair_rm {
         width: 3;
@@ -664,25 +649,25 @@ class FilterModal(ModalScreen):
     }
     #hfm_add_ctrl { height: auto; margin-top: 1; align: left middle; }
     #hfm_add_ctrl_spacer { width: 1fr; }
-    #hfm_btn_add_pair {
+    #hfm_btn_remove, #hfm_btn_add_pair, #hfm_btn_add_filter {
         height: 3;
         border: round $foreground-muted;
         background: transparent;
         color: $foreground;
         padding: 0 1;
+    }
+    #hfm_btn_remove:hover:enabled, #hfm_btn_remove:focus,
+    #hfm_btn_remove.-active:enabled {
+        border: round $error;
+        background: transparent;
+        color: $error;
+        background-tint: $surface 0%;
     }
     #hfm_btn_add_pair:hover, #hfm_btn_add_pair:focus {
         border: round $accent;
         background: transparent;
         color: $accent;
         background-tint: $surface 0%;
-    }
-    #hfm_btn_add_filter {
-        height: 3;
-        border: round $foreground-muted;
-        background: transparent;
-        color: $foreground;
-        padding: 0 1;
     }
     #hfm_btn_add_filter:hover, #hfm_btn_add_filter:focus {
         border: round $success;
@@ -694,8 +679,8 @@ class FilterModal(ModalScreen):
     #hfm_filters_table:focus { border: solid $foreground-muted; background-tint: $surface 0%; }
     """
 
-    VALID_KEYS = sorted(FilterManager.VALID_KEYS)
     TYPE_OPTIONS = [("ignore", "ignore"), ("focus", "focus")]
+    CONDITION_OPTIONS = [(key, key) for key in sorted(FilterManager.VALID_KEYS)]
     SELECT_CHROME_WIDTH = 6
 
     def __init__(self, filter_manager: FilterManager, on_filters_changed: callable, title: str = "Filters"):
@@ -708,15 +693,11 @@ class FilterModal(ModalScreen):
         self._active_pairs: list[int] = []
 
     @classmethod
-    def _option_width(cls, options) -> int:
-        return max(len(str(label)) for label, _value in options) + cls.SELECT_CHROME_WIDTH
-
-    @classmethod
-    def _fit_select_width(cls, select: Select, options) -> Select:
-        width = cls._option_width(options)
+    def _fit_select_width(cls, select: Select) -> None:
+        width = max(len(label) for label, _ in (*cls.TYPE_OPTIONS, *cls.CONDITION_OPTIONS))
+        width += cls.SELECT_CHROME_WIDTH
         select.styles.width = width
         select.styles.min_width = width
-        return select
 
     def compose(self) -> ComposeResult:
         type_select = Select(
@@ -724,20 +705,20 @@ class FilterModal(ModalScreen):
             id="hfm_sel_type",
             value="ignore",
             allow_blank=False,
+            classes="hfm_field_select",
         )
-        self._fit_select_width(type_select, self.TYPE_OPTIONS)
+        self._fit_select_width(type_select)
         with VerticalScroll(id="hfm_dialog"):
             with Horizontal(id="hfm_topbar"):
                 yield Button("✕", id="hfm_btn_close")
             yield Label(self._title, id="hfm_title")
-            yield Label("Active filters", classes="hfm_section")
             yield DataTable(id="hfm_filters_table", cursor_type="row")
             with Horizontal(id="hfm_remove_row"):
                 yield Button("Remove selected", id="hfm_btn_remove", disabled=True)
             yield Rule()
             yield Label("Add filter", classes="hfm_section")
             with Horizontal(id="hfm_type_row"):
-                yield Label("Type:")
+                yield Label("Type      :", classes="hfm_field_label")
                 yield type_select
             yield Vertical(id="hfm_pairs_container")
             with Horizontal(id="hfm_add_ctrl"):
@@ -748,7 +729,7 @@ class FilterModal(ModalScreen):
 
     def on_mount(self):
         table = self.query_one("#hfm_filters_table", DataTable)
-        table.add_column("On", key="on")
+        table.add_column("Active", key="on")
         table.add_column("ID", key="fid")
         table.add_column("Type", key="type")
         table.add_column("Rule", key="rule")
@@ -802,17 +783,16 @@ class FilterModal(ModalScreen):
         self._pair_counter += 1
         pid = self._pair_counter
         self._active_pairs.append(pid)
-        key_options = [(k, k) for k in self.VALID_KEYS]
         key_select = Select(
-            key_options,
+            self.CONDITION_OPTIONS,
             id=f"hfm_pk_{pid}",
-            value=self.VALID_KEYS[0],
+            value=self.CONDITION_OPTIONS[0][1],
             allow_blank=False,
-            classes="hfm_pair_sel",
+            classes="hfm_field_select",
         )
-        self._fit_select_width(key_select, key_options)
+        self._fit_select_width(key_select)
         row = Horizontal(
-            Label("Condition:", classes="hfm_pair_label"),
+            Label("Condition :", classes="hfm_field_label"),
             key_select,
             Input(id=f"hfm_pv_{pid}", placeholder="value  (* wildcards)"),
             Button("✕", id=f"hfm_prm_{pid}", classes="hfm_pair_rm"),

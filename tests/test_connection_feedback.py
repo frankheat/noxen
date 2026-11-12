@@ -275,7 +275,7 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                     app._clear_session_error_state()
                     await pilot.pause()
                     self.assertFalse(app.query_one("#session_bar").has_class("connection-error"))
-                    self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#1B2723")
+                    self.assertEqual(app.query_one("#session_bar").styles.background, app.screen.styles.background)
                     self.assertIn(message, str(app.query_one("#home_error", Label).render()))
                     self.assertEqual(notices, [(message, {"severity": "error", "timeout": 6})])
                     self.assertIn("unable to connect to remote frida-server", app._log_entries[-1])

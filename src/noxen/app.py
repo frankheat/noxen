@@ -1242,9 +1242,10 @@ class NoxenApp(App):
                     with Vertical(id="home_sidebar"):
                         yield HomeLogo("", id="home_logo", markup=True)
                         yield HomeInfo("", id="home_info", markup=True)
+                    yield Rule("vertical", id="home_separator", classes="section_separator")
                     with VerticalScroll(id="home_form"):
                         yield Label("Connect to App", id="home_title")
-                        yield Rule()
+                        yield Rule(classes="section_separator")
 
                         with Horizontal(classes="connect_row"):
                             yield Label("Device", classes="connect_label")
@@ -1290,7 +1291,7 @@ class NoxenApp(App):
                             yield Switch(value=False, id="home_system_anr_bypass")
 
                         yield Label("", id="home_error")
-                        yield Rule()
+                        yield Rule(classes="section_separator")
                         with Horizontal(id="home_btn_row"):
                             yield Button("Connect", id="home_btn")
                             yield Button("Disconnect", id="home_disconnect", disabled=True)
@@ -1310,6 +1311,7 @@ class NoxenApp(App):
                     ModalButton("Stack", id="btn_intercept_stack"),
                     id="intercept_header",
                 )
+                yield Rule(classes="section_separator")
                 yield RichLog(id="intercept_output", markup=True, highlight=False, auto_scroll=False)
                 with VerticalScroll(id="edit_form"):
                     with Vertical(id="ef_routing_section", classes="ef_readonly_section"):
@@ -1317,7 +1319,7 @@ class NoxenApp(App):
                             yield Label("Routing", classes="ef_section")
                             yield Label("Derived from capture", classes="ef_section_meta")
                         yield Static(id="ef_routing_body", classes="ef_context_body", markup=False)
-                        yield Rule()
+                        yield Rule(classes="section_separator")
                     yield Static(id="ef_call_body", classes="ef_context_body", markup=False)
                     with Horizontal(classes="ef_section_header"):
                         yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
@@ -1341,13 +1343,13 @@ class NoxenApp(App):
                     with Horizontal(id="ef_grant_row"):
                         yield Label("URI grants", classes="ef_label")
                         yield Static(id="ef_grant_flags", markup=False)
-                    yield Rule(classes="ef_add_separator")
+                    yield Rule(classes="section_separator ef_add_separator")
                     with Horizontal(id="ef_categories_header", classes="ef_section_header ef_add_header"):
                         yield Label("Categories", classes="ef_section")
                         yield Label("", classes="ef_section_spacer")
                         yield Button("+ Add", id="ef_add_cat")
                     yield Vertical(id="ef_categories")
-                    yield Rule(classes="ef_add_separator")
+                    yield Rule(classes="section_separator ef_add_separator")
                     with Horizontal(id="ef_extras_header", classes="ef_section_header ef_add_header"):
                         yield Label("Extras", classes="ef_section")
                         yield Label("", classes="ef_section_spacer")
@@ -1360,17 +1362,18 @@ class NoxenApp(App):
                     yield Vertical(id="ef_extras")
                     with Vertical(id="ef_readonly_context"):
                         with Vertical(id="ef_selector_section", classes="ef_readonly_section"):
-                            yield Rule()
+                            yield Rule(classes="section_separator")
                             with Horizontal(classes="ef_section_header"):
                                 yield Label("Selector", classes="ef_section")
                                 yield Label("Read-only", classes="ef_section_meta")
                             yield Static(id="ef_selector_body", classes="ef_context_body", markup=False)
                         with Vertical(id="ef_clip_section", classes="ef_readonly_section"):
-                            yield Rule()
+                            yield Rule(classes="section_separator")
                             with Horizontal(classes="ef_section_header"):
                                 yield Label("ClipData", classes="ef_section")
                                 yield Label("Read-only", classes="ef_section_meta")
                             yield Static(id="ef_clip_body", classes="ef_context_body", markup=False)
+                yield Rule(classes="section_separator")
                 yield RichLog(id="intercept_cmd_output", markup=True, highlight=False)
                 yield OptionList(id="intercept_cmd_suggestions")
                 yield Vertical(
@@ -1393,14 +1396,19 @@ class NoxenApp(App):
                     yield Label("", id="filter_bar_spacer")
                     yield Input(id="history_search", placeholder="Search", select_on_focus=False)
                     yield ModalButton("⊟", id="btn_columns")
+                yield Rule(classes="section_separator")
                 yield HistoryTable(id="history_table")
+                yield Rule(classes="section_separator")
                 yield RichLog(id="history_detail", markup=True, highlight=False, auto_scroll=False)
+                yield Rule(classes="section_separator")
             with TabPane(" Monitor ", id="tab_monitor"):
                 yield MonitorPane(id="monitor_pane")
             with TabPane(" Info app ", id="tab_info"):
                 with TabbedContent(initial="info_view_overview", id="info_views", classes="subtabs empty"):
                     with TabPane("Overview", id="info_view_overview"):
+                        yield Rule(classes="section_separator")
                         yield RichLog(id="info_overview_log", markup=True, highlight=False, auto_scroll=False)
+                        yield Rule(classes="section_separator")
                     with TabPane("Permissions", id="info_view_permissions"):
                         with Horizontal(classes="info_controls"):
                             yield Input(id="info_perm_search", placeholder="Search permissions", select_on_focus=False)
@@ -1408,7 +1416,9 @@ class NoxenApp(App):
                                 [("All sources", "all"), ("requested", "requested"), ("defined", "defined")],
                                 id="info_perm_source", value="all", allow_blank=False,
                             )
+                        yield Rule(classes="section_separator")
                         yield DataTable(id="info_perm_table", cursor_type="row")
+                        yield Rule(classes="section_separator")
                     with TabPane("Components", id="info_view_components"):
                         with Horizontal(classes="info_controls"):
                             yield Input(id="info_comp_search", placeholder="Search components", select_on_focus=False)
@@ -1420,19 +1430,24 @@ class NoxenApp(App):
                             with Horizontal(id="info_exposed_group", classes="switch-control"):
                                 yield Switch(value=False, id="info_comp_exposed")
                                 yield Label("Exposed only", classes="switch-control-label")
+                        yield Rule(classes="section_separator")
                         yield DataTable(id="info_comp_table", cursor_type="row")
+                        yield Rule(classes="section_separator")
                         yield RichLog(id="info_comp_detail", markup=True, highlight=False, auto_scroll=False)
+                        yield Rule(classes="section_separator")
                 yield Label("Connect to a target to inspect it.", id="info_empty")
             with TabPane(" Log ", id="tab_log"):
                 with Horizontal(id="log_header"):
                     with Horizontal(id="log_verbose_group", classes="switch-control"):
                         yield Switch(value=self._log_verbose, id="log_verbose")
                         yield Label("Verbose logs", id="log_verbose_label", classes="switch-control-label")
+                yield Rule(classes="section_separator")
                 yield RichLog(id="log_output", markup=True, highlight=False)
+                yield Rule(classes="section_separator")
             with TabPane(" Settings ", id="tab_settings"):
                 with VerticalScroll(id="settings_pane"):
                     yield Label("Startup Settings", id="settings_title")
-                    yield Rule()
+                    yield Rule(classes="section_separator")
                     with Horizontal(classes="settings_row settings_switch_row"):
                         yield Label("Intercept on startup")
                         yield Switch(value=self._settings["intercept"], id="settings_intercept")
@@ -1447,7 +1462,7 @@ class NoxenApp(App):
                             select_on_focus=False,
                         )
                     yield Label("", id="settings_depth_error")
-                    yield Rule()
+                    yield Rule(classes="section_separator")
                     yield Button("Save", id="settings_save")
         with Vertical(id="history_bar_container"):
             yield RichLog(id="history_cmd_output", markup=True, highlight=False)
@@ -2720,7 +2735,7 @@ class NoxenApp(App):
     def _adjust_info_component_detail(self, delta: int) -> None:
         detail = self.query_one("#info_comp_detail", RichLog)
         table = self.query_one("#info_comp_table", DataTable)
-        # region includes the border used by CSS height; size does not.
+        # Region includes the widget's padding; size is the content area.
         # The table's content height must remain large enough to be usable.
         detail_height = detail.region.height
         table_height = table.size.height
