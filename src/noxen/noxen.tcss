@@ -371,9 +371,11 @@ Input:focus {
     background: $surface;
 }
 DataTable > .datatable--cursor,
-#monitor_profiles > .datatable--fixed-cursor {
-    background: $primary;
-    color: $button-color-foreground;
+DataTable:focus > .datatable--cursor,
+DataTable > .datatable--fixed-cursor,
+DataTable:focus > .datatable--fixed-cursor {
+    background: $table-selection-background;
+    color: $table-selection-foreground;
 }
 DataTable > .datatable--header-hover {
     background: $primary-muted;

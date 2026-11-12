@@ -91,6 +91,8 @@ NOXEN_DARK_THEME = Theme(
         "footer-key-foreground": DARK_COLORS.warning,
         "input-selection-background": "#A23F76 55%",
         "button-color-foreground": "#07120D",
+        "table-selection-background": "#D75F87",
+        "table-selection-foreground": "#160811",
     },
 )
 
@@ -116,6 +118,8 @@ NOXEN_LIGHT_THEME = Theme(
         "footer-key-foreground": LIGHT_COLORS.success,
         "input-selection-background": "#8B2E63 35%",
         "button-color-foreground": "#FFFFFF",
+        "table-selection-background": LIGHT_COLORS.brand_start,
+        "table-selection-foreground": "#FFFFFF",
     },
 )
 

@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from rich.text import Text
@@ -9,6 +10,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import DataTable
 
+from noxen import history_table
 from noxen.history_table import HistoryTable
 from noxen.rendering import history_row_values, history_sort_key
 from noxen.ui_theme import register_noxen_themes, semantic_colors
@@ -27,6 +29,7 @@ def entry(number, **changes):
 
 
 class TableApp(App):
+    CSS_PATH = Path(history_table.__file__).with_name("noxen.tcss")
     CSS = 'DataTable, HistoryTable { width: 1fr; height: 1fr; }'
 
     def __init__(self, items):
