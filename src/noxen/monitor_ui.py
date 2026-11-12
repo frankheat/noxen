@@ -21,6 +21,7 @@ from textual.widgets import Button, DataTable, Input, Label, OptionList, Static,
 from textual.widgets.option_list import Option
 
 from noxen.history_columns import normalize_column_widths
+from noxen.logging_ui import log_success
 from noxen.modals import ColumnSelectModal, ExtraKeyModal
 from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_method_label,
                            event_search_text, event_sort_value, load_profiles,
@@ -976,6 +977,7 @@ class MonitorPane(Vertical):
             self.events = []
             self.refresh_events(reset=True)
             self.refresh_page_if_visible()
+            self.app.write_log(log_success("Monitor events cleared", "monitor"), notify=True)
 
     def refresh_event_status(self):
         parts = []

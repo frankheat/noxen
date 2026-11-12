@@ -135,8 +135,11 @@ class MonitorRecordingTests(IsolatedAppTestCase):
                 await pilot.click("#--content-tab-monitor_events_view")
                 self.assertTrue(any(key.key == "ctrl+l" for key in reopened.query("FooterKey")))
                 reopened.query_one("#monitor_search", Input).focus()
-                await pilot.press("ctrl+l")
-                await wait_until(lambda: not pane.events)
+                with patch.object(reopened, "notify", wraps=reopened.notify) as notify:
+                    await pilot.press("ctrl+l")
+                    await wait_until(lambda: notify.called)
+                    self.assertIn("Monitor events cleared", notify.call_args.args[0])
+                self.assertFalse(pane.events)
                 self.assertFalse(reopened.query_one("#monitor_status").display)
             db = ProjectDB(path)
             self.assertEqual(len(db.open_existing()), 1)
