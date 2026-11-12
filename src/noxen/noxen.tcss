@@ -770,7 +770,7 @@ Footer {
     height: 1;
     width: 1fr;
 }
-#filter_count_label {
+#filter_count_label, #monitor_recording_status {
     width: auto;
     height: 1;
     background: $panel;
@@ -778,6 +778,7 @@ Footer {
     content-align: right middle;
     padding: 0 2;
 }
+#monitor_recording_status { display: none; }
 
 /* Info app tab */
 #info_views.empty { height: 2; }

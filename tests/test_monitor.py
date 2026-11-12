@@ -51,7 +51,11 @@ class MonitorRecordingTests(IsolatedAppTestCase):
                 pane.begin_session(session)
                 await pane.stop_recording_feed(session)
                 await wait_until(lambda: pane.recording_task is None)
-                self.assertEqual(pane.status_text, "1 incomplete capture")
+                app.query_one("#main_tabs", TabbedContent).active = "tab_monitor"
+                footer_status = app.query_one("#app_footer #monitor_recording_status", Label)
+                await wait_until(lambda: footer_status.display)
+                self.assertEqual(str(footer_status.render()), "1 incomplete recording")
+                self.assertFalse(app.query_one("#monitor_status", Label).display)
                 self.assertEqual(tuple(app.db.monitor_event_summary()), (0, 0, 1))
                 await app.action_quit().wait()
 
@@ -114,6 +118,8 @@ class MonitorRecordingTests(IsolatedAppTestCase):
 
             reopened = NoxenApp(SimpleNamespace(project=path, new_project=None, skip_device_scan=True))
             async with reopened.run_test(size=(100, 35)) as pilot:
+                footer_status = reopened.query_one("#app_footer #monitor_recording_status", Label)
+                self.assertFalse(footer_status.display)
                 await pilot.click("#--content-tab-tab_monitor")
                 pane = reopened.query_one(MonitorPane)
                 await wait_until(lambda: len(pane.events) == 3)
@@ -132,11 +138,16 @@ class MonitorRecordingTests(IsolatedAppTestCase):
                     return any(key.key == "ctrl+l" for key in reopened.query("FooterKey"))
 
                 self.assertTrue(await pilot.click("#--content-tab-monitor_profiles_view"))
-                await wait_until(lambda: not clear_shortcut_visible())
+                await wait_until(lambda: not clear_shortcut_visible() and not footer_status.display)
                 await pilot.press("ctrl+l")
                 self.assertEqual(table.row_count, 1)
                 self.assertTrue(await pilot.click("#--content-tab-monitor_events_view"))
-                await wait_until(clear_shortcut_visible)
+                await wait_until(lambda: clear_shortcut_visible() and footer_status.display)
+                self.assertEqual(str(footer_status.render()), "1 incomplete recording")
+                self.assertTrue(await pilot.click("#--content-tab-tab_history"))
+                await wait_until(lambda: not footer_status.display)
+                self.assertTrue(await pilot.click("#--content-tab-tab_monitor"))
+                await wait_until(lambda: footer_status.display)
                 reopened.query_one("#monitor_search", Input).focus()
                 with patch.object(reopened, "notify", wraps=reopened.notify) as notify:
                     await pilot.press("ctrl+l")
@@ -144,6 +155,7 @@ class MonitorRecordingTests(IsolatedAppTestCase):
                     self.assertIn("Monitor events cleared", notify.call_args.args[0])
                 self.assertFalse(pane.events)
                 self.assertFalse(reopened.query_one("#monitor_status").display)
+                self.assertFalse(footer_status.display)
             db = ProjectDB(path)
             self.assertEqual(len(db.open_existing()), 1)
             self.assertEqual(db.monitor_event_summary(), (0, 0, 0))

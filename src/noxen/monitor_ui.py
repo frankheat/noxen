@@ -350,6 +350,7 @@ class MonitorPane(Vertical):
         self.selected = None
         self.last_connection = None
         self.status_text = None
+        self.recording_footer_text = ""
         self._hooks_layout_width = 0
         self.recording = None
         self.recording_error = ""
@@ -997,17 +998,28 @@ class MonitorPane(Vertical):
             parts.append(f"{unsaved} not saved")
         if self.recording_error and self.recording:
             parts.extend(("Save failed", f"{len(self.recording.pending)} waiting to save"))
-        incomplete = self.interrupted_recordings + int(
-            bool(self.recording and (self.recording.interrupted or self.recording.unsaved))
-        )
-        if incomplete:
-            parts.append(f"{incomplete} incomplete capture{'s' if incomplete != 1 else ''}")
         status = " · ".join(parts)
         if status != self.status_text:
             label = self.query_one("#monitor_status", Label)
             label.update(status)
             label.display = bool(status)
             self.status_text = status
+
+        incomplete = self.interrupted_recordings + int(
+            bool(self.recording and (self.recording.interrupted or self.recording.unsaved))
+        )
+        footer_text = ""
+        if (
+            incomplete
+            and self.app.query_one("#main_tabs", TabbedContent).active == "tab_monitor"
+            and self.query_one("#monitor_views", TabbedContent).active == "monitor_events_view"
+        ):
+            footer_text = f"{incomplete} incomplete recording{'s' if incomplete != 1 else ''}"
+        if footer_text != self.recording_footer_text:
+            label = self.app.query_one("#monitor_recording_status", Label)
+            label.update(footer_text)
+            label.display = bool(footer_text)
+            self.recording_footer_text = footer_text
 
     def show_event_columns(self):
         self.app.push_screen(ColumnSelectModal(
@@ -1188,6 +1200,7 @@ class MonitorPane(Vertical):
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated):
         event.stop()
         self.app.refresh_bindings()
+        self.refresh_event_status()
         if event.pane.id == "monitor_events_view":
             self.refresh_page_if_visible()
 

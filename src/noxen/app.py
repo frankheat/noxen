@@ -1468,6 +1468,7 @@ class NoxenApp(App):
         with Horizontal(id="app_footer"):
             yield Footer()
             yield Label("", id="filter_count_label")
+            yield Label("", id="monitor_recording_status", markup=False)
 
     def on_mount(self):
         for btn_id in (
@@ -2544,6 +2545,7 @@ class NoxenApp(App):
             except Exception:
                 pass
         self._update_filter_count()
+        self.query_one(MonitorPane).refresh_event_status()
 
     # --- Actions ---
 
