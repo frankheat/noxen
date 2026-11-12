@@ -109,6 +109,7 @@ _HISTORY_COLUMNS = [
     ("id",        "#"),
     ("outcome",   "→/✗"),
     ("time",      "Time"),
+    ("capture_order", "Capture order"),
     ("method",    "Method"),
     ("class",     "Class"),
     ("component", "Component"),
@@ -343,7 +344,7 @@ class NoxenApp(App):
         self._history_columns_dirty = True
         self._sort_column: str | None = "id"
         self._sort_reverse: bool = True
-        self._history_visible_cols: set[str] = {key for key, _ in _HISTORY_COLUMNS}
+        self._history_visible_cols: set[str] = {key for key, _ in _HISTORY_COLUMNS if key != "capture_order"}
         self._history_column_widths: dict[str, int] = {}
         self._history_show_stack = False
         self._history_stack_depth: int = self._settings["stack_depth"]
@@ -444,6 +445,8 @@ class NoxenApp(App):
             hold_start_cb=self._on_hold_start,
             hold_end_cb=self._on_hold_end,
             device_resolver=getattr(self._home_devices, "get_device", None),
+            begin_capture_session=self.db.begin_capture_session,
+            release_cb=self._on_intent_released,
         )
 
     def action_clear_log(self):
@@ -2255,6 +2258,7 @@ class NoxenApp(App):
 
     def _on_history_intent(self, payload, _history_id):
         entry = payload_to_history_entry(payload)
+        self.db.observe_capture_order(entry)
         save_error = None
         # Keep SQLite and memory on the same side of a concurrent Clear action.
         with self._history_lock:
@@ -2280,6 +2284,16 @@ class NoxenApp(App):
                 "history",
             ), notify=True)
         return entry["id"]
+
+    def _on_intent_released(self, intent_id: int, milliseconds: int) -> None:
+        with self._history_lock:
+            entry = next((e for e in reversed(self._all_intents) if e["id"] == intent_id), None)
+            if entry is None:
+                return
+            entry["released_at"] = milliseconds
+        self._persist_history_update(intent_id, self.db.update_released_at, milliseconds)
+        with self._history_lock:
+            self._history_refresh_pending = True
 
     def _persist_history_update(self, intent_id, update, *args):
         if intent_id is None or intent_id <= 0:

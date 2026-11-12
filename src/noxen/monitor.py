@@ -6,7 +6,8 @@ import uuid
 
 from rich.text import Text
 
-from noxen.rendering import format_uri_grant_flags
+from noxen.rendering import (capture_datetime, capture_order_label, capture_order_sort_value, detail_field_prefix,
+                             format_capture_time, format_uri_grant_flags)
 
 MAX_PROFILES = 32
 MAX_HOOKS = 128
@@ -374,9 +375,18 @@ def event_method_label(event):
     return method
 
 
-def event_sort_value(event, column):
+def event_search_text(event):
+    # A truncated Java string can end in a lone surrogate. Keep that code
+    # unit escaped so SQLite receives valid UTF-8.
+    text = json.dumps(event, ensure_ascii=False, separators=(",", ":")).casefold()
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def event_sort_value(event, column, *, reverse=False):
     if column == "time":
         return event.get("time", 0)
+    if column == "capture_order":
+        return capture_order_sort_value(event, reverse=reverse)
     if column == "profile":
         return ", ".join(event.get("profiles", [])).casefold()
     if column == "class":
@@ -515,6 +525,12 @@ def render_event_detail(event) -> Text:
         text.append(f" {value}")
         text.append(suffix, "dim")
 
+    def call_field(label, value, suffix=""):
+        text.append("\n  ")
+        text.append(detail_field_prefix(label), "dim")
+        text.append(f" {value}")
+        text.append(suffix, "dim")
+
     def typed_value(indent, name, value, rendered):
         text.append(f"\n{indent}{name}")
         text.append(f"[{value.get('type', 'unknown')}]", "dim")
@@ -528,34 +544,38 @@ def render_event_detail(event) -> Text:
             text.append(rendered)
 
     section("CALL")
-    field("Profile", ", ".join(event.get("profiles", [])))
-    field("Class  ", event.get("class", "unknown"))
+    if order := capture_order_label(event):
+        call_field("Capture order", order)
+    if (instant := capture_datetime(event.get("time"))) is not None:
+        call_field("Time", format_capture_time(instant, precise=True))
+    call_field("Profile", ", ".join(event.get("profiles", [])))
+    call_field("Class", event.get("class", "unknown"))
     types = ", ".join(event.get("types", []))
-    field("Method ", event.get("method", "unknown"), f"({types})")
-    field("Thread ", event.get("thread", "unknown"))
-    field("Outcome", event.get("outcome", "unknown"))
+    call_field("Method", event.get("method", "unknown"), f"({types})")
+    call_field("Thread", event.get("thread", "unknown"))
+    call_field("Outcome", event.get("outcome", "unknown"))
     if "webViewId" in event:
-        field("WebView ID", event["webViewId"])
+        call_field("WebView ID", event["webViewId"])
     if event.get("target"):
-        field("Target ", event["target"])
+        call_field("Target", event["target"])
     if event.get("class") == _ANDROID_LOG and event.get("method") in _LOG_LEVELS:
-        field("Level  ", _LOG_LEVELS[event["method"]])
+        call_field("Level", _LOG_LEVELS[event["method"]])
     if event.get("class") == _PREFERENCES_EDITOR:
         method = event.get("method")
         if method in _PREFERENCE_EDITS:
-            field("Phase  ", "Edit", " (staged change)")
+            call_field("Phase", "Edit", " (staged change)")
         elif method == "apply":
-            field("Phase  ", "Apply", " (asynchronous disk write)")
+            call_field("Phase", "Apply", " (asynchronous disk write)")
         elif method == "commit":
-            field("Phase  ", "Commit", " (synchronous)")
+            call_field("Phase", "Commit", " (synchronous)")
     if event.get("class") == _URL and event.get("method") == "openConnection":
-        field("Phase  ", "Prepare URLConnection")
+        call_field("Phase", "Prepare URLConnection")
         if "destination" in event:
-            field("URL    ", display_value(event["destination"]))
+            call_field("URL", display_value(event["destination"]))
     if event.get("class") == _CIPHER and "transformation" in event:
-        field("Transformation", display_value(event["transformation"]))
+        call_field("Cipher", display_value(event["transformation"]))
     if "sourcePath" in event:
-        field("Path" if event.get("method") == "delete" else "Source", display_value(event["sourcePath"]))
+        call_field("Path" if event.get("method") == "delete" else "Source", display_value(event["sourcePath"]))
     if "arguments" in event:
         section("ARGUMENTS")
         names = _argument_names(event)

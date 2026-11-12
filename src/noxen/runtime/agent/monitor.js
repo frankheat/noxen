@@ -174,7 +174,7 @@ function forwardsTo(parent, spec, receiver, args) {
     && spec.args[2] === 'android.os.Bundle' && sameObject(outer[5], args[3]);
 }
 
-function createMonitor(Java, sendMessage, schedule) {
+function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time: Date.now() })) {
   const installed = new Map();
   const forwardingFrames = new Map();
   let revision = -1, queue = [], dropped = 0, sequence = 0, inspecting = false;
@@ -390,7 +390,7 @@ function createMonitor(Java, sendMessage, schedule) {
     }
   }
   function recordCall(method, receiver, args, specs, thread, webSpec) {
-    const event = { id: ++sequence, time: Date.now(), revision: revision,
+    const event = { ...captureStamp(), id: ++sequence, revision: revision,
       profiles: specs.map(s => s.profileName),
       class: specs[0].class, method: specs[0].method, types: specs[0].args,
       thread: thread === null ? 'unknown' : String(thread) };

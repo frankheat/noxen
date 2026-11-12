@@ -5,16 +5,20 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from textual.widgets import Input, DataTable, Label, Switch, TabbedContent, TextArea
 from noxen.app import NoxenApp
 from noxen.db import ProjectDB
+from noxen.history_table import HistoryTable
 from noxen.monitor import (PROFILE_FORMAT_VERSION, argument_type, default_profiles,
                            enabled_hooks, event_detail, load_profiles, render_event_detail, signature,
                            validate_hook, validate_profiles)
 from noxen.monitor_ui import ALL_HOOKS_ROW, MonitorPane
+from noxen.rendering import history_row_texts, payload_to_history_entry, render_intent_detail
 from tests.ui_test_case import IsolatedAppTestCase
 
 
@@ -27,6 +31,38 @@ async def wait_until(predicate):
 
 
 class MonitorRecordingTests(IsolatedAppTestCase):
+    async def test_empty_incomplete_capture_is_saved_before_quit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "incomplete.noxen")
+            app = NoxenApp(SimpleNamespace(project=None, new_project=path, skip_device_scan=True))
+            async with app.run_test(size=(100, 35)):
+                pane = app.query_one(MonitorPane)
+                idle = SimpleNamespace(stop_monitor=lambda: None)
+                app.frida_session = idle
+                pane.begin_session(idle)
+                await pane.stop_recording_feed(idle)
+                self.assertIsNone(pane.recording)
+
+                session = SimpleNamespace(
+                    stop_monitor=lambda: {"events": [], "dropped": 0, "incomplete": True},
+                    cleanup=lambda: None,
+                )
+                app.frida_session = session
+                pane.begin_session(session)
+                await pane.stop_recording_feed(session)
+                await wait_until(lambda: pane.recording_task is None)
+                self.assertEqual(pane.status_text, "1 incomplete capture")
+                self.assertEqual(tuple(app.db.monitor_event_summary()), (0, 0, 1))
+                await app.action_quit().wait()
+
+            db = ProjectDB(path)
+            db.open_existing()
+            try:
+                self.assertEqual(db.monitor_event_summary(), (0, 0, 1))
+                self.assertEqual(db.monitor_event_page("", None, 1), ([], False, 0))
+            finally:
+                db.close()
+
     async def test_quit_retries_last_batch_and_reopened_project_can_search_it(self):
         def event(event_id, method):
             return {"id": event_id, "time": 1, "profiles": ["Test"], "method": method, "outcome": "returned"}
@@ -110,6 +146,131 @@ class MonitorRecordingTests(IsolatedAppTestCase):
 
 
 class MonitorModelTests(unittest.TestCase):
+    def test_history_and_monitor_persist_comparable_capture_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "capture.noxen")
+            db = ProjectDB(path)
+            db.create("capture")
+            stamp = {"time": 123, "captureSession": "a" * 32,
+                     "captureOrderScope": "project", "captureSessionNumber": 3}
+            received = datetime(2026, 11, 12, 8, tzinfo=timezone.utc)
+            observed = payload_to_history_entry(dict(stamp, captureSequence=1), now=received)
+            legacy = payload_to_history_entry({}, now=received)
+            intent_id = db.save_intent(observed)
+            db.update_released_at(intent_id, 456)
+            db.save_intent(legacy)
+            db.save_monitor_batch("recording", "", [dict(stamp, captureSequence=2)], 0, 0, "complete")
+            db.close()
+
+            db = ProjectDB(path)
+            history, older = db.open_existing()
+            try:
+                [sql], _, _ = db.monitor_event_page("", None, 5)
+                self.assertEqual(history_row_texts(history)["time"], "1970-01-01 00:00:00")
+                self.assertEqual(history["captureSession"], sql["captureSession"])
+                self.assertEqual((history["captureSequence"], sql["captureSequence"]), (1, 2))
+                history_detail = render_intent_detail(history)
+                monitor_detail = event_detail(sql)
+                timestamp = "1970-01-01 00:00:00.123 UTC"
+                self.assertIn(
+                    f"{timestamp} [dim]|[/dim] PENDING\n\n  [dim]Capture order :[/dim] Session 3 · #1",
+                    history_detail,
+                )
+                self.assertIn("Released at   :[/dim] 1970-01-01 00:00:00.456 UTC", history_detail)
+                self.assertLess(monitor_detail.index("Capture order : Session 3 · #2"),
+                                monitor_detail.index(timestamp))
+                self.assertEqual({line.index(":") for line in monitor_detail.splitlines()[1:]}, {16})
+                for detail in (history_detail, monitor_detail):
+                    self.assertNotIn(stamp["captureSession"], detail)
+                self.assertEqual(history_row_texts(older)["time"], "2026-11-12 08:00:00")
+                self.assertIn("Host receipt time (UTC)", render_intent_detail(older))
+                self.assertNotIn("Released at", render_intent_detail(older))
+                self.assertNotIn("captureSequence", older)
+            finally:
+                db.close()
+
+    def test_project_capture_order_survives_late_writes_clear_and_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "order.noxen")
+            db = ProjectDB(path)
+            db.create("order")
+            self.assertEqual(db.begin_capture_session(), (0, 1))
+            stamp = {"time": 123, "captureSession": "a" * 32, "captureOrderScope": "project"}
+            db.save_intent(payload_to_history_entry(dict(stamp, captureSequence=10)))
+            db.save_monitor_batch("first", "", [dict(stamp, captureSequence=12)], 0, 0, "complete")
+            db.save_monitor_batch("first", "", [dict(stamp, captureSequence=11)], 0, 0, "complete")
+            self.assertEqual(db.capture_order_start(), 12)
+            db.observe_capture_order(dict(stamp, captureSequence=13))
+            self.assertEqual(db.capture_order_start(), 13)
+            db.clear_monitor_events()
+            db.clear_intents()
+            db.close()
+
+            db = ProjectDB(path)
+            self.assertEqual(db.open_existing(), [])
+            try:
+                self.assertEqual(db.monitor_event_page("", None, 5), ([], False, 0))
+                self.assertEqual(db.capture_order_start(), 13)
+                self.assertEqual(db.begin_capture_session(), (13, 2))
+            finally:
+                db.close()
+
+    def test_project_capture_order_resumes_above_existing_session_numbers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy-order.noxen")
+            db = ProjectDB(path)
+            db.create("legacy-order")
+            stamp = {"time": 123, "captureSession": "a" * 32}
+            db.save_intent(payload_to_history_entry(dict(stamp, captureSequence=10)))
+            db.save_monitor_batch("old", "", [dict(stamp, captureSequence=20)], 0, 0, "complete")
+            db.close()
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("DELETE FROM project_info WHERE key='last_capture_order'")
+
+            db = ProjectDB(path)
+            [history] = db.open_existing()
+            try:
+                self.assertEqual(db.capture_order_start(), 20)
+                self.assertIn("#10 (session only)", render_intent_detail(history))
+            finally:
+                db.close()
+
+    def test_search_finds_unicode_in_new_and_legacy_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy.noxen")
+            legacy = {"method": "legacy", "arguments": [{"value": "Caffè Straße 😄"}]}
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.executescript("""
+                    CREATE TABLE monitor_recordings (
+                        id TEXT PRIMARY KEY, started TEXT NOT NULL, lost INTEGER NOT NULL,
+                        unsaved INTEGER NOT NULL, status TEXT NOT NULL, bytes INTEGER NOT NULL
+                    );
+                    INSERT INTO monitor_recordings VALUES ('old', '', 0, 0, 'complete', 0);
+                    CREATE TABLE monitor_events (
+                        id INTEGER PRIMARY KEY, recording TEXT NOT NULL
+                        REFERENCES monitor_recordings(id) ON DELETE CASCADE, payload TEXT NOT NULL
+                    );
+                """)
+                conn.execute("INSERT INTO monitor_events VALUES (1, 'old', ?)", (json.dumps(legacy),))
+            db = ProjectDB(path)
+            db.open_existing()
+            try:
+                event = {"method": "new", "arguments": [{"value": "CAFFÈ STRASSE 😄 \ud83d"}]}
+                db.save_monitor_batch("new", "", [event, {"method": "asciiOnly"}], 0, 0, "complete")
+                for query in ("caffè", "strasse", "😄"):
+                    with self.subTest(query=query):
+                        events, more, _ = db.monitor_event_page(query, None, 5)
+                        self.assertEqual([e["method"] for e in events], ["legacy", "new"])
+                        self.assertFalse(more)
+                for query, method in ((r"caff\u00e8", "legacy"), (r"caff\u00c8", "new")):
+                    events, _, _ = db.monitor_event_page(query, None, 5)
+                    self.assertEqual([e["method"] for e in events], [method])
+                events, _, _ = db.monitor_event_page("asciionly", None, 5)
+                self.assertEqual([e["method"] for e in events], ["asciiOnly"])
+                self.assertEqual(db.monitor_event_page("new", None, 5)[0][0]["arguments"], event["arguments"])
+            finally:
+                db.close()
+
     def test_event_detail_dims_types_and_keeps_captured_text_literal(self):
         event = {
             "method": "getIntent",
@@ -183,7 +344,7 @@ class MonitorModelTests(unittest.TestCase):
         detail = event_detail(dict(event, webViewSettings={
             "setJavaScriptEnabled": False, "setMixedContentMode": 1,
         }))
-        self.assertIn("WebView ID : 3", detail)
+        self.assertIn("WebView ID    : 3", detail)
         self.assertIn("JavaScript : false", detail)
         self.assertIn("Mixed content : NEVER_ALLOW", detail)
         self.assertNotIn("File access", detail)
@@ -234,7 +395,7 @@ class MonitorModelTests(unittest.TestCase):
                 {"type": "java.lang.IllegalStateException", "opaque": True},
             ],
         })
-        self.assertIn("Level   : WARN", detail)
+        self.assertIn("Level         : WARN", detail)
         self.assertIn("Throwable [java.lang.IllegalStateException] : opaque object", detail)
         self.assertNotIn("Message [", detail)
         println = event_detail({
@@ -251,6 +412,57 @@ class MonitorModelTests(unittest.TestCase):
 
 
 class MonitorUITests(IsolatedAppTestCase):
+    async def test_capture_order_column_is_optional_and_sorts_numerically_in_both_tables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "capture-columns.noxen")
+            app = NoxenApp(SimpleNamespace(project=None, new_project=path, skip_device_scan=True))
+            stamp = {"time": 1, "captureSession": "a" * 32, "captureOrderScope": "project",
+                     "captureSessionNumber": 3}
+            events = [dict(stamp, captureSequence=100), {"time": 2}, dict(stamp, captureSequence=99)]
+            for event in events:
+                entry = payload_to_history_entry(event)
+                entry["id"] = app.db.save_intent(entry)
+                app._all_intents.append(entry)
+            app.db.save_monitor_batch("recording", "", [
+                dict(event, id=index, session=1) for index, event in enumerate(events, 1)
+            ], 0, 0, "complete")
+
+            async with app.run_test(size=(120, 35)) as pilot:
+                await pilot.click("#--content-tab-tab_history")
+                history = app.query_one("#history_table", HistoryTable)
+                self.assertNotIn("capture_order", history.columns)
+                await pilot.click("#btn_columns")
+                await pilot.click("#csm_show_capture_order")
+                app.screen.query_one("#csm_width_capture_order", Input).value = "20"
+                await pilot.click("#csm_btn_apply_widths")
+                await pilot.click("#csm_btn_close")
+                self.assertEqual(history.columns["capture_order"].width, 20)
+                history_x = 2 + sum(history.columns[k].render_width for k in ("id", "outcome", "time"))
+                await pilot.click("#history_table", offset=(history_x, 1))
+                await wait_until(lambda: history.columns["capture_order"].label.endswith("↑"))
+                self.assertEqual([e["id"] for e in history._entries], [3, 1, 2])
+                self.assertIn("Session 3 · #99", history.render_line(1).text)
+                await pilot.click("#history_table", offset=(history_x, 1))
+                await wait_until(lambda: history.columns["capture_order"].label.endswith("↓"))
+                self.assertEqual([e["id"] for e in history._entries], [1, 3, 2])
+
+                await pilot.click("#--content-tab-tab_monitor")
+                monitor = app.query_one("#monitor_events", DataTable)
+                await wait_until(lambda: monitor.row_count == 3)
+                self.assertNotIn("capture_order", monitor.columns)
+                await pilot.click("#monitor_columns")
+                await pilot.click("#csm_show_capture_order")
+                await pilot.click("#csm_btn_close")
+                monitor_x = 2 + sum(column.get_render_width(monitor) for column in monitor.ordered_columns[:2])
+                for arrow, expected in (("↑", ["Session 3 · #99", "Session 3 · #100", ""]),
+                                        ("↓", ["Session 3 · #100", "Session 3 · #99", ""])):
+                    await pilot.click("#monitor_events", offset=(monitor_x, 1))
+                    await wait_until(lambda: monitor.columns["capture_order"].label.plain.endswith(arrow))
+                    self.assertEqual([monitor.get_row_at(i)[2].plain for i in range(3)], expected)
+
+                self.assertIn("capture_order", app.db.load_history_columns())
+                self.assertIn("capture_order", app.db.load_monitor_event_columns()["visible"])
+
     async def test_latest_event_search_restarts_without_timer_and_discards_stale_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "search.noxen")

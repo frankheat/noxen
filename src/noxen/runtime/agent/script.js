@@ -10,6 +10,17 @@ const Java = typeof globalThis.Java !== 'undefined' ? globalThis.Java : Java_bri
 try { globalThis.Java = Java; } catch (_) {}
 let monitor = null;
 let monitorStopped = false;
+let captureSequence = 0;
+let captureSessionNumber = 0;
+
+function captureStamp() {
+  const stamp = { time: Date.now(), captureSequence: ++captureSequence };
+  if (captureSessionNumber) {
+    stamp.captureOrderScope = "project";
+    stamp.captureSessionNumber = captureSessionNumber;
+  }
+  return stamp;
+}
 
 var lock = null;
 var ObjectJava = null;
@@ -1139,12 +1150,13 @@ function buildAttackSurface(methodName, intent, self, firstArg, sendPermission) 
   return result;
 }
 
-function processIntercept(className, methodName, intent, pendingIntentFlags, attackSurface) {
+function processIntercept(className, methodName, intent, pendingIntentFlags, attackSurface, stamp = captureStamp()) {
   var shouldDrop = false;
   var holdId = null;
   var decisionId = null;
   var isBlocking = false;
   var interrupted = false;
+  var released = false;
 
   try {
     var willBlock = blockEnabled && !waiting;
@@ -1164,6 +1176,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
 
     // --- SEND STACK TRACE ---
     send({
+        ...stamp,
         "noxenEvent": "intent",
         "protocolVersion": 1,
         "className": className,
@@ -1222,6 +1235,7 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
           infoIntent: resultingIntent
         });
       }
+      released = true;
     }
 
     resumeMode = "forward";
@@ -1242,6 +1256,12 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
     }
   }
 
+  if (released) {
+    // A failed telemetry send must not change how the original call resumes.
+    try {
+      send({ noxenEvent: "intent_released", decisionId: decisionId, time: Date.now() });
+    } catch (_) {}
+  }
   return shouldDrop;
 }
 
@@ -1360,12 +1380,14 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
 
     if (methodName === "getIntent") {
         var resultIntent = method.apply(this, arguments);
+        const stamp = captureStamp();
         var as = buildAttackSurface(methodName, resultIntent, this, null, null);
-        var shouldDrop = processIntercept(this.$className, methodName, resultIntent, null, as);
+        var shouldDrop = processIntercept(this.$className, methodName, resultIntent, null, as, stamp);
         if (shouldDrop) return null;
         return resultIntent;
     }
 
+    const stamp = captureStamp();
     let intent = null;
     let pendingIntentFlags = null;
 
@@ -1392,7 +1414,7 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
     }
 
     var as = buildAttackSurface(methodName, intent, this, firstArg, sendPermission);
-    var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as);
+    var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as, stamp);
 
     if (shouldDrop) return defaultReturn(returnType);
 
@@ -1401,9 +1423,18 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
 }
 
 rpc.exports = {
+  setCaptureOrderStart: function (previous, sessionNumber) {
+    if (captureSessionNumber || captureSequence !== 0 || !Number.isSafeInteger(previous) ||
+        previous < 0 || previous >= Number.MAX_SAFE_INTEGER ||
+        !Number.isSafeInteger(sessionNumber) || sessionNumber <= 0)
+      return false;
+    captureSequence = previous;
+    captureSessionNumber = sessionNumber;
+    return true;
+  },
   configureMonitor: function (hooks, revision) {
     if (monitorStopped) return false;
-    if (monitor === null) monitor = require('./monitor.js').createMonitor(Java, send, setInterval);
+    if (monitor === null) monitor = require('./monitor.js').createMonitor(Java, send, setInterval, captureStamp);
     return monitor.configure(hooks, revision);
   },
   stopMonitor: function () {

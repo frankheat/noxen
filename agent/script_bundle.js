@@ -1910,7 +1910,7 @@
           return outer[2] === args[2] && sameObject(outer[3], args[3]) && outer[4] === args[4] && args[5] == null;
         return outer.length === 6 && args.length === 4 && spec.args[2] === "android.os.Bundle" && sameObject(outer[5], args[3]);
       }
-      function createMonitor(Java2, sendMessage, schedule) {
+      function createMonitor(Java2, sendMessage, schedule, captureStamp2 = () => ({ time: Date.now() })) {
         const installed = /* @__PURE__ */ new Map();
         const forwardingFrames = /* @__PURE__ */ new Map();
         let revision = -1, queue = [], dropped = 0, sequence = 0, inspecting = false;
@@ -2125,8 +2125,8 @@
         }
         function recordCall(method, receiver, args, specs, thread, webSpec) {
           const event = {
+            ...captureStamp2(),
             id: ++sequence,
-            time: Date.now(),
             revision,
             profiles: specs.map((s) => s.profileName),
             class: specs[0].class,
@@ -13995,6 +13995,16 @@ std_string_c_str (StdString * self)
   }
   var monitor = null;
   var monitorStopped = false;
+  var captureSequence = 0;
+  var captureSessionNumber = 0;
+  function captureStamp() {
+    const stamp = { time: Date.now(), captureSequence: ++captureSequence };
+    if (captureSessionNumber) {
+      stamp.captureOrderScope = "project";
+      stamp.captureSessionNumber = captureSessionNumber;
+    }
+    return stamp;
+  }
   var lock = null;
   var ObjectJava = null;
   var UriJava = null;
@@ -15085,12 +15095,13 @@ std_string_c_str (StdString * self)
     }
     return result;
   }
-  function processIntercept(className, methodName, intent, pendingIntentFlags, attackSurface) {
+  function processIntercept(className, methodName, intent, pendingIntentFlags, attackSurface, stamp = captureStamp()) {
     var shouldDrop = false;
     var holdId = null;
     var decisionId = null;
     var isBlocking = false;
     var interrupted = false;
+    var released = false;
     try {
       var willBlock = blockEnabled && !waiting;
       if (willBlock) {
@@ -15106,6 +15117,7 @@ std_string_c_str (StdString * self)
       }
       var infoIntent = dumpIntent(intent);
       send({
+        ...stamp,
         "noxenEvent": "intent",
         "protocolVersion": 1,
         "className": className,
@@ -15155,6 +15167,7 @@ std_string_c_str (StdString * self)
             infoIntent: resultingIntent
           });
         }
+        released = true;
       }
       resumeMode = "forward";
     } catch (e) {
@@ -15170,6 +15183,12 @@ std_string_c_str (StdString * self)
         } finally {
           if (interrupted) Java.use("java.lang.Thread").currentThread().interrupt();
         }
+      }
+    }
+    if (released) {
+      try {
+        send({ noxenEvent: "intent_released", decisionId, time: Date.now() });
+      } catch (_) {
       }
     }
     return shouldDrop;
@@ -15271,11 +15290,13 @@ std_string_c_str (StdString * self)
       var firstArg = arguments.length > 0 ? arguments[0] : null;
       if (methodName === "getIntent") {
         var resultIntent = method.apply(this, arguments);
+        const stamp2 = captureStamp();
         var as = buildAttackSurface(methodName, resultIntent, this, null, null);
-        var shouldDrop = processIntercept(this.$className, methodName, resultIntent, null, as);
+        var shouldDrop = processIntercept(this.$className, methodName, resultIntent, null, as, stamp2);
         if (shouldDrop) return null;
         return resultIntent;
       }
+      const stamp = captureStamp();
       let intent = null;
       let pendingIntentFlags = null;
       if (isPendingIntent) {
@@ -15297,15 +15318,22 @@ std_string_c_str (StdString * self)
         if (permArg !== null && permArg !== void 0) sendPermission = String(permArg);
       }
       var as = buildAttackSurface(methodName, intent, this, firstArg, sendPermission);
-      var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as);
+      var shouldDrop = processIntercept(this.$className, methodName, intent, pendingIntentFlags, as, stamp);
       if (shouldDrop) return defaultReturn(returnType);
       return method.apply(this, arguments);
     };
   }
   rpc.exports = {
+    setCaptureOrderStart: function(previous, sessionNumber) {
+      if (captureSessionNumber || captureSequence !== 0 || !Number.isSafeInteger(previous) || previous < 0 || previous >= Number.MAX_SAFE_INTEGER || !Number.isSafeInteger(sessionNumber) || sessionNumber <= 0)
+        return false;
+      captureSequence = previous;
+      captureSessionNumber = sessionNumber;
+      return true;
+    },
     configureMonitor: function(hooks, revision) {
       if (monitorStopped) return false;
-      if (monitor === null) monitor = require_monitor().createMonitor(Java, send, setInterval);
+      if (monitor === null) monitor = require_monitor().createMonitor(Java, send, setInterval, captureStamp);
       return monitor.configure(hooks, revision);
     },
     stopMonitor: function() {

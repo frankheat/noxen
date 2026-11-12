@@ -23,9 +23,10 @@ from textual.widgets.option_list import Option
 from noxen.history_columns import normalize_column_widths
 from noxen.modals import ColumnSelectModal, ExtraKeyModal
 from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_method_label,
-                           event_sort_value, load_profiles,
+                           event_search_text, event_sort_value, load_profiles,
                            missing_default_hooks, new_profile, render_event_detail, signature, validate_hook,
                            validate_profiles)
+from noxen.rendering import capture_datetime, capture_order_label, format_capture_time
 from noxen.ui_theme import enabled_cell
 
 ALL_HOOKS_ROW = ":all"
@@ -286,11 +287,11 @@ class MonitorPane(Vertical):
     RECORDING_BUFFER = 4096
     EVENT_PAGE_SIZE = 200
     EVENT_COLUMNS = (
-        ("id", "ID"), ("time", "Time"), ("profile", "Profile"),
+        ("id", "ID"), ("time", "Time"), ("capture_order", "Capture order"), ("profile", "Profile"),
         ("class", "Class"), ("method", "Method"), ("outcome", "Outcome"),
     )
     EVENT_COLUMN_KEYS = frozenset(key for key, _ in EVENT_COLUMNS)
-    DEFAULT_EVENT_COLUMNS = EVENT_COLUMN_KEYS - {"class"}
+    DEFAULT_EVENT_COLUMNS = EVENT_COLUMN_KEYS - {"class", "capture_order"}
 
     DEFAULT_CSS = """
     MonitorPane { height: 1fr; }
@@ -693,6 +694,8 @@ class MonitorPane(Vertical):
             if payload.get("noxenEvent") == "monitor_status":
                 self.pending_status = payload
                 return
+            for event in payload.get("events", []):
+                self.app.db.observe_capture_order(event)
             if len(self.inbox) >= 128:
                 self.inbound_lost += len(payload.get("events", [])) + payload.get("dropped", 0)
                 return
@@ -717,7 +720,7 @@ class MonitorPane(Vertical):
                     "statuses": [{"profile": h["profile"], "index": h["index"],
                                   "state": "Error", "detail": str(exc)} for h in hooks]})
 
-    def drain(self):
+    def drain(self, *, incomplete=False, stop_failed=False):
         if self.clearing:
             return
         connection = getattr(self.app, "_connection_state", "disconnected")
@@ -749,22 +752,27 @@ class MonitorPane(Vertical):
                 lost += payload.get("dropped", 0)
                 for event in payload.get("events", []):
                     event = dict(event, session=self.session_number)
+                    if "captureSequence" in event and payload.get("captureSession"):
+                        event["captureSession"] = payload["captureSession"]
                     if self.target:
                         event["target"] = self.target
                     captured.append(event)
         self.lost += lost
-        self.queue_recording(captured, lost)
-        if interrupted and self.recording:
-            self.recording.interrupted = True
+        if (interrupted or stop_failed) and (self.recording or captured or lost):
+            incomplete = True
+        self.queue_recording(captured, lost, incomplete=incomplete)
         self.refresh_page_if_visible()
         self.refresh_event_status()
 
-    def queue_recording(self, events, lost):
-        if self.recording is None and (events or lost):
+    def queue_recording(self, events, lost, *, incomplete=False):
+        if self.recording is None and (events or lost or incomplete):
             self.recording = MonitorRecording()
         recording = self.recording
         if recording is None:
             return
+        if incomplete and not recording.interrupted:
+            recording.interrupted = True
+            recording.dirty = True
         if events or lost:
             available = self.RECORDING_BUFFER - len(recording.pending)
             recording.pending.extend(events[:available])
@@ -784,9 +792,10 @@ class MonitorPane(Vertical):
             while True:
                 batch = list(islice(recording.pending, self.RECORDING_BATCH))
                 last_batch = len(batch) == len(recording.pending)
-                status = "open"
-                if finish and last_batch:
-                    status = "incomplete" if recording.interrupted or recording.unsaved else "complete"
+                if recording.interrupted or recording.unsaved:
+                    status = "incomplete"
+                else:
+                    status = "complete" if finish and last_batch else "open"
                 recording.dirty = not last_batch
                 await asyncio.to_thread(
                     self.app.db.save_monitor_batch, recording.id, recording.started, batch,
@@ -830,17 +839,16 @@ class MonitorPane(Vertical):
             return
         self.drain()
         incomplete = False
+        stop_failed = False
         try:
             final = await asyncio.to_thread(session.stop_monitor)
             if final:
-                incomplete = final.get("incomplete", False)
+                incomplete = final.get("incomplete") is True
                 self.receive(session, final)
         except Exception:
-            incomplete = True
+            stop_failed = True
         self.stopped_session = session
-        self.drain()
-        if incomplete and self.recording:
-            self.recording.interrupted = True
+        self.drain(incomplete=incomplete, stop_failed=stop_failed)
 
     def request_event_page(self):
         self.event_page_version += 1
@@ -922,7 +930,7 @@ class MonitorPane(Vertical):
             if event["_db_id"] in existing_ids:
                 continue
             if column != "id":
-                event["_sort_key"] = event_sort_value(event, column)
+                event["_sort_key"] = event_sort_value(event, column, reverse=reverse)
             key = self.event_order_key(event)
             if not more or (key >= self.next_event_cursor if reverse else key <= self.next_event_cursor):
                 self.events.append(event)
@@ -978,8 +986,11 @@ class MonitorPane(Vertical):
             parts.append(f"{unsaved} not saved")
         if self.recording_error and self.recording:
             parts.extend(("Save failed", f"{len(self.recording.pending)} waiting to save"))
-        if self.interrupted_recordings:
-            parts.append(f"{self.interrupted_recordings} incomplete captures")
+        incomplete = self.interrupted_recordings + int(
+            bool(self.recording and (self.recording.interrupted or self.recording.unsaved))
+        )
+        if incomplete:
+            parts.append(f"{incomplete} incomplete capture{'s' if incomplete != 1 else ''}")
         status = " · ".join(parts)
         if status != self.status_text:
             label = self.query_one("#monitor_status", Label)
@@ -1010,9 +1021,10 @@ class MonitorPane(Vertical):
         if self.recording_error and self.recording:
             pending_id = 1 << 63  # Greater than any SQLite row ID.
             for event in list(self.recording.pending)[-self.EVENT_PAGE_SIZE:]:
-                if not query or query in json.dumps(event).casefold():
+                if (not query or query in event_search_text(event)
+                        or (r"\u" in query and query in json.dumps(event).casefold())):
                     pending = dict(event, _recording=self.recording.id)
-                    value = pending_id if column == "id" else event_sort_value(event, column)
+                    value = pending_id if column == "id" else event_sort_value(event, column, reverse=reverse)
                     visible.setdefault(self.event_key(pending), dict(pending, _sort_key=value))
             visible = dict(sorted(visible.items(), key=lambda pair: (
                 pair[1]["_sort_key"], pair[1].get("_db_id", pending_id)
@@ -1060,7 +1072,8 @@ class MonitorPane(Vertical):
                 if first_column == "id" and table.get_cell(key, "id") != event_id:
                     table.update_cell(key, "id", event_id, update_width=True)
                 continue
-            timestamp = datetime.fromtimestamp(e.get("time", 0) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            instant = capture_datetime(e.get("time"))
+            timestamp = format_capture_time(instant) if instant is not None else "—"
             cells = {
                 "id": event_id,
                 "time": Text(timestamp, no_wrap=True),
@@ -1069,6 +1082,8 @@ class MonitorPane(Vertical):
                 "method": Text(event_method_label(e), no_wrap=True, overflow="ellipsis"),
                 "outcome": Text(e.get("outcome", "unknown"), no_wrap=True),
             }
+            if "capture_order" in column_keys:
+                cells["capture_order"] = Text(capture_order_label(e), no_wrap=True, overflow="ellipsis")
             table.add_row(*(cells[k] for k in column_keys), key=key)
         if reordered:
             # Each row has its own cell object even when visible labels repeat.

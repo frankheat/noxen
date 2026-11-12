@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { createMonitor } = require('../agent/monitor.js');
 
 const agentPath = path.join(__dirname, '..', 'agent', 'script.js');
 const source = fs.readFileSync(agentPath, 'utf8').replace(
@@ -57,7 +58,53 @@ test('intent events identify protocol and retain explicit blocking/passive decis
     assert.equal(event.protocolVersion, 1);
     assert.equal(event.decision.required, state === 'blocking');
     assert.equal(event.decision.id, state === 'blocking' ? 'decision-123-1' : null);
+    assert.equal(messages.some(payload => payload.noxenEvent === 'intent_released'), state === 'blocking');
   }
+});
+
+test('Intent and Monitor share observation order across a device clock adjustment', () => {
+  const { context, messages, exports } = agent();
+  context.require = () => ({ createMonitor });
+  context.setInterval = () => {};
+  context.Java.perform = callback => callback();
+  context.blockEnabled = false;
+  context.getStackTrace = () => [];
+  context.dumpIntent = () => ({});
+  context.buildAttackSurface = () => ({});
+  let time = 1500;
+  context.Date = { now: () => time };
+  assert.equal(exports.setCaptureOrderStart(-1, 3), false);
+  assert.equal(exports.setCaptureOrderStart(218, 0), false);
+  assert.equal(exports.setCaptureOrderStart(218, 3), true);
+  assert.equal(exports.setCaptureOrderStart(0, 4), false);
+
+  const query = { handle: 'sql', implementation: null, apply: () => 'rows' };
+  context.Java.use = () => ({ query: { overload: () => query } });
+  exports.configureMonitor([{
+    class: 'Database', method: 'query', args: [],
+    profile: 'sql', profileName: 'SQL', index: 0,
+  }], 0);
+  const intent = {};
+  const getter = {
+    returnType: { className: 'android.content.Intent' },
+    apply() { time = 2000; return intent; },
+  };
+  context.createHook({ getIntent: { overload: () => getter } }, 'Example', 'getIntent', []);
+  assert.equal(getter.implementation.call({ $className: 'Example' }), intent);
+  time = 1000;
+  assert.equal(query.implementation(), 'rows');
+
+  const captured = messages.find(event => event.noxenEvent === 'intent');
+  const [sql] = exports.stopMonitor().events;
+  assert.equal(captured.time, 2000);
+  assert.equal(sql.time, 1000);
+  assert.equal(captured.captureSequence, 219);
+  assert.equal(sql.captureSequence, 220);
+  assert.equal(captured.captureOrderScope, 'project');
+  assert.equal(sql.captureOrderScope, 'project');
+  assert.equal(captured.captureSessionNumber, 3);
+  assert.equal(sql.captureSessionNumber, 3);
+  assert.equal(sql.id, 1);
 });
 
 test('missing, malformed and stale IDs cannot decide, modify or release an active hold', () => {
@@ -121,6 +168,8 @@ test('decisions arriving before wait are retained, including Drop and the comple
     const { context, exports, messages } = agent();
     const mods = [{ type: 'action', key: '', val: 'changed', extraType: '' }];
     let notifications = 0;
+    let time = 2000;
+    context.Date = { now: () => time };
     context.getStackTrace = () => [];
     context.dumpIntent = () => ({});
     context.endHold = () => {};
@@ -137,6 +186,7 @@ test('decisions arriving before wait are retained, including Drop and the comple
     };
     context.applyModifications = () => {
       assert.equal(context.modQueue[0].val, 'changed');
+      time = 2100;
       return { ok: true };
     };
     assert.equal(context.processIntercept('Example', 'onReceive', {}, null, null), operation === 'drop');
@@ -145,6 +195,12 @@ test('decisions arriving before wait are retained, including Drop and the comple
     assert.equal(context.activeDecisionId, null);
     assert.equal(messages.some(m => typeof m === 'string' && m.includes('Blocking Error')), false);
     assert.equal(messages.some(m => m.noxenEvent === 'modification_result'), operation.endsWith('WithMods'));
+    const release = messages.find(m => m.noxenEvent === 'intent_released');
+    if (operation === 'drop') assert.equal(release, undefined);
+    else {
+      assert.equal(release.decisionId, 'decision-123-1');
+      assert.equal(release.time, operation.endsWith('WithMods') ? 2100 : 2000);
+    }
   }
 });
 

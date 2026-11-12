@@ -30,6 +30,27 @@ class SessionConfigTests(unittest.TestCase):
 
 
 class FridaSessionMessageTests(unittest.TestCase):
+    def test_release_matches_only_the_confirmed_held_intent(self):
+        released = []
+        session = FridaSession(
+            SessionConfig(), FilterManager(), lambda message: None, lambda blocked: None,
+            get_stack=lambda: (False, 0), history_cb=lambda _payload, number: number,
+            release_cb=lambda intent_id, time: released.append((intent_id, time)),
+        )
+        def receive(payload):
+            session.on_message({"type": "send", "payload": payload}, None)
+
+        intent = {"noxenEvent": "intent", "protocolVersion": 1, "className": "Example",
+                  "methodName": "getIntent", "infoIntent": {}, "stackTrace": []}
+        receive(dict(intent, decision={"required": True, "id": "held"}))
+        receive(dict(intent, decision={"required": False, "id": None}))
+        release = {"noxenEvent": "intent_released", "decisionId": "held", "time": 123}
+        receive(dict(release, decisionId="different"))
+        receive(dict(release, time="invalid"))
+        receive(release)
+        receive(release)
+        self.assertEqual(released, [(1, 123)])
+
     def test_extra_script_messages_and_invalid_events_never_change_interception(self):
         valid = {
             "noxenEvent": "intent", "protocolVersion": 1,

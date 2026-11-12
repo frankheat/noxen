@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from noxen.history_columns import normalize_history_column_widths
-from noxen.monitor import event_sort_value
+from noxen.monitor import event_search_text, event_sort_value
+from noxen.rendering import capture_order
 
 _MIGRATED_INTENT_COLUMNS = {
     "outcome": "TEXT",
@@ -20,12 +21,17 @@ _MIGRATED_INTENT_COLUMNS = {
     "modification_error": "TEXT",
     "intent_package": "TEXT",
     "capture_metadata": "TEXT",
+    "capture_order": "TEXT",
+    "released_at": "INTEGER",
 }
 
 _CAPTURE_METADATA_KEYS = (
     "extrasMeta", "categoriesTruncated", "categoriesReadError",
     "errors", "unreadableFields", "truncatedFields",
 )
+_CAPTURE_ORDER_KEY = "last_capture_order"
+_CAPTURE_SESSION_KEY = "last_capture_session"
+_MAX_CAPTURE_ORDER = (1 << 53) - 1
 
 
 def _stored_capture_metadata(info: dict):
@@ -63,6 +69,8 @@ class ProjectDB:
         self._path = path
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
+        self._capture_order_lock = threading.Lock()
+        self._observed_capture_order = 0
         self.load_warnings: list[str] = []
 
     # ------------------------------------------------------------------
@@ -127,10 +135,51 @@ class ProjectDB:
                     pass
                 self._conn = None
 
-    def save_monitor_batch(self, recording, started, events, lost, unsaved, status):
-        payloads = [json.dumps(event, separators=(",", ":")) for event in events]
+    def observe_capture_order(self, event):
+        sequence = event.get("captureSequence")
+        if event.get("captureOrderScope") == "project" and type(sequence) is int and 0 < sequence <= _MAX_CAPTURE_ORDER:
+            with self._capture_order_lock:
+                self._observed_capture_order = max(self._observed_capture_order, sequence)
+
+    def capture_order_start(self):
+        saved = int(self.get_info(_CAPTURE_ORDER_KEY, "0"))
+        with self._capture_order_lock:
+            return max(saved, self._observed_capture_order)
+
+    def begin_capture_session(self):
+        previous = self.capture_order_start()
         with self._lock, self._require_connection() as conn:
-            size = sum(map(len, payloads))
+            conn.execute("""
+                INSERT INTO project_info (key, value) VALUES (?, '1')
+                ON CONFLICT(key) DO UPDATE SET value=CAST(project_info.value AS INTEGER) + 1
+            """, (_CAPTURE_SESSION_KEY,))
+            number = conn.execute(
+                "SELECT value FROM project_info WHERE key=?", (_CAPTURE_SESSION_KEY,)
+            ).fetchone()[0]
+        return previous, int(number)
+
+    @staticmethod
+    def _save_capture_order(conn, sequence):
+        conn.execute("""
+            INSERT INTO project_info (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            WHERE CAST(project_info.value AS INTEGER) < CAST(excluded.value AS INTEGER)
+        """, (_CAPTURE_ORDER_KEY, str(sequence)))
+
+    def save_monitor_batch(self, recording, started, events, lost, unsaved, status):
+        rows = []
+        size = 0
+        last_capture = 0
+        for event in events:
+            payload = json.dumps(event, separators=(",", ":"))
+            # The escaped payload is already sufficient for ASCII-only rows.
+            search_text = event_search_text(event) if r"\u" in payload else None
+            rows.append((recording, payload, search_text))
+            size += len(payload)
+            order = capture_order(event)
+            if order:
+                last_capture = max(last_capture, order["captureSequence"])
+        with self._lock, self._require_connection() as conn:
             conn.execute("""
                 INSERT INTO monitor_recordings (id, started, lost, unsaved, status, bytes)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -138,9 +187,11 @@ class ProjectDB:
                     status=excluded.status, bytes=monitor_recordings.bytes+excluded.bytes
             """, (recording, started, lost, unsaved, status, size))
             conn.executemany(
-                "INSERT INTO monitor_events (recording, payload) VALUES (?, ?)",
-                ((recording, payload) for payload in payloads),
+                "INSERT INTO monitor_events (recording, payload, search_text) VALUES (?, ?, ?)",
+                rows,
             )
+            if last_capture:
+                self._save_capture_order(conn, last_capture)
 
     def monitor_event_summary(self):
         with self._lock:
@@ -168,8 +219,13 @@ class ProjectDB:
                 conditions.append(f"({sort_key}, id) {comparison} (?, ?)")
                 params.extend(before)
         if query:
-            conditions.append("instr(lower(payload), ?) > 0")
+            match = "instr(COALESCE(search_text, lower(payload)), ?) > 0"
             params.append(query)
+            if r"\u" in query:
+                # Details also show escaped Unicode, which users can paste into search.
+                match = f"({match} OR instr(lower(payload), ?) > 0)"
+                params.append(query)
+            conditions.append(match)
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         # Search can scan the project. Use a separate read-only connection so
         # SQLite's WAL lets capture continue while a page is being read.
@@ -182,7 +238,7 @@ class ProjectDB:
             if column != "id":
                 conn.create_function(
                     "monitor_sort_key", 1,
-                    lambda payload: event_sort_value(json.loads(payload), column),
+                    lambda payload: event_sort_value(json.loads(payload), column, reverse=reverse),
                     deterministic=True,
                 )
             rows = conn.execute(
@@ -199,7 +255,14 @@ class ProjectDB:
 
     def clear_monitor_events(self):
         with self._lock, self._require_connection() as conn:
+            self._save_observed_capture_order(conn)
             conn.execute("DELETE FROM monitor_recordings")
+
+    def _save_observed_capture_order(self, conn):
+        with self._capture_order_lock:
+            observed = self._observed_capture_order
+        if observed:
+            self._save_capture_order(conn, observed)
 
     def _require_connection(self):
         if self._conn is None:
@@ -234,7 +297,8 @@ class ProjectDB:
             CREATE TABLE IF NOT EXISTS monitor_events (
                 id INTEGER PRIMARY KEY,
                 recording TEXT NOT NULL REFERENCES monitor_recordings(id) ON DELETE CASCADE,
-                payload TEXT NOT NULL
+                payload TEXT NOT NULL,
+                search_text TEXT
             );
             CREATE INDEX IF NOT EXISTS monitor_events_recording ON monitor_events(recording, id);
             CREATE TABLE IF NOT EXISTS intents (
@@ -266,6 +330,47 @@ class ProjectDB:
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE intents ADD COLUMN {name} {definition}")
         self._conn.commit()
+        if "search_text" not in self._table_columns("monitor_events"):
+            self._migrate_monitor_search()
+        if not self.get_info(_CAPTURE_ORDER_KEY):
+            self._initialize_capture_order()
+
+    def _initialize_capture_order(self):
+        with self._conn as conn:
+            last_capture = 0
+            for sql in (
+                "SELECT capture_order FROM intents WHERE capture_order IS NOT NULL",
+                "SELECT payload FROM monitor_events WHERE instr(payload, 'captureSequence') > 0",
+            ):
+                for (raw,) in conn.execute(sql):
+                    try:
+                        event = json.loads(raw)
+                    except (ValueError, RecursionError):
+                        continue
+                    if isinstance(event, dict) and (order := capture_order(event)):
+                        last_capture = max(last_capture, order["captureSequence"])
+            self._save_capture_order(conn, last_capture)
+
+    def _migrate_monitor_search(self):
+        def legacy_search_text(payload):
+            try:
+                return event_search_text(json.loads(payload))
+            except (ValueError, RecursionError):
+                return None
+
+        with self._conn as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if "search_text" in self._table_columns("monitor_events"):
+                return
+            conn.execute("ALTER TABLE monitor_events ADD COLUMN search_text TEXT")
+            conn.create_function("monitor_search_text", 1, legacy_search_text)
+            try:
+                conn.execute(
+                    "UPDATE monitor_events SET search_text = monitor_search_text(payload) WHERE instr(payload, ?) > 0",
+                    (r"\u",),
+                )
+            finally:
+                conn.create_function("monitor_search_text", 1, None)
 
     def _table_columns(self, table_name: str) -> set[str]:
         rows = self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -341,6 +446,9 @@ class ProjectDB:
                     {},
                     dict,
                 ),
+                **(capture_order(self._load_json_field(row_id, "capture_order", row["capture_order"], {}, dict))
+                   if row["capture_order"] is not None else {}),
+                **({"released_at": row["released_at"]} if row["released_at"] is not None else {}),
             })
         return entries
 
@@ -377,13 +485,14 @@ class ProjectDB:
         if self._conn is None:
             return 0
         info = entry.get("intent", {}) or {}
+        order = capture_order(entry)
         with self._lock, self._conn:
             cur = self._conn.execute(
                 """INSERT INTO intents
                    (timestamp, class, method, action, component, data, mime_type, selector, clip_data, flags,
                     categories, extras, stack_trace, pending_intent_flags, attack_surface, intent_package,
-                    capture_metadata)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    capture_metadata, capture_order)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     entry.get("timestamp"),
                     entry.get("class"),
@@ -402,8 +511,11 @@ class ProjectDB:
                     json.dumps(entry.get("attackSurface")) if entry.get("attackSurface") else None,
                     _stored_package(info),
                     _stored_capture_metadata(info),
+                    json.dumps(order) if order else None,
                 ),
             )
+            if order:
+                self._save_capture_order(self._conn, order["captureSequence"])
             return cur.lastrowid
 
     def save_intercept_filters(self, filters: list) -> None:
@@ -480,6 +592,7 @@ class ProjectDB:
         if self._conn is None:
             raise RuntimeError("Project database is unavailable")
         with self._lock, self._conn:
+            self._save_observed_capture_order(self._conn)
             self._conn.execute("DELETE FROM intents")
 
     def update_modified_intent(self, intent_id: int, original_info: dict, modified_info: dict) -> None:
@@ -534,6 +647,10 @@ class ProjectDB:
                 "UPDATE intents SET outcome=? WHERE id=?",
                 (outcome, intent_id),
             )
+
+    def update_released_at(self, intent_id: int, milliseconds: int) -> None:
+        with self._lock, self._require_connection() as conn:
+            conn.execute("UPDATE intents SET released_at=? WHERE id=?", (milliseconds, intent_id))
 
     # ------------------------------------------------------------------
     # Properties

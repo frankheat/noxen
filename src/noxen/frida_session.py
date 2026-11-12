@@ -1,14 +1,16 @@
 import threading
 from dataclasses import dataclass
+from uuid import uuid4
 
 from noxen.agent_loader import ExtraScriptSource, HooksLoadResult, load_agent_script, load_hook_config
 from noxen.filters import FilterManager
 from noxen.logging_ui import log_debug, log_error, log_info, log_success, log_warning
-from noxen.rendering import payload_to_filter_context, render_intercept_block
+from noxen.rendering import capture_datetime, payload_to_filter_context, render_intercept_block
 
 
 MODIFICATION_CONFIRM_TIMEOUT = 5
 HOOK_REPORT_TIMEOUT = 30
+MAX_PENDING_RELEASES = 64
 
 
 @dataclass
@@ -55,6 +57,8 @@ class FridaSession:
         hold_start_cb: callable = None,
         hold_end_cb: callable = None,
         device_resolver: callable = None,
+        begin_capture_session: callable = None,
+        release_cb: callable = None,
     ):
         self._config = config
         self.filter_manager = filter_manager
@@ -68,6 +72,8 @@ class FridaSession:
         self.hold_start_cb = hold_start_cb
         self.hold_end_cb = hold_end_cb
         self.device_resolver = device_resolver
+        self.begin_capture_session = begin_capture_session
+        self.release_cb = release_cb
         self.api_level_cb = None
         self.hook_warning_cb = None
         self.connected_cb = None
@@ -86,10 +92,12 @@ class FridaSession:
         self.hook_registration_count = None
         self._lock = threading.Lock()
         self._generation = 0
+        self._capture_session = uuid4().hex
         self._ready = False
         self._blocking_enabled = True
         self._intercept_counter = 0
         self._history_counter = 0
+        self._pending_releases: dict[str, int] = {}
         self._modification_lock = threading.Lock()
         self._pending_modifications: dict[str, tuple[threading.Event, dict]] = {}
 
@@ -97,6 +105,8 @@ class FridaSession:
         with self._lock:
             self._device_id = device_id
             self._generation += 1
+            self._capture_session = uuid4().hex
+            self._pending_releases.clear()
             self._ready = False
             self.hook_registration_count = None
             generation = self._generation
@@ -232,6 +242,10 @@ class FridaSession:
                     return
 
             stage = "hooks"
+            if self.begin_capture_session is not None:
+                previous, session_number = self.begin_capture_session()
+                if script.exports_sync.set_capture_order_start(previous, session_number) is not True:
+                    raise RuntimeError("Could not initialize the project's capture order")
             self._hooks_result = hooks_result
             hook_report = script.exports_sync.proxy(hooks_data)
             if self.monitor_hooks:
@@ -456,7 +470,8 @@ class FridaSession:
         with self._lock:
             if generation != self._generation or self._script is not script:
                 return
-        self.on_message(message, data)
+            capture_session = self._capture_session
+        self.on_message(message, data, capture_session=capture_session)
 
     def _receive_hook_report(self, report):
         with self._lock:
@@ -494,24 +509,29 @@ class FridaSession:
     def stop_monitor(self):
         import frida
 
-        script = self._script
+        with self._lock:
+            script = self._script
+            capture_session = self._capture_session
         if script is None:
             raise RuntimeError("Monitor is not connected")
         cancellable = frida.Cancellable()
         timeout = threading.Timer(2.0, cancellable.cancel)
         timeout.start()
         try:
-            return script.exports_sync.stop_monitor(cancellable=cancellable)
+            batch = script.exports_sync.stop_monitor(cancellable=cancellable)
+            return dict(batch, captureSession=capture_session) if batch else batch
         finally:
             timeout.cancel()
 
-    def on_message(self, message, data):
+    def on_message(self, message, data, *, capture_session=None):
         if message["type"] == "send":
             payload = message["payload"]
             if isinstance(payload, dict):
                 event_name = payload.get("noxenEvent")
                 if event_name in ("monitor_batch", "monitor_status"):
                     if self.monitor_cb:
+                        if event_name == "monitor_batch":
+                            payload = dict(payload, captureSession=capture_session or self._capture_session)
                         self.monitor_cb(payload)
                     return
                 if event_name == "hook_report":
@@ -527,6 +547,9 @@ class FridaSession:
                 if event_name == "hold_end":
                     if self.hold_end_cb:
                         self.hold_end_cb(payload)
+                    return
+                if event_name == "intent_released":
+                    self._on_intent_released(payload, capture_session)
                     return
                 if event_name == "modification_result":
                     decision_id = payload.get("decisionId")
@@ -547,6 +570,8 @@ class FridaSession:
                         "Ignored invalid Intent event: unsupported protocol or malformed payload", "agent"
                     ))
                     return
+                if "captureSequence" in payload:
+                    payload = dict(payload, captureSession=capture_session or self._capture_session)
 
                 self._history_counter += 1
                 db_id = None
@@ -559,6 +584,12 @@ class FridaSession:
                 decision = payload["decision"]
                 requires_decision = decision["required"]
                 decision_id = decision.get("id")
+                if requires_decision and self.release_cb and db_id is not None:
+                    with self._lock:
+                        if capture_session is None or capture_session == self._capture_session:
+                            if len(self._pending_releases) >= MAX_PENDING_RELEASES:
+                                del self._pending_releases[next(iter(self._pending_releases))]
+                            self._pending_releases[decision_id] = db_id
                 is_visible = self.filter_manager.is_visible(payload_to_filter_context(payload))
 
                 if not requires_decision:
@@ -585,6 +616,17 @@ class FridaSession:
         elif message["type"] == "error":
             detail = message.get("stack") or message.get("description", "Unknown error")
             self.log_cb(log_error(f"JavaScript error: {detail}", "agent"))
+
+    def _on_intent_released(self, payload, capture_session):
+        decision_id = payload.get("decisionId")
+        if self.release_cb is None or not isinstance(decision_id, str) or capture_datetime(payload.get("time")) is None:
+            return
+        with self._lock:
+            if capture_session is not None and capture_session != self._capture_session:
+                return
+            intent_id = self._pending_releases.pop(decision_id, None)
+        if intent_id is not None:
+            self.release_cb(intent_id, payload["time"])
 
     @staticmethod
     def _valid_intent_event(payload):
@@ -677,7 +719,11 @@ class FridaSession:
                         del self._pending_modifications[decision_id]
 
     def drop(self, decision_id=None):
-        return bool(self._script.exports_sync.drop(decision_id))
+        dropped = bool(self._script.exports_sync.drop(decision_id))
+        if dropped:
+            with self._lock:
+                self._pending_releases.pop(decision_id, None)
+        return dropped
 
     def stage_mod(self, mod_type, key, val, extra_type, decision_id=None):
         return bool(self._script.exports_sync.stage_mod(mod_type, key, val, extra_type, decision_id))

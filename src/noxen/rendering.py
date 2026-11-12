@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import unicodedata
 
 from rich.markup import escape
@@ -129,8 +129,53 @@ def payload_to_filter_context(payload: dict) -> dict:
     }
 
 
+def capture_datetime(milliseconds) -> datetime | None:
+    if type(milliseconds) is int:
+        try:
+            return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=milliseconds)
+        except OverflowError:
+            pass
+    return None
+
+
+def capture_order(data: dict) -> dict:
+    session, sequence = data.get("captureSession"), data.get("captureSequence")
+    if (isinstance(session, str) and len(session) == 32 and all(c in "0123456789abcdef" for c in session)
+            and type(sequence) is int and 0 < sequence <= (1 << 53) - 1):
+        order = {"captureSession": session, "captureSequence": sequence}
+        if data.get("captureOrderScope") == "project":
+            order["captureOrderScope"] = "project"
+            number = data.get("captureSessionNumber")
+            if type(number) is int and 0 < number <= (1 << 53) - 1:
+                order["captureSessionNumber"] = number
+        return order
+    return {}
+
+
+def capture_order_label(data: dict) -> str:
+    order = capture_order(data)
+    if not order:
+        return ""
+    label = f"#{order['captureSequence']}"
+    if number := order.get("captureSessionNumber"):
+        return f"Session {number} · {label}"
+    return label if order.get("captureOrderScope") == "project" else f"{label} (session only)"
+
+
+def capture_order_sort_value(data: dict, *, reverse=False) -> int:
+    # Real capture numbers are positive JavaScript safe integers.
+    return capture_order(data).get("captureSequence", 0 if reverse else 1 << 53)
+
+
+def format_capture_time(instant: datetime, *, precise=False) -> str:
+    iso = instant.isoformat(sep=" ", timespec="milliseconds" if precise else "seconds")
+    return iso.removesuffix("+00:00") + (" UTC" if precise else "")
+
+
 def payload_to_history_entry(payload: dict, now: datetime | None = None) -> dict:
-    timestamp = (now or datetime.now(timezone.utc)).isoformat()
+    order = capture_order(payload)
+    captured = capture_datetime(payload.get("time")) if order else None
+    timestamp = (captured or now or datetime.now(timezone.utc)).isoformat()
     return {
         "id": None,
         "timestamp": timestamp,
@@ -140,15 +185,18 @@ def payload_to_history_entry(payload: dict, now: datetime | None = None) -> dict
         "stackTrace": payload.get("stackTrace") or [],
         "pendingIntentFlags": payload.get("pendingIntentFlags"),
         "attackSurface": payload.get("attackSurface") or {},
+        **(order if captured is not None else {}),
     }
 
 
-def history_sort_key(entry: dict, column: str | None):
+def history_sort_key(entry: dict, column: str | None, *, reverse=False):
     info = entry.get("intent", {}) or {}
     if column == "id":
         return entry.get("id", 0)
     if column == "time":
         return entry.get("timestamp", "")
+    if column == "capture_order":
+        return capture_order_sort_value(entry, reverse=reverse)
     if column == "method":
         return (entry.get("method") or "").lower()
     if column == "class":
@@ -357,11 +405,14 @@ def filter_sort_history_entries(
             )
         ]
     if sort_column:
-        filtered.sort(key=lambda entry: history_sort_key(entry, sort_column), reverse=sort_reverse)
+        filtered.sort(
+            key=lambda entry: history_sort_key(entry, sort_column, reverse=sort_reverse),
+            reverse=sort_reverse,
+        )
     return filtered
 
 
-def history_row_texts(entry: dict) -> dict[str, str]:
+def history_row_texts(entry: dict, *, include_capture_order=True) -> dict[str, str]:
     """Plain table values, shared by width measurement and visible-row rendering."""
     info = entry.get("intent", {}) or {}
     timestamp = entry.get("timestamp", "")
@@ -371,6 +422,7 @@ def history_row_texts(entry: dict) -> dict[str, str]:
     return {
         "id": str(entry["id"]), "outcome": outcome,
         "time": timestamp[:19].replace("T", " ") if len(timestamp) >= 19 else timestamp,
+        "capture_order": capture_order_label(entry) if include_capture_order else "",
         "method": str(entry.get("method") or ""), "class": str(entry.get("class") or ""),
         "component": str(info.get("component") or ""), "action": str(info.get("action") or ""),
         "extras": "✓" if info.get("extras") else "",
@@ -387,7 +439,7 @@ def history_row_values(
     info = entry.get("intent", {}) or {}
     extras = info.get("extras", {}) or {}
     outcome = entry.get("outcome")
-    all_values = history_row_texts(entry)
+    all_values = history_row_texts(entry, include_capture_order="capture_order" in visible_columns)
     all_values["outcome"] = history_outcome_cell(outcome, success_color, error_color, entry.get("modification_error"))
     all_values["extras"] = Text("✓", style=success_color) if extras else ""
     return [all_values[key] for key, _label in columns if key in visible_columns]
@@ -409,9 +461,13 @@ def _section(title: str) -> str:
     return f"[bold]\\[{title}][/bold]"
 
 
+def detail_field_prefix(label: str) -> str:
+    return f"{label:<{_LABEL_WIDTH}} :"
+
+
 def _row(label: str, value: str) -> str:
     """An aligned `  label : value` row: dim label and colon, value at full brightness."""
-    return f"  [dim]{label:<{_LABEL_WIDTH}} :[/dim] {value}"
+    return f"  [dim]{detail_field_prefix(label)}[/dim] {value}"
 
 
 def _format_permission(perm: dict | None) -> str | None:
@@ -1221,12 +1277,28 @@ def render_intent_detail(entry: dict, show_stack: bool = False, stack_depth: int
     outcome_label = _OUTCOME_LABEL.get(entry.get("outcome") or "", "PENDING")
     timestamp = entry.get("timestamp", "")
     time_str = timestamp[:19].replace("T", " ") if len(timestamp) >= 19 else timestamp
+    order_label = capture_order_label(entry)
+    released_at = capture_datetime(entry.get("released_at"))
+    utc = timestamp.endswith("+00:00")
+    if utc and order_label:
+        try:
+            time_str = format_capture_time(datetime.fromisoformat(timestamp), precise=True)
+        except ValueError:
+            time_str += " UTC"
 
     out = [
         "",
         f"[bold]#{entry['id']}[/bold] [dim]|[/dim] {_markup(time_str)} [dim]|[/dim] {outcome_label}",
-        "",
     ]
+    if order_label:
+        out.extend(("", _row("Capture order", _markup(order_label))))
+    elif utc:
+        out.append("[dim]Host receipt time (UTC)[/dim]")
+    if released_at is not None:
+        if not order_label:
+            out.append("")
+        out.append(_row("Released at", format_capture_time(released_at, precise=True)))
+    out.append("")
     if entry.get("persistence_error"):
         out += [_section("STORAGE WARNING"), _row("Status", _markup(entry["persistence_error"])), ""]
     out += _event_body(

@@ -1,4 +1,4 @@
-RESIZABLE_HISTORY_COLUMN_KEYS = ("time", "method", "class", "component", "action")
+RESIZABLE_HISTORY_COLUMN_KEYS = ("time", "capture_order", "method", "class", "component", "action")
 HISTORY_COLUMN_MIN_WIDTH = 5
 HISTORY_COLUMN_MAX_WIDTH = 150
 

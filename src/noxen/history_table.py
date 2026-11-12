@@ -149,8 +149,9 @@ class HistoryTable(ScrollView, can_focus=True):
         for column in self.columns.values():
             column.content_width = _cell_width(column.label)
         if automatic:
+            measure_capture_order = any(key == "capture_order" for key, _ in automatic)
             for entry in self._entries:
-                values = history_row_texts(entry)
+                values = history_row_texts(entry, include_capture_order=measure_capture_order)
                 for key, column in automatic:
                     column.content_width = max(column.content_width, _cell_width(values[key]))
         self.virtual_size = Size(sum(c.render_width for c in self.columns.values()),
