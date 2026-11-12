@@ -128,12 +128,15 @@ class MonitorRecordingTests(IsolatedAppTestCase):
                 reopened.query_one("#monitor_search", Input).value = "finalcall"
                 await wait_until(lambda: [e["method"] for e in pane.events] == ["finalCall"])
                 self.assertEqual(table.get_row_at(0)[0], 3)
-                await pilot.click("#--content-tab-monitor_profiles_view")
-                self.assertFalse(any(key.key == "ctrl+l" for key in reopened.query("FooterKey")))
+                def clear_shortcut_visible():
+                    return any(key.key == "ctrl+l" for key in reopened.query("FooterKey"))
+
+                self.assertTrue(await pilot.click("#--content-tab-monitor_profiles_view"))
+                await wait_until(lambda: not clear_shortcut_visible())
                 await pilot.press("ctrl+l")
                 self.assertEqual(table.row_count, 1)
-                await pilot.click("#--content-tab-monitor_events_view")
-                self.assertTrue(any(key.key == "ctrl+l" for key in reopened.query("FooterKey")))
+                self.assertTrue(await pilot.click("#--content-tab-monitor_events_view"))
+                await wait_until(clear_shortcut_visible)
                 reopened.query_one("#monitor_search", Input).focus()
                 with patch.object(reopened, "notify", wraps=reopened.notify) as notify:
                     await pilot.press("ctrl+l")
@@ -709,17 +712,15 @@ class MonitorUITests(IsolatedAppTestCase):
                 def resize_keys():
                     return {key.key for key in app.query("FooterKey")} & {"alt+up", "alt+down"}
 
-                await pilot.click("#--content-tab-tab_monitor")
-                self.assertFalse(resize_keys())
+                self.assertTrue(await pilot.click("#--content-tab-tab_monitor"))
+                await wait_until(lambda: not resize_keys())
                 pane = app.query_one(MonitorPane)
                 session = SimpleNamespace()
                 pane.begin_session(session)
                 pane.receive(session, {"events": [{"id": 1, "time": 1, "method": "check"}]})
                 pane.drain()
                 table = app.query_one("#monitor_events", DataTable)
-                await wait_until(lambda: table.row_count == 1)
-                await pilot.pause()
-                self.assertEqual(resize_keys(), {"alt+up", "alt+down"})
+                await wait_until(lambda: table.row_count == 1 and resize_keys() == {"alt+up", "alt+down"})
 
                 detail = app.query_one("#monitor_detail")
                 original_height = detail.region.height
@@ -733,8 +734,8 @@ class MonitorUITests(IsolatedAppTestCase):
                 await pilot.press("alt+down")
                 self.assertEqual(detail.region.height, original_height)
 
-                await pilot.click("#--content-tab-monitor_profiles_view")
-                self.assertFalse(resize_keys())
+                self.assertTrue(await pilot.click("#--content-tab-monitor_profiles_view"))
+                await wait_until(lambda: not resize_keys())
                 await pilot.resize_terminal(100, 22)
                 await pilot.click("#--content-tab-monitor_events_view")
                 await pilot.pause()
@@ -743,9 +744,7 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertEqual(pane.selected, selected)
 
                 app.query_one("#monitor_search", Input).value = "no matches"
-                await wait_until(lambda: not pane.display_events)
-                await pilot.pause()
-                self.assertFalse(resize_keys())
+                await wait_until(lambda: not pane.display_events and not resize_keys())
             app.db.close()
 
     async def test_restore_only_missing_hooks_and_reopen_project(self):
