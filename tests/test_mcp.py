@@ -49,6 +49,24 @@ class MCPAppTestCase(IsolatedAppTestCase):
 
 class MCPServiceTests(MCPAppTestCase):
     @with_app
+    async def test_project_filters_are_persisted_and_can_scope_history(self):
+        shown, hidden = self.capture("SHOW"), self.capture("HIDE")
+        before = await self.service.filters("history")
+        token = self.service.connection_token()
+        filters = [{"id": 1, "type": "focus", "rule": {"action": "SHOW"}}]
+        result = await self.service.set_filters("history", filters, before["revision"], token)
+        self.assertEqual(self.app.db.load_history_filters(), result["filters"])
+        self.assertEqual((await self.service.filters("intercept"))["filters"], [])
+        page = await self.service.history(filter_revision=result["revision"])
+        self.assertEqual([row["id"] for row in page["events"]], [shown])
+        self.assertEqual([row["id"] for row in (await self.service.history())["events"]], [hidden, shown])
+        with self.assertRaisesRegex(OperationError, "filters_changed"):
+            await self.service.history(filter_revision=before["revision"])
+        with self.assertRaisesRegex(OperationError, "invalid_filter"):
+            await self.service.set_filters("history", filters * 2, result["revision"], token)
+        self.assertEqual(self.app.db.load_history_filters(), result["filters"])
+
+    @with_app
     async def test_monitor_batch_is_atomic_and_custom_hook_requires_fresh_revision(self):
         profiles = (await self.service.profiles())["profiles"]
         first, second = profiles[:2]
@@ -132,6 +150,22 @@ class MCPServiceTests(MCPAppTestCase):
         self.assertEqual(result, {"processes": [
             {"pid": 123, "name": "Example App", "package": "dev.example"},
         ], "total_matches": 1})
+
+    @with_app
+    async def test_list_applications_includes_stopped_packages(self):
+        device = SimpleNamespace(enumerate_applications=lambda: [
+            SimpleNamespace(pid=23, identifier="dev.example.running", name="Example Running"),
+            SimpleNamespace(pid=0, identifier="dev.example.idle", name="Example Idle"),
+        ])
+        self.app._home_devices = [SimpleNamespace(id="emulator")]
+        with patch("frida.get_device", return_value=device) as resolve:
+            result = await self.service.list_applications(
+                "emulator", self.service.connection_token(), query="EXAMPLE", limit=1,
+            )
+        resolve.assert_called_once_with("emulator")
+        self.assertEqual(result, {"applications": [
+            {"pid": None, "name": "Example Idle", "package": "dev.example.idle"},
+        ], "total_matches": 2})
 
     @with_app
     async def test_refresh_devices_updates_home_and_returns_new_scan(self):
@@ -410,6 +444,8 @@ class MCPTransportTests(MCPAppTestCase):
                         names = {t.name for t in (await client.list_tools()).tools}
                         self.assertIn("connect", names)
                         self.assertIn("get_interception", names)
+                        self.assertTrue({"set_filters", "list_applications", "get_stack_settings", "set_stack_settings",
+                                         "save_monitor_profile", "remove_monitor_profile"} <= names)
                         self.assertTrue({"refresh_devices", "resolve_interception", "set_intercept"} <= names)
                         status = await client.call_tool("get_status")
                         self.assertFalse(status.isError)
@@ -423,8 +459,14 @@ class MCPTransportTests(MCPAppTestCase):
                         self.app._on_intercept_display("", event_id, "http-hold")
                         self.app.set_intercept_state(True)
                         token = self.service.connection_token()
+                        stack = await client.call_tool("set_stack_settings", {
+                            "scope": "history", "enabled": True, "depth": 9,
+                            "expected_connection": token,
+                        })
+                        self.assertFalse(stack.isError)
+                        self.assertEqual(stack.structuredContent["history"], {"enabled": True, "depth": 9})
                         observed = dict(action="real-protocol", component="test/.Main", data=None,
-                                        mimeType=None, flags=0, categories=[],
+                                        mimeType=None, flags=1, categories=["test.category"],
                                         extras={"amount": {"type": "java.lang.String", "value": "42"}})
                         with patch.object(session, "is_ready", return_value=True), patch.object(
                             session, "forward_with_mods",
@@ -432,12 +474,20 @@ class MCPTransportTests(MCPAppTestCase):
                         ) as forward, patch.object(session, "intercept_off_with_mods", return_value=True) as off:
                             request = {
                                 "action": "forward", "decision_id": "http-hold", "expected_connection": token,
-                                "modifications": [{"type": "extra_add", "key": "amount",
-                                                   "value": "42", "extra_type": "string"}],
+                                "modifications": [
+                                    {"type": "extra_add", "key": "amount", "value": "42", "extra_type": "string"},
+                                    {"type": "cat_add", "value": "test.category"},
+                                    {"type": "flag_add", "value": "0x1"},
+                                ],
                             }
                             rejected = await client.call_tool("resolve_interception", {
                                 **request, "modifications": [{"type": "extra_add", "key": "amount",
                                                               "value": "invalid", "extra_type": "int"}],
+                            })
+                            self.assertTrue(rejected.isError)
+                            self.assertEqual(rejected.structuredContent["error"]["code"], "invalid_modification")
+                            rejected = await client.call_tool("resolve_interception", {
+                                **request, "modifications": [{"type": "flag_add", "value": "0x100000000"}],
                             })
                             self.assertTrue(rejected.isError)
                             self.assertEqual(rejected.structuredContent["error"]["code"], "invalid_modification")
@@ -447,7 +497,11 @@ class MCPTransportTests(MCPAppTestCase):
                             self.assertFalse(resolved.structuredContent["held"])
                             self.assertEqual(resolved.structuredContent["outcome"], "modified_forwarded")
                             self.assertIsNone(resolved.structuredContent["modification_error"])
-                            forward.assert_called_once_with([("extra_add", "amount", "42", "string")], "http-hold")
+                            forward.assert_called_once_with([
+                                ("extra_add", "amount", "42", "string"),
+                                ("cat_add", "", "test.category", ""),
+                                ("flag_add", "", "1", ""),
+                            ], "http-hold")
                             detail = await client.call_tool("get_intent", {
                                 "event_id": event_id, "epoch": resolved.structuredContent["history_epoch"],
                             })
@@ -468,6 +522,20 @@ class MCPTransportTests(MCPAppTestCase):
                         })
                         self.assertFalse(changed.isError)
                         self.assertEqual(self.app.query_one(MonitorPane).profiles[0]["enabled"], not profile["enabled"])
+                        revision = changed.structuredContent["revision"]
+                        token = self.service.connection_token()
+                        custom = {"id": "test-custom", "name": "Custom test", "enabled": False, "hooks": []}
+                        saved = await client.call_tool("save_monitor_profile", {
+                            "profile": custom, "expected_revision": revision, "expected_connection": token,
+                        })
+                        self.assertFalse(saved.isError)
+                        self.assertIn(custom, json.loads(self.app.db.get_info("monitor_profiles"))["profiles"])
+                        removed = await client.call_tool("remove_monitor_profile", {
+                            "profile_id": custom["id"], "expected_revision": saved.structuredContent["revision"],
+                            "expected_connection": token,
+                        })
+                        self.assertFalse(removed.isError)
+                        self.assertNotIn(custom, json.loads(self.app.db.get_info("monitor_profiles"))["profiles"])
                         self.service.allow_control = False
                         denied = await client.call_tool("disconnect", {
                             "expected_connection": self.service.connection_token()})

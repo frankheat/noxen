@@ -123,15 +123,52 @@ def create_http_app(invoke, token, port):
         return await invoke("list_processes", device_id=device_id, expected_connection=expected_connection,
                             query=query, limit=limit)
 
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
+    async def list_applications(device_id: str, expected_connection: str, query: str = "",
+                                limit: int = 100) -> dict[str, Any]:
+        """Find installed apps by name or package, including apps that can be spawned. Requires Allow control."""
+        return await invoke("list_applications", device_id=device_id, expected_connection=expected_connection,
+                            query=query, limit=limit)
+
     @server.tool(annotations=read)
     async def list_history(query: str = "", before_id: int | None = None,
-                           epoch: str | None = None, limit: int = 25) -> dict[str, Any]:
-        """Search saved Intents, newest ID first, independent of UI filters. Limit 1..100.
+                           epoch: str | None = None, limit: int = 25,
+                           filter_revision: str | None = None) -> dict[str, Any]:
+        """Search saved Intents, newest ID first. Limit 1..100.
 
         Pass next_before_id and epoch for older pages. Read get_intent for full data.
-        Refresh from the first page for new arrivals. Unsaved events are counted separately.
+        To apply project History filters, pass their revision from get_filters on every page.
         """
-        return await invoke("list_history", query=query, before_id=before_id, epoch=epoch, limit=limit)
+        return await invoke("list_history", query=query, before_id=before_id, epoch=epoch, limit=limit,
+                            filter_revision=filter_revision)
+
+    @server.tool(annotations=read)
+    async def get_filters(scope: Literal["intercept", "history"]) -> dict[str, Any]:
+        """Read project filter rules and their revision."""
+        return await invoke("get_filters", scope=scope)
+
+    @server.tool(annotations=write)
+    async def set_filters(scope: Literal["intercept", "history"], filters: list[dict[str, Any]],
+                          expected_revision: str, expected_connection: str) -> dict[str, Any]:
+        """Replace project filters for one scope. Requires Allow control.
+
+        Use entries with a unique positive id, type focus or ignore, a rule map
+        of supported fields to patterns, and optional enabled (default true).
+        """
+        return await invoke("set_filters", scope=scope, filters=filters, expected_revision=expected_revision,
+                            expected_connection=expected_connection)
+
+    @server.tool(annotations=read)
+    async def get_stack_settings() -> dict[str, Any]:
+        """Read stack settings for Intercept and History."""
+        return await invoke("get_stack_settings")
+
+    @server.tool(annotations=write)
+    async def set_stack_settings(scope: Literal["intercept", "history"], enabled: bool, depth: int,
+                                 expected_connection: str) -> dict[str, Any]:
+        """Change stack display in Intercept or History. Requires Allow control."""
+        return await invoke("set_stack_settings", scope=scope, enabled=enabled, depth=depth,
+                            expected_connection=expected_connection)
 
     @server.tool(annotations=read)
     async def get_intent(event_id: int, epoch: str) -> dict[str, Any]:
@@ -186,7 +223,8 @@ def create_http_app(invoke, token, port):
 
         An active editor or staged modifications must be resolved in the TUI first.
         Forward can apply modifications in one request. Use type component, action,
-        data or mime with a string value (empty clears it), extra_add with key,
+        data or mime with a string value (empty clears it), cat_add/cat_rem or
+        flag_add/flag_rem with a string value, extra_add with key,
         value and extra_type strings, or extra_rem with key. For example,
         {"type":"extra_add","key":"message","value":"hello","extra_type":"string"}.
         For modified forwards, inspect outcome and modification_error, then
@@ -243,6 +281,24 @@ def create_http_app(invoke, token, port):
                 "captureReturn": capture_return, "captureStack": capture_stack}
         return await invoke("add_monitor_hook", profile_id=profile_id, hook=hook,
                             expected_revision=expected_revision, expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def save_monitor_profile(profile: dict[str, Any], expected_revision: str,
+                                   expected_connection: str) -> dict[str, Any]:
+        """Create or replace a project Monitor profile by ID. Requires Allow control.
+
+        Supply id, name, enabled and the full hooks list from get_monitor_profiles.
+        To edit or remove a hook, update that list and save the profile again.
+        """
+        return await invoke("save_monitor_profile", profile=profile, expected_revision=expected_revision,
+                            expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def remove_monitor_profile(profile_id: str, expected_revision: str,
+                                     expected_connection: str) -> dict[str, Any]:
+        """Remove a project Monitor profile by ID. Requires Allow control."""
+        return await invoke("remove_monitor_profile", profile_id=profile_id, expected_revision=expected_revision,
+                            expected_connection=expected_connection)
 
     @server.tool(annotations=write)
     async def connect(device_id: str, mode: Literal["spawn", "attach_name", "attach_pid"],

@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import math
+import sqlite3
 from contextvars import ContextVar
 from uuid import uuid4
 
@@ -16,11 +17,12 @@ from textual.widgets import Input
 from rich.text import Text
 
 from noxen.agent_loader import load_hook_config
+from noxen.filters import FilterManager
 from noxen.frida_session import SessionConfig
-from noxen.intent_mods import normalize_component, normalize_extra_type, validate_extra_value
+from noxen.intent_mods import normalize_component, normalize_extra_type, parse_flag_value, validate_extra_value
 from noxen.monitor import signature, validate_hook, validate_profiles
 from noxen.monitor_ui import MonitorPane
-from noxen.rendering import capture_order_label
+from noxen.rendering import capture_order_label, entry_to_filter_context
 
 
 class OperationError(ValueError):
@@ -96,7 +98,10 @@ class MCPService:
             "get_status": self.status, "list_devices": self.devices,
             "refresh_devices": self.refresh_devices,
             "list_processes": self.list_processes,
+            "list_applications": self.list_applications,
             "list_history": self.history, "get_intent": self.intent,
+            "get_filters": self.filters, "set_filters": self.set_filters,
+            "get_stack_settings": self.stack_settings, "set_stack_settings": self.set_stack_settings,
             "list_monitor_events": self.monitor_events, "get_monitor_event": self.monitor_event,
             "get_app_info": self.app_info, "get_interception": self.interception,
             "wait_for_interception": self.wait_for_interception,
@@ -106,6 +111,8 @@ class MCPService:
             "set_monitor_profile_enabled": self.set_profile_enabled,
             "set_monitor_profiles_enabled": self.set_profiles_enabled,
             "add_monitor_hook": self.add_monitor_hook,
+            "save_monitor_profile": self.save_monitor_profile,
+            "remove_monitor_profile": self.remove_monitor_profile,
             "connect": self.connect, "disconnect": self.disconnect,
         }
         context_token = self._request_access.set(_access_open)
@@ -141,18 +148,41 @@ class MCPService:
                             for d in self.app._home_devices],
                 "source": "Last Home device scan; use refresh_devices to rediscover devices."}
 
-    async def list_processes(self, device_id, expected_connection, query="", limit=100):
+    def _device_scan(self, device_id, expected_connection, limit):
         self.require_control(expected_connection)
         if not 1 <= limit <= 200:
             raise OperationError("invalid_limit: use a limit between 1 and 200")
         devices = self.app._home_devices
         if not any(d.id == device_id for d in devices):
             raise OperationError("unknown_device: call refresh_devices first")
+        return devices
+
+    @staticmethod
+    def _resolve_device(devices, device_id):
+        import frida
+        resolver = getattr(devices, "get_device", None) or frida.get_device
+        return resolver(device_id)
+
+    async def list_applications(self, device_id, expected_connection, query="", limit=100):
+        devices = self._device_scan(device_id, expected_connection, limit)
 
         def scan():
-            import frida
-            resolver = getattr(devices, "get_device", None) or frida.get_device
-            device = resolver(device_id)
+            term = query.casefold()
+            matches = sorted(
+                (a for a in self._resolve_device(devices, device_id).enumerate_applications()
+                 if term in a.identifier.casefold() or term in a.name.casefold()),
+                key=lambda a: a.identifier.casefold(),
+            )
+            return {"applications": [{"package": a.identifier, "name": a.name, "pid": a.pid or None}
+                                     for a in matches[:limit]], "total_matches": len(matches)}
+
+        return await asyncio.to_thread(scan)
+
+    async def list_processes(self, device_id, expected_connection, query="", limit=100):
+        devices = self._device_scan(device_id, expected_connection, limit)
+
+        def scan():
+            device = self._resolve_device(devices, device_id)
             processes = {p.pid: {"pid": p.pid, "name": p.name} for p in device.enumerate_processes()}
             for application in device.enumerate_applications():
                 if application.pid in processes:
@@ -186,10 +216,16 @@ class MCPService:
         if before_id is not None and (before_id <= 0 or epoch is None):
             raise OperationError("invalid_cursor: before_id requires the epoch from the previous page")
 
-    async def history(self, query="", before_id=None, epoch=None, limit=25):
+    async def history(self, query="", before_id=None, epoch=None, limit=25, filter_revision=None):
         self.check_page("history", epoch, before_id, limit)
         app = self.app
         current_epoch = self.epoch("history")
+        filters = None
+        if filter_revision is not None:
+            state = await self.filters("history")
+            if filter_revision != state["revision"]:
+                raise OperationError("filters_changed: reread get_filters and restart the query")
+            filters = FilterManager.from_saved(state["filters"])
         # Reuse immutable search strings; searching/sorting never occupies the UI
         # thread or holds the capture lock. Only the bounded page is deep-copied.
         with app._history_lock:
@@ -199,11 +235,14 @@ class MCPService:
         def search():
             normalized = query.lower()
             return sorted((row for row in snapshot if row[0] > 0
-                           and (before_id is None or row[0] < before_id) and normalized in row[1]),
+                           and (before_id is None or row[0] < before_id) and normalized in row[1]
+                           and (filters is None or filters.is_visible(entry_to_filter_context(row[2])))),
                           key=lambda row: row[0], reverse=True)
 
         matches = await asyncio.to_thread(search)
         self.check_page("history", current_epoch, None, limit)
+        if filter_revision is not None and filter_revision != (await self.filters("history"))["revision"]:
+            raise OperationError("filters_changed: reread get_filters and restart the query")
         with app._history_lock:
             rows = []
             for _, _, entry in matches[:limit]:
@@ -213,7 +252,65 @@ class MCPService:
                 rows.append(row)
             unsaved = sum(row[0] <= 0 for row in snapshot)
         return {"events": rows, "epoch": current_epoch, "unsaved_events": unsaved,
+                "filter_revision": filter_revision,
                 "next_before_id": rows[-1]["id"] if len(matches) > limit else None}
+
+    def _filter_manager(self, scope):
+        if scope == "intercept":
+            return self.app.filter_manager
+        if scope == "history":
+            return self.app._history_filter_manager
+        raise OperationError("invalid_scope: use intercept or history")
+
+    async def filters(self, scope):
+        filters = self._filter_manager(scope).export()
+        revision = hashlib.sha256(json.dumps(filters, sort_keys=True).encode()).hexdigest()
+        return {"scope": scope, "filters": filters, "revision": revision}
+
+    async def set_filters(self, scope, filters, expected_revision, expected_connection):
+        self.require_control(expected_connection)
+        manager = self._filter_manager(scope)
+        if expected_revision != (await self.filters(scope))["revision"]:
+            raise OperationError("filters_changed: reread get_filters")
+        ids = set()
+        for item in filters:
+            if (type(item.get("id")) is not int or item["id"] <= 0 or item["id"] in ids
+                    or not isinstance(item.get("type"), str)
+                    or type(item.get("enabled", True)) is not bool
+                    or not item.get("rule") or FilterManager._normalize_saved_filter(item) is None):
+                raise OperationError("invalid_filter: supply unique positive IDs and valid nonempty rules")
+            ids.add(item["id"])
+        normalized = FilterManager.from_saved(filters).export()
+        persist = self.app.db.save_intercept_filters if scope == "intercept" else self.app.db.save_history_filters
+        try:
+            persist(normalized)
+        except (OSError, sqlite3.Error) as error:
+            raise OperationError(f"save_failed: {error}") from None
+        manager.replace_all(normalized)
+        if scope == "history":
+            self.app._refresh_history_table()
+        self.app._update_filter_count()
+        return await self.filters(scope)
+
+    async def stack_settings(self):
+        app = self.app
+        return {"intercept": {"enabled": app.show_stack, "depth": app.stack_depth},
+                "history": {"enabled": app._history_show_stack, "depth": app._history_stack_depth}}
+
+    async def set_stack_settings(self, scope, enabled, depth, expected_connection):
+        self.require_control(expected_connection)
+        if depth < 1:
+            raise OperationError("invalid_depth: depth must be a positive integer")
+        app = self.app
+        if scope == "intercept":
+            app.show_stack, app.stack_depth = enabled, depth
+            app._refresh_intercept_display()
+        elif scope == "history":
+            app._history_show_stack, app._history_stack_depth = enabled, depth
+            app._refresh_history_detail()
+        else:
+            raise OperationError("invalid_scope: use intercept or history")
+        return await self.stack_settings()
 
     async def intent(self, event_id, epoch):
         self.check_page("history", epoch, None, 1)
@@ -313,6 +410,7 @@ class MCPService:
                 raise OperationError(f"{prefix} requires a type")
             allowed = {
                 "component": {"value"}, "action": {"value"}, "data": {"value"}, "mime": {"value"},
+                "cat_add": {"value"}, "cat_rem": {"value"}, "flag_add": {"value"}, "flag_rem": {"value"},
                 "extra_add": {"key", "value", "extra_type"}, "extra_rem": {"key"},
             }.get(kind)
             if allowed is None or set(change) - {"type"} != allowed:
@@ -334,6 +432,11 @@ class MCPService:
                 if error:
                     raise OperationError(f"{prefix}: {error}")
                 extra_type = normalize_extra_type(extra_type)
+            if kind.startswith("flag_"):
+                flag = parse_flag_value(value)
+                if flag is None:
+                    raise OperationError(f"{prefix}: flag must be a 32-bit integer or bit mask")
+                value = str(flag)
             mod = (kind, key, value, extra_type)
             if error := self.app._mod_safety_error(mod):
                 raise OperationError(f"{prefix}: {error}")
@@ -438,6 +541,19 @@ class MCPService:
             raise OperationError("duplicate_hook: this overload already exists in the profile")
         profile["hooks"].append(hook)
         return {**self._save_profiles(profiles), "signature": overload, "enabled": profile["enabled"]}
+
+    async def save_monitor_profile(self, profile, expected_revision, expected_connection):
+        profiles = self._editable_profiles(expected_revision, expected_connection)
+        index = next((i for i, existing in enumerate(profiles) if existing["id"] == profile.get("id")), len(profiles))
+        profiles[index:index + 1] = [profile]
+        return self._save_profiles(profiles)
+
+    async def remove_monitor_profile(self, profile_id, expected_revision, expected_connection):
+        profiles = self._editable_profiles(expected_revision, expected_connection)
+        remaining = [p for p in profiles if p["id"] != profile_id]
+        if len(remaining) == len(profiles):
+            raise OperationError("not_found: unknown profile")
+        return self._save_profiles(remaining)
 
     async def connect(self, device_id, mode, target, expected_connection, hooks=None):
         self.require_control(expected_connection)
