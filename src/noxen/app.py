@@ -386,6 +386,7 @@ class NoxenApp(App):
         self._system_anr_bypass_enabled = False
         self._log_verbose = False
         self._log_entries: list[str] = []
+        self._frida_session_logs: list[str] = []
         self.system_server_session: SystemServerSession | None = None
         self.frida_session = None
         self.db, self._all_intents = self._init_project(cli_args)
@@ -437,10 +438,17 @@ class NoxenApp(App):
 
     def _init_session(self, config: SessionConfig):
         self._session_config = config
+        session_logs = self._frida_session_logs = []
+
+        def log_session(text):
+            session_logs.append(text)
+            del session_logs[:-200]
+            self.write_log(text)
+
         self.frida_session = FridaSession(
             config,
             filter_manager=self.filter_manager,
-            log_cb=self.write_log,
+            log_cb=log_session,
             intercept_cb=self.set_intercept_state,
             get_stack=lambda: (self.show_stack, self.stack_depth),
             history_cb=self._on_history_intent,
@@ -474,6 +482,7 @@ class NoxenApp(App):
             self.query_one(MonitorPane).clear_events()
         elif self._active_tab == "tab_log":
             self._log_entries.clear()
+            self._frida_session_logs.clear()
             try:
                 self.query_one("#log_output", RichLog).clear()
             except Exception:
@@ -1204,6 +1213,7 @@ class NoxenApp(App):
         self._intercept_mode = enabled
 
         def _do():
+            self.mcp_service.interception_changed()
             try:
                 btn = self.query_one("#intercept_toggle", Button)
                 btn.label = "Intercept on" if enabled else "Intercept off"
@@ -2647,6 +2657,7 @@ class NoxenApp(App):
         self._intent_blocked = bool(is_intercepted)
 
         def _do_update():
+            self.mcp_service.interception_changed()
             try:
                 bar = self.query_one("#intercept_input_bar")
                 if is_intercepted:

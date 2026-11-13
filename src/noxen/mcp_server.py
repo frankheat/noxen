@@ -8,6 +8,8 @@ import threading
 from typing import Any, Literal
 from contextlib import contextmanager
 
+from noxen.mcp_service import OperationError
+
 
 class EmbeddedLoggingGuard(logging.Handler):
     """Suppress root logging from the HTTP thread, preserving host fallbacks."""
@@ -68,7 +70,22 @@ def create_http_app(invoke, token, port):
     # Defer SDK initialization until the user starts the server.
     from mcp.server.fastmcp import FastMCP
     from mcp.server.transport_security import TransportSecuritySettings
-    from mcp.types import ToolAnnotations
+    from mcp.types import CallToolResult, TextContent, ToolAnnotations
+
+    dispatch = invoke
+
+    async def invoke(operation, **arguments):
+        try:
+            return await dispatch(operation, **arguments)
+        except OperationError as error:
+            code, separator, message = str(error).partition(": ")
+            if not separator:
+                code, message = "operation_failed", str(error)
+            return CallToolResult(
+                isError=True,
+                content=[TextContent(type="text", text=str(error))],
+                structuredContent={"error": {"code": code, "message": message}},
+            )
 
     server = FastMCP(
         "noxen", stateless_http=True, json_response=True,
@@ -98,6 +115,13 @@ def create_http_app(invoke, token, port):
     async def refresh_devices(expected_connection: str) -> dict[str, Any]:
         """Rescan Frida devices and refresh Home. Requires Allow control."""
         return await invoke("refresh_devices", expected_connection=expected_connection)
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
+    async def list_processes(device_id: str, expected_connection: str, query: str = "",
+                             limit: int = 100) -> dict[str, Any]:
+        """List running Frida processes on a discovered device. Filter by name or package and use a PID with attach_pid. Requires Allow control."""
+        return await invoke("list_processes", device_id=device_id, expected_connection=expected_connection,
+                            query=query, limit=limit)
 
     @server.tool(annotations=read)
     async def list_history(query: str = "", before_id: int | None = None,
@@ -134,25 +158,42 @@ def create_http_app(invoke, token, port):
         return await invoke("get_app_info")
 
     @server.tool(annotations=read)
-    async def get_logs(limit: int = 50) -> dict[str, Any]:
-        """Read recent system logs, including DEBUG, to diagnose connection and hook failures. Limit 1..200."""
-        return await invoke("get_logs", limit=limit)
+    async def get_logs(limit: int = 50, scope: Literal["application", "session"] = "application") -> dict[str, Any]:
+        """Read recent application logs or logs from the active Frida session. Includes DEBUG. Limit 1..200."""
+        return await invoke("get_logs", limit=limit, scope=scope)
 
     @server.tool(annotations=read)
     async def get_interception() -> dict[str, Any]:
         """Inspect the current held Intent. This is captured data, not an unsaved editor draft."""
         return await invoke("get_interception")
 
+    @server.tool(annotations=read)
+    async def wait_for_interception(expected_connection: str, after_decision_id: str | None = None,
+                                    timeout_ms: int = 10000) -> dict[str, Any]:
+        """Wait for a held Intent in the specified connection for up to 30000 ms.
+
+        Pass the last decision ID to skip that hold. An existing matching hold
+        returns immediately. A timeout returns timed_out=true. This does not release Intents.
+        """
+        return await invoke("wait_for_interception", expected_connection=expected_connection,
+                            after_decision_id=after_decision_id, timeout_ms=timeout_ms)
+
     @server.tool(annotations=write)
     async def resolve_interception(action: Literal["forward", "drop"], decision_id: str,
-                                   expected_connection: str) -> dict[str, Any]:
+                                   expected_connection: str,
+                                   modifications: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Forward or drop the exact hold from get_interception. Requires Allow control.
 
         An active editor or staged modifications must be resolved in the TUI first.
-        The response includes the resolved ID and the current interception state.
+        Forward can apply modifications in one request. Use type component, action,
+        data or mime with a string value (empty clears it), extra_add with key,
+        value and extra_type strings, or extra_rem with key. For example,
+        {"type":"extra_add","key":"message","value":"hello","extra_type":"string"}.
+        For modified forwards, inspect outcome and modification_error, then
+        retrieve the recorded result with event_id and history_epoch.
         """
         return await invoke("resolve_interception", action=action, decision_id=decision_id,
-                            expected_connection=expected_connection)
+                            expected_connection=expected_connection, modifications=modifications or [])
 
     @server.tool(annotations=write)
     async def set_intercept(enabled: bool, expected_connection: str,
@@ -182,16 +223,40 @@ def create_http_app(invoke, token, port):
                             expected_revision=expected_revision, expected_connection=expected_connection)
 
     @server.tool(annotations=write)
+    async def set_monitor_profiles_enabled(states: dict[str, bool], expected_revision: str,
+                                           expected_connection: str) -> dict[str, Any]:
+        """Set multiple Monitor profiles by ID in one update. Use the current profiles revision. Requires Allow control."""
+        return await invoke("set_monitor_profiles_enabled", states=states, expected_revision=expected_revision,
+                            expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def add_monitor_hook(profile_id: str, clazz: str, method: str, args: list[str],
+                               expected_revision: str, expected_connection: str,
+                               capture_arguments: bool = True, capture_return: bool = True,
+                               capture_stack: bool = False) -> dict[str, Any]:
+        """Add an exact Java overload to an existing project Monitor profile. Requires Allow control.
+
+        Supply all argument types in order, or an empty list for a no-argument method.
+        Check get_monitor_profiles for runtime hook status after saving.
+        """
+        hook = {"class": clazz, "method": method, "args": args, "captureArguments": capture_arguments,
+                "captureReturn": capture_return, "captureStack": capture_stack}
+        return await invoke("add_monitor_hook", profile_id=profile_id, hook=hook,
+                            expected_revision=expected_revision, expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
     async def connect(device_id: str, mode: Literal["spawn", "attach_name", "attach_pid"],
-                      target: str, expected_connection: str) -> dict[str, Any]:
+                      target: str, expected_connection: str,
+                      hooks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Start a shared Frida session; requires disconnected state and Allow control.
 
-        Uses the hook configuration selected in Home. Extra scripts must be started from Home.
+        Pass hooks in noxen-analyze JSON format to use them alongside the default hooks
+        instead of the custom file selected in Home. Extra scripts must be started from Home.
         Spawn launches the package; attach_pid takes a positive PID string. Poll get_status
         until agent_ready. A timeout is not proof that the operation did not run; reread status.
         """
         return await invoke("connect", device_id=device_id, mode=mode, target=target,
-                            expected_connection=expected_connection)
+                            expected_connection=expected_connection, hooks=hooks)
 
     @server.tool(annotations=write)
     async def disconnect(expected_connection: str) -> dict[str, Any]:
@@ -231,6 +296,8 @@ class MCPServer:
             self.service.invoke(operation, _access_open=lambda: not self._stop.is_set(), **arguments),
             self.app_loop,
         )
+        if operation == "wait_for_interception":
+            return await asyncio.wrap_future(future)
         # Client cancellation does not undo an operation already accepted by the UI.
         return await asyncio.shield(asyncio.wrap_future(future))
 

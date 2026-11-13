@@ -17,6 +17,8 @@ from rich.text import Text
 
 from noxen.agent_loader import load_hook_config
 from noxen.frida_session import SessionConfig
+from noxen.intent_mods import normalize_component, normalize_extra_type, validate_extra_value
+from noxen.monitor import signature, validate_hook, validate_profiles
 from noxen.monitor_ui import MonitorPane
 from noxen.rendering import capture_order_label
 
@@ -42,10 +44,26 @@ class MCPService:
     def __init__(self, app):
         self.app = app
         self.instance = uuid4().hex
-        self.enabled = False
+        self._enabled = False
+        self._interception_changed = asyncio.Event()
         self.allow_control = False
         self._intercept_lock = asyncio.Lock()
         self._request_access = ContextVar("mcp_request_access", default=None)
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, enabled):
+        if enabled != self._enabled:
+            self._enabled = enabled
+            self.interception_changed()
+
+    def interception_changed(self):
+        """Wake current waiters on the application loop."""
+        self._interception_changed.set()
+        self._interception_changed = asyncio.Event()
 
     @property
     def pane(self):
@@ -77,13 +95,17 @@ class MCPService:
         operations = {
             "get_status": self.status, "list_devices": self.devices,
             "refresh_devices": self.refresh_devices,
+            "list_processes": self.list_processes,
             "list_history": self.history, "get_intent": self.intent,
             "list_monitor_events": self.monitor_events, "get_monitor_event": self.monitor_event,
             "get_app_info": self.app_info, "get_interception": self.interception,
+            "wait_for_interception": self.wait_for_interception,
             "resolve_interception": self.resolve_interception, "set_intercept": self.set_intercept,
             "get_logs": self.logs,
             "get_monitor_profiles": self.profiles,
             "set_monitor_profile_enabled": self.set_profile_enabled,
+            "set_monitor_profiles_enabled": self.set_profiles_enabled,
+            "add_monitor_hook": self.add_monitor_hook,
             "connect": self.connect, "disconnect": self.disconnect,
         }
         context_token = self._request_access.set(_access_open)
@@ -118,6 +140,32 @@ class MCPService:
         return {"devices": [{"id": d.id, "name": d.name, "type": d.type}
                             for d in self.app._home_devices],
                 "source": "Last Home device scan; use refresh_devices to rediscover devices."}
+
+    async def list_processes(self, device_id, expected_connection, query="", limit=100):
+        self.require_control(expected_connection)
+        if not 1 <= limit <= 200:
+            raise OperationError("invalid_limit: use a limit between 1 and 200")
+        devices = self.app._home_devices
+        if not any(d.id == device_id for d in devices):
+            raise OperationError("unknown_device: call refresh_devices first")
+
+        def scan():
+            import frida
+            resolver = getattr(devices, "get_device", None) or frida.get_device
+            device = resolver(device_id)
+            processes = {p.pid: {"pid": p.pid, "name": p.name} for p in device.enumerate_processes()}
+            for application in device.enumerate_applications():
+                if application.pid in processes:
+                    processes[application.pid]["package"] = application.identifier
+            term = query.casefold()
+            matches = sorted(
+                (p for p in processes.values()
+                 if term in p["name"].casefold() or term in p.get("package", "").casefold()),
+                key=lambda p: (p["name"].casefold(), p["pid"]),
+            )
+            return {"processes": matches[:limit], "total_matches": len(matches)}
+
+        return await asyncio.to_thread(scan)
 
     async def refresh_devices(self, expected_connection):
         self.require_control(expected_connection)
@@ -206,11 +254,13 @@ class MCPService:
     async def app_info(self):
         return {"connection_token": self.connection_token(), "snapshot": copy.deepcopy(self.app._app_info)}
 
-    async def logs(self, limit=50):
+    async def logs(self, limit=50, scope="application"):
         if not 1 <= limit <= 200:
             raise OperationError("invalid_limit: use a limit between 1 and 200")
-        return {"entries": [Text.from_markup(line).plain for line in self.app._log_entries[-limit:]],
-                "connection_token": self.connection_token(), "includes_debug": True}
+        entries = (list(self.app._frida_session_logs) if scope == "session" and self.app.frida_session
+                   else [] if scope == "session" else self.app._log_entries)
+        return {"entries": [Text.from_markup(line).plain for line in entries[-limit:]],
+                "connection_token": self.connection_token(), "includes_debug": True, "scope": scope}
 
     async def interception(self):
         return {"connection_token": self.connection_token(), "held": self.app._intent_blocked,
@@ -218,7 +268,32 @@ class MCPService:
                 "decision_id": self.app._current_decision_id,
                 "editing": self.app._edit_mode,
                 "captured_intent": copy.deepcopy(self.app._current_intercepted_entry),
-                "note": "Captured data, not the editor draft. MCP editing is not available yet."}
+                "note": "Use resolve_interception with modifications to edit and forward the captured Intent."}
+
+    async def wait_for_interception(self, expected_connection, after_decision_id=None, timeout_ms=10000):
+        if not 1 <= timeout_ms <= 30000:
+            raise OperationError("invalid_timeout: use a timeout between 1 and 30000 ms")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_ms / 1000
+        access_open = self._request_access.get()
+        app = self.app
+        while True:
+            if not self.enabled or (access_open is not None and not access_open()):
+                raise OperationError("server_stopped: MCP access has been stopped")
+            if expected_connection != self.connection_token():
+                raise OperationError("state_changed: read get_status before waiting again")
+            if not app._intercept_mode:
+                raise OperationError("intercept_disabled: enable interception before waiting")
+            decision_id = app._current_decision_id
+            if app._intent_blocked and decision_id and decision_id != after_decision_id:
+                return {**await self.interception(), "timed_out": False}
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return {"timed_out": True, "connection_token": expected_connection}
+            try:
+                await asyncio.wait_for(self._interception_changed.wait(), remaining)
+            except asyncio.TimeoutError:
+                continue
 
     def _intercept_session(self, expected_connection):
         self.require_control(expected_connection)
@@ -227,26 +302,77 @@ class MCPService:
             raise OperationError("session_not_ready: wait for the Frida agent")
         return session
 
-    async def _resolve(self, session, action, decision_id):
+    def _intent_modifications(self, modifications):
+        if len(modifications) > 64:
+            raise OperationError("invalid_modification: at most 64 changes per Intent")
+        mods = []
+        for index, change in enumerate(modifications, 1):
+            kind = change.get("type")
+            prefix = f"invalid_modification: change {index}"
+            if not isinstance(kind, str):
+                raise OperationError(f"{prefix} requires a type")
+            allowed = {
+                "component": {"value"}, "action": {"value"}, "data": {"value"}, "mime": {"value"},
+                "extra_add": {"key", "value", "extra_type"}, "extra_rem": {"key"},
+            }.get(kind)
+            if allowed is None or set(change) - {"type"} != allowed:
+                raise OperationError(f"{prefix} has an unsupported type or incorrect fields")
+            key, value, extra_type = (change.get(name, "") for name in ("key", "value", "extra_type"))
+            if any(not isinstance(part, str) for part in (key, value, extra_type)):
+                raise OperationError(f"{prefix} requires string values")
+            try:
+                key.encode("utf-8")
+                value.encode("utf-8")
+                if kind == "component":
+                    value = normalize_component(value)
+            except ValueError as error:
+                raise OperationError(f"{prefix}: {error}") from None
+            if kind.startswith("extra_") and not key:
+                raise OperationError(f"{prefix} requires a nonempty extra key")
+            if kind == "extra_add":
+                error = validate_extra_value(extra_type, value)
+                if error:
+                    raise OperationError(f"{prefix}: {error}")
+                extra_type = normalize_extra_type(extra_type)
+            mod = (kind, key, value, extra_type)
+            if error := self.app._mod_safety_error(mod):
+                raise OperationError(f"{prefix}: {error}")
+            mods.append(mod)
+        return mods
+
+    async def _resolve(self, session, action, decision_id, modifications=()):
         app = self.app
+        if action == "off" and decision_id is None and app._current_decision_id is not None:
+            raise OperationError("decision_id_required: pass expected_decision_id from get_interception")
         if decision_id != app._current_decision_id or (action != "off" and not app._intent_blocked):
             raise OperationError("hold_changed: read get_interception again")
         if app._edit_mode or app._edit_forward_pending or app._staged_mods:
             raise OperationError("draft_pending: finish or cancel the Intent draft in the TUI")
+        entry = app._current_intercepted_entry
+        if modifications and entry is None:
+            raise OperationError("capture_unavailable: cannot validate modifications without a captured Intent")
+        mods = self._intent_modifications(modifications)
         resolved = await asyncio.to_thread(
             app._resolve_interception, session, action, decision_id,
-            app._current_intercept_id, app._current_intercepted_entry, [],
+            app._current_intercept_id, entry, mods,
         )
         if not resolved:
             raise OperationError("hold_changed: the agent declined the decision; read get_interception again")
+        if mods:
+            return {"connection_token": self.connection_token(), "held": app._intent_blocked,
+                    "decision_id": app._current_decision_id, "event_id": entry["id"],
+                    "outcome": entry.get("outcome"), "modification_error": entry.get("modification_error"),
+                    "history_epoch": self.epoch("history")}
         return await self.interception()
 
-    async def resolve_interception(self, action, decision_id, expected_connection):
+    async def resolve_interception(self, action, decision_id, expected_connection, modifications=()):
         if action not in ("forward", "drop") or not decision_id:
             raise OperationError("invalid_decision: supply forward or drop and a decision_id")
+        if modifications and action != "forward":
+            raise OperationError("invalid_modification: modifications require forward")
         async with self._intercept_lock:
             session = self._intercept_session(expected_connection)
-            result = await self._resolve(session, action, decision_id)
+            result = await self._resolve(session, action, decision_id, modifications)
             return {**result, "resolved_decision_id": decision_id, "action": action}
 
     async def set_intercept(self, enabled, expected_decision_id, expected_connection):
@@ -267,24 +393,53 @@ class MCPService:
                 "hook_states": [{"profile": key[0], "signature": key[1], "status": value}
                                 for key, value in self.pane.statuses.items()]}
 
-    async def set_profile_enabled(self, profile_id, enabled, expected_revision, expected_connection):
+    def _editable_profiles(self, expected_revision, expected_connection):
         self.require_control(expected_connection)
         if self.app._connection_state == "connecting" or self.pane.finishing or self.pane.clearing:
             raise OperationError("busy: wait for the current operation to finish")
         if expected_revision != self.profile_revision():
             raise OperationError("profiles_changed: reread get_monitor_profiles")
-        profiles = copy.deepcopy(self.pane.profiles)
+        return copy.deepcopy(self.pane.profiles)
+
+    def _save_profiles(self, profiles):
+        try:
+            profiles = validate_profiles(profiles)
+        except ValueError as error:
+            raise OperationError(f"invalid_profile: {error}") from None
+        if profiles != self.pane.profiles and not self.pane.save(profiles):
+            raise OperationError("save_failed: profiles were not updated")
+        return {"revision": self.profile_revision(),
+                "configuration": "requested; consult hook_states for installation results"}
+
+    async def set_profile_enabled(self, profile_id, enabled, expected_revision, expected_connection):
+        result = await self.set_profiles_enabled({profile_id: enabled}, expected_revision, expected_connection)
+        return {**result, "enabled": enabled}
+
+    async def set_profiles_enabled(self, states, expected_revision, expected_connection):
+        profiles = self._editable_profiles(expected_revision, expected_connection)
+        by_id = {profile["id"]: profile for profile in profiles}
+        for profile_id, enabled in states.items():
+            if profile_id not in by_id:
+                raise OperationError(f"not_found: unknown profile {profile_id}")
+            by_id[profile_id]["enabled"] = enabled
+        return self._save_profiles(profiles)
+
+    async def add_monitor_hook(self, profile_id, hook, expected_revision, expected_connection):
+        profiles = self._editable_profiles(expected_revision, expected_connection)
         profile = next((p for p in profiles if p["id"] == profile_id), None)
         if profile is None:
             raise OperationError("not_found: unknown profile")
-        if profile["enabled"] != enabled:
-            profile["enabled"] = enabled
-            if not self.pane.save(profiles):
-                raise OperationError("save_failed: profile was not updated")
-        return {"revision": self.profile_revision(), "enabled": enabled,
-                "configuration": "requested; consult hook_states for installation results"}
+        try:
+            hook = validate_hook(hook)
+        except ValueError as error:
+            raise OperationError(f"invalid_hook: {error}") from None
+        overload = signature(hook)
+        if any(signature(existing) == overload for existing in profile["hooks"]):
+            raise OperationError("duplicate_hook: this overload already exists in the profile")
+        profile["hooks"].append(hook)
+        return {**self._save_profiles(profiles), "signature": overload, "enabled": profile["enabled"]}
 
-    async def connect(self, device_id, mode, target, expected_connection):
+    async def connect(self, device_id, mode, target, expected_connection, hooks=None):
         self.require_control(expected_connection)
         if self.app._connection_state != "disconnected":
             raise OperationError("busy: disconnect the current session first")
@@ -296,7 +451,7 @@ class MCPService:
         if self.app.query_one("#home_script_path", Input).value.strip():
             raise OperationError("extra_script_selected: connect from Home when using an extra script")
         path = self.app.query_one("#home_hooks_path", Input).value.strip() or None
-        config = SessionConfig(custom_hooks=path)
+        config = SessionConfig(custom_hooks=path if hooks is None else None)
         if mode == "attach_pid":
             try:
                 config.attach_pid = int(target)
@@ -308,9 +463,13 @@ class MCPService:
             config.spawn_package = target
         else:
             config.attach_name = target
-        config.validated_hooks = await asyncio.to_thread(load_hook_config, path)
+        if hooks is None:
+            config.validated_hooks = await asyncio.to_thread(load_hook_config, path)
+        else:
+            config.validated_hooks = await asyncio.to_thread(load_hook_config, inline_hooks=hooks)
         self.require_control(expected_connection)
-        if devices is not self.app._home_devices or path != (self.app.query_one("#home_hooks_path", Input).value.strip() or None):
+        current_path = self.app.query_one("#home_hooks_path", Input).value.strip() or None
+        if devices is not self.app._home_devices or (hooks is None and path != current_path):
             raise OperationError("state_changed: Home configuration changed; retry after reading status")
         if self.app.query_one("#home_script_path", Input).value.strip():
             raise OperationError("state_changed: an extra script was selected")

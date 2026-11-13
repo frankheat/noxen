@@ -196,7 +196,7 @@ def _resolve_runtime_path(configured_path: str | Path, source_default: Path, pac
     return packaged_default
 
 
-def load_hook_config(custom_hooks: str | None = None) -> HooksLoadResult:
+def load_hook_config(custom_hooks: str | None = None, *, inline_hooks: list | None = None) -> HooksLoadResult:
     hooks = []
     messages = []
     sources = []
@@ -213,9 +213,12 @@ def load_hook_config(custom_hooks: str | None = None) -> HooksLoadResult:
         messages.append(log_warning(warning, "loader"))
 
     inputs = [(default_hooks, "default")]
-    if custom_hooks:
+    if inline_hooks is not None:
+        custom_data, custom_warnings = validate_hook_config(inline_hooks, "MCP hook config")
+    elif custom_hooks:
         custom_label = f"custom hook config {custom_hooks}"
         custom_data, custom_warnings = _load_validated_hooks(custom_hooks, custom_label)
+    if custom_hooks or inline_hooks is not None:
         for warning in custom_warnings:
             messages.append(log_warning(warning, "loader"))
         inputs.append((custom_data, "custom"))

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from textual.widgets import Input, TabbedContent
 
 from noxen.app import NoxenApp
+from noxen.frida_session import ModificationResume
 from noxen.mcp_server import MCPServer
 from noxen.mcp_service import OperationError, json_value
 from noxen.mcp_ui import MCPPane
@@ -47,6 +48,91 @@ class MCPAppTestCase(IsolatedAppTestCase):
 
 
 class MCPServiceTests(MCPAppTestCase):
+    @with_app
+    async def test_monitor_batch_is_atomic_and_custom_hook_requires_fresh_revision(self):
+        profiles = (await self.service.profiles())["profiles"]
+        first, second = profiles[:2]
+        revision = self.service.profile_revision()
+        token = self.service.connection_token()
+        epoch = self.service.epoch("monitor")
+        with self.assertRaisesRegex(OperationError, "not_found"):
+            await self.service.set_profiles_enabled(
+                {first["id"]: not first["enabled"], "missing": True}, revision, token,
+            )
+        self.assertEqual(self.service.profile_revision(), revision)
+
+        result = await self.service.set_profiles_enabled(
+            {first["id"]: not first["enabled"], second["id"]: not second["enabled"]}, revision, token,
+        )
+        self.assertEqual(self.service.epoch("monitor"), epoch)
+        hook = {"class": "dev.example.Target", "method": "record", "args": ["java.lang.String"]}
+        with self.assertRaisesRegex(OperationError, "profiles_changed"):
+            await self.service.add_monitor_hook(first["id"], hook, revision, token)
+        result = await self.service.add_monitor_hook(first["id"], hook, result["revision"], token)
+        self.assertEqual(result["signature"], "dev.example.Target.record(java.lang.String)")
+        saved = json.loads(self.app.db.get_info("monitor_profiles"))["profiles"]
+        self.assertEqual(saved[0]["enabled"], not first["enabled"])
+        self.assertEqual(saved[1]["enabled"], not second["enabled"])
+        self.assertEqual(saved[0]["hooks"][-1]["method"], "record")
+        with self.assertRaisesRegex(OperationError, "duplicate_hook"):
+            await self.service.add_monitor_hook(first["id"], hook, result["revision"], token)
+
+    @with_app
+    async def test_session_logs_exclude_messages_from_retired_connection(self):
+        self.app._init_session(SimpleNamespace())
+        old_session = self.app.frida_session
+        old_session.log_cb("old session")
+        self.app._init_session(SimpleNamespace())
+        self.app.frida_session.log_cb("active session")
+        old_session.log_cb("late callback")
+        session = await self.service.logs(scope="session")
+        self.assertEqual(session["entries"], ["active session"])
+        application = await self.service.logs()
+        self.assertEqual(application["entries"][-3:], ["old session", "active session", "late callback"])
+
+    @with_app
+    async def test_wait_for_interception_skips_old_hold_and_wakes_for_new_one(self):
+        self.app.update_intercept_button(True)
+        token = self.service.connection_token()
+        first, second = self.capture("FIRST"), self.capture("SECOND")
+        self.app._on_intercept_display("", first, "first")
+        self.app.set_intercept_state(True)
+        current = await self.service.wait_for_interception(token)
+        self.assertEqual(current["decision_id"], "first")
+
+        waiting = asyncio.create_task(self.service.wait_for_interception(token, "first"))
+        await asyncio.sleep(0)
+        self.assertFalse(waiting.done())
+        self.app._on_intercept_display("", second, "second")
+        self.app.set_intercept_state(True)
+        result = await asyncio.wait_for(waiting, 1)
+        self.assertEqual(result["decision_id"], "second")
+        self.assertFalse(result["timed_out"])
+        self.assertTrue((await self.service.wait_for_interception(token, "second", 10))["timed_out"])
+
+        waiting = asyncio.create_task(self.service.wait_for_interception(token, "second"))
+        await asyncio.sleep(0)
+        self.service.enabled = False
+        with self.assertRaisesRegex(OperationError, "server_stopped"):
+            await asyncio.wait_for(waiting, 1)
+
+    @with_app
+    async def test_list_processes_uses_discovered_device_and_filters_by_name(self):
+        emulator = SimpleNamespace(id="emulator")
+        process = SimpleNamespace(pid=123, name="Example App")
+        device = SimpleNamespace(enumerate_processes=lambda: [
+            SimpleNamespace(pid=5, name="system_server"), process,
+        ], enumerate_applications=lambda: [SimpleNamespace(pid=123, identifier="dev.example")])
+        self.app._home_devices = [emulator]
+        with patch("frida.get_device", return_value=device) as resolve:
+            result = await self.service.list_processes(
+                "emulator", self.service.connection_token(), query="DEV.EXAMPLE",
+            )
+        resolve.assert_called_once_with("emulator")
+        self.assertEqual(result, {"processes": [
+            {"pid": 123, "name": "Example App", "package": "dev.example"},
+        ], "total_matches": 1})
+
     @with_app
     async def test_refresh_devices_updates_home_and_returns_new_scan(self):
         device = SimpleNamespace(id="emulator-5554", name="Pixel", type="usb")
@@ -171,6 +257,22 @@ class MCPServiceTests(MCPAppTestCase):
         self.app.query_one("#home_script_path", Input).value = "/tmp/custom.js"
         with self.assertRaisesRegex(OperationError, "extra_script_selected"):
             await self.service.connect(**args)
+
+    @with_app
+    async def test_connect_with_inline_hooks_validates_and_uses_the_requested_receiver(self):
+        self.app._home_devices = [SimpleNamespace(id="emulator", name="test", type="usb")]
+        args = dict(device_id="emulator", mode="spawn", target="dev.example",
+                    expected_connection=self.service.connection_token())
+        hook = {"clazz": "dev.example.Receiver", "method": "onReceive",
+                "args": ["android.content.Context", "android.content.Intent"]}
+        with patch.object(self.app, "_start_validated_connection") as start:
+            with self.assertRaisesRegex(ValueError, "MCP hook config"):
+                await self.service.connect(**args, hooks=[{"method": "onReceive"}])
+            start.assert_not_called()
+            await self.service.connect(**args, hooks=[hook])
+            config = start.call_args.args[1]
+            self.assertIn(hook, config.validated_hooks.hooks)
+            self.assertEqual(config.validated_hooks.custom_count, 1)
 
     @with_app
     async def test_stopped_service_does_not_accept_work(self):
@@ -321,15 +423,35 @@ class MCPTransportTests(MCPAppTestCase):
                         self.app._on_intercept_display("", event_id, "http-hold")
                         self.app.set_intercept_state(True)
                         token = self.service.connection_token()
+                        observed = dict(action="real-protocol", component="test/.Main", data=None,
+                                        mimeType=None, flags=0, categories=[],
+                                        extras={"amount": {"type": "java.lang.String", "value": "42"}})
                         with patch.object(session, "is_ready", return_value=True), patch.object(
-                            session, "forward_with_mods", return_value=True
+                            session, "forward_with_mods",
+                            return_value=ModificationResume(True, {"ok": True, "infoIntent": observed}),
                         ) as forward, patch.object(session, "intercept_off_with_mods", return_value=True) as off:
-                            resolved = await client.call_tool("resolve_interception", {
+                            request = {
                                 "action": "forward", "decision_id": "http-hold", "expected_connection": token,
+                                "modifications": [{"type": "extra_add", "key": "amount",
+                                                   "value": "42", "extra_type": "string"}],
+                            }
+                            rejected = await client.call_tool("resolve_interception", {
+                                **request, "modifications": [{"type": "extra_add", "key": "amount",
+                                                              "value": "invalid", "extra_type": "int"}],
                             })
+                            self.assertTrue(rejected.isError)
+                            self.assertEqual(rejected.structuredContent["error"]["code"], "invalid_modification")
+                            forward.assert_not_called()
+                            resolved = await client.call_tool("resolve_interception", request)
                             self.assertFalse(resolved.isError)
                             self.assertFalse(resolved.structuredContent["held"])
-                            forward.assert_called_once_with([], "http-hold")
+                            self.assertEqual(resolved.structuredContent["outcome"], "modified_forwarded")
+                            self.assertIsNone(resolved.structuredContent["modification_error"])
+                            forward.assert_called_once_with([("extra_add", "amount", "42", "string")], "http-hold")
+                            detail = await client.call_tool("get_intent", {
+                                "event_id": event_id, "epoch": resolved.structuredContent["history_epoch"],
+                            })
+                            self.assertEqual(detail.structuredContent["intent"]["intent"]["extras"]["amount"]["value"], "42")
                             disabled = await client.call_tool("set_intercept", {
                                 "enabled": False, "expected_connection": token,
                             })
@@ -350,6 +472,7 @@ class MCPTransportTests(MCPAppTestCase):
                         denied = await client.call_tool("disconnect", {
                             "expected_connection": self.service.connection_token()})
                         self.assertTrue(denied.isError)
+                        self.assertEqual(denied.structuredContent["error"]["code"], "control_disabled")
             self.assertEqual(self.app._connection_state, "disconnected")
         finally:
             server.stop()
