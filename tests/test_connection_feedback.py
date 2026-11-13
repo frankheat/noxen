@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from textual.widgets import Button, Input, Label, Select
+from textual.widgets import Button, Input, Label, Select, TabbedContent
 
 from tests.ui_test_case import IsolatedAppTestCase
 
@@ -82,6 +82,45 @@ class _DelayedSuccessfulSession:
 
 
 class ConnectionFeedbackTests(IsolatedAppTestCase):
+    async def test_mcp_connection_preserves_tab_selected_during_attach(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NoxenApp(SimpleNamespace(
+                project=None, new_project=os.path.join(tmp, "mcp.noxen"), skip_device_scan=True,
+            ))
+            release = threading.Event()
+            finished = threading.Event()
+            session = _DelayedSuccessfulSession(release, finished)
+
+            def init_session(config):
+                app._session_config = config
+                app.frida_session = session
+
+            async with app.run_test(size=(120, 40)) as pilot:
+                tabs = app.query_one("#main_tabs", TabbedContent)
+                tabs.active = "tab_mcp"
+                app._home_devices = [SimpleNamespace(id="device-1")]
+                app.mcp_service.enabled = app.mcp_service.allow_control = True
+                with patch.object(app, "_init_session", side_effect=init_session):
+                    result = await app.mcp_service.invoke(
+                        "connect", device_id="device-1", mode="spawn", target="dev.example",
+                        expected_connection=app.mcp_service.connection_token(),
+                    )
+                self.assertEqual(result["state"], "connecting")
+                self.assertEqual(tabs.active, "tab_mcp")
+
+                tabs.active = "tab_history"
+                await pilot.pause()
+                search = app.query_one("#history_search", Input)
+                search.focus()
+                release.set()
+                self.assertTrue(await asyncio.to_thread(finished.wait, 2))
+                await pilot.pause()
+
+                self.assertEqual(app._connection_state, "connected")
+                self.assertTrue(app.query_one("#session_bar").has_class("connected"))
+                self.assertEqual(tabs.active, "tab_history")
+                self.assertIs(app.focused, search)
+
     async def test_partial_hook_setup_stays_visibly_degraded(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:

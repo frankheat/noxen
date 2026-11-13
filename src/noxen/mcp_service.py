@@ -314,7 +314,7 @@ class MCPService:
             raise OperationError("state_changed: Home configuration changed; retry after reading status")
         if self.app.query_one("#home_script_path", Input).value.strip():
             raise OperationError("state_changed: an extra script was selected")
-        self.app._start_validated_connection(device_id, config)
+        self.app._start_validated_connection(device_id, config, open_intercept=False)
         return await self.status()
 
     async def disconnect(self, expected_connection):

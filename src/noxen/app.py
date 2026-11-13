@@ -454,7 +454,7 @@ class NoxenApp(App):
             release_cb=self._on_intent_released,
         )
 
-    def _start_validated_connection(self, device_id: str, config: SessionConfig):
+    def _start_validated_connection(self, device_id: str, config: SessionConfig, *, open_intercept=True):
         """Start the same session from Home or MCP after source validation."""
         if self.frida_session:
             self.frida_session.cleanup()
@@ -465,7 +465,7 @@ class NoxenApp(App):
         for message in self._startup_messages:
             self.write_log(message)
         self._refresh_history_table()
-        self.on_device_selected(device_id)
+        self.on_device_selected(device_id, open_intercept=open_intercept)
 
     def action_clear_log(self):
         if self._active_tab == "tab_history":
@@ -1703,7 +1703,7 @@ class NoxenApp(App):
             except Exception:
                 pass
 
-    def on_device_selected(self, device_id):
+    def on_device_selected(self, device_id, *, open_intercept=True):
         if not device_id:
             self.write_cmd("[red]No device selected[/red]")
             self.action_quit()
@@ -1732,7 +1732,7 @@ class NoxenApp(App):
         session.hook_warning_cb = (
             lambda message, session=session: self._on_hook_warning(message, session)
         )
-        session.connected_cb = lambda session=session: self._on_connected(session)
+        session.connected_cb = lambda: self._on_connected(session, open_intercept=open_intercept)
         session.connection_failed_cb = (
             lambda stage, error, session=session: self._on_connection_failed(stage, error, session)
         )
@@ -1957,7 +1957,7 @@ class NoxenApp(App):
         hooks = f"  ·  {count} hooks registered" if count is not None else ""
         return f"{target}  ·  {self._session_device_id}{api}{hooks}"
 
-    def _on_connected(self, session=None):
+    def _on_connected(self, session=None, *, open_intercept=True):
         if session is not None and session is not self.frida_session:
             return
         self._connection_state = "connected"
@@ -1974,7 +1974,8 @@ class NoxenApp(App):
                 self.query_one("#home_btn", Button).disabled = True
                 self.query_one("#home_disconnect", Button).disabled = False
                 self.query_one("#home_error", Label).update("")
-                self.query_one("#main_tabs", TabbedContent).active = "tab_intercept"
+                if open_intercept:
+                    self.query_one("#main_tabs", TabbedContent).active = "tab_intercept"
             except Exception:
                 pass
             if self._system_anr_bypass_enabled:
