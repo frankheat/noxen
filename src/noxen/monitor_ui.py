@@ -361,6 +361,7 @@ class MonitorPane(Vertical):
         self.target = ""
         self.event_reload = True
         self.event_watermark = 0
+        self.events_epoch = 0
         self.event_depth = self.EVENT_PAGE_SIZE
         self.display_events = {}
         self.event_page_task = None
@@ -656,12 +657,13 @@ class MonitorPane(Vertical):
             self.app.db.set_info("monitor_profiles", json.dumps({"version": PROFILE_FORMAT_VERSION, "profiles": profiles}))
         except (ValueError, OSError, sqlite3.Error) as exc:
             self.app.notify(str(exc), severity="error")
-            return
+            return False
         self.profiles = profiles
         enabled = {(hook["profile"], signature(hook)) for hook in enabled_hooks(profiles)}
         self.statuses = {key: status for key, status in self.statuses.items() if key in enabled}
         self.refresh_profiles(selected)
         self.apply_configuration()
+        return True
 
     def restore_hooks(self, profile):
         missing = missing_default_hooks(profile)
@@ -981,6 +983,7 @@ class MonitorPane(Vertical):
                 if self.recording_task is not None:
                     await self.recording_task
                 await asyncio.to_thread(self.app.db.clear_monitor_events)
+                self.events_epoch += 1
             except (OSError, sqlite3.Error) as exc:
                 self.app.notify(str(exc), title="Could not clear Monitor events", severity="error", markup=False)
                 return

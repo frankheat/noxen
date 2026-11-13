@@ -58,6 +58,8 @@ from noxen.app_info import (
 )
 from noxen.agent_loader import ExtraScriptError, HookConfigError, load_extra_script, load_hook_config
 from noxen.db import ProjectDB
+from noxen.mcp_service import MCPService
+from noxen.mcp_ui import MCPPane
 from noxen.exporting import (
     history_entries_label,
     write_filter_export,
@@ -323,6 +325,8 @@ class NoxenApp(App):
 
     def __init__(self, cli_args):
         super().__init__()
+        self._history_epoch = 0
+        self.mcp_service = MCPService(self)
         register_noxen_themes(self)
         self._settings = load_settings()
         self.theme = self._settings["theme"]
@@ -449,6 +453,19 @@ class NoxenApp(App):
             begin_capture_session=self.db.begin_capture_session,
             release_cb=self._on_intent_released,
         )
+
+    def _start_validated_connection(self, device_id: str, config: SessionConfig):
+        """Start the same session from Home or MCP after source validation."""
+        if self.frida_session:
+            self.frida_session.cleanup()
+            self.frida_session = None
+        self._startup_messages.clear()
+        self.set_intercept_state(False)
+        self._init_session(config)
+        for message in self._startup_messages:
+            self.write_log(message)
+        self._refresh_history_table()
+        self.on_device_selected(device_id)
 
     def action_clear_log(self):
         if self._active_tab == "tab_history":
@@ -936,15 +953,15 @@ class NoxenApp(App):
             intent_id = self._current_intercept_id
             resolved = self._current_intercepted_entry
             all_mods = list(mods)
-            result = self.frida_session.forward_with_mods(all_mods, decision_id)
+            result = self._resolve_interception(
+                self.frida_session, "forward", decision_id, intent_id, resolved, all_mods
+            )
             if not result:
                 self.call_from_thread(
                     self._restore_editor_after_forward_failure,
                     "No matching intent is blocked to forward",
                 )
                 return
-            self.set_intercept_state(False)
-            self._finalize_forward(intent_id, resolved, all_mods, result)
         except Exception as e:
             self.call_from_thread(
                 self._restore_editor_after_forward_failure,
@@ -961,15 +978,15 @@ class NoxenApp(App):
             return
         self._staged_mods.append(mod)
 
-    def _finalize_forward(self, intent_id: int | None, resolved_entry: dict | None, mods: list, result=None) -> None:
+    def _finalize_forward(self, intent_id: int | None, resolved_entry: dict | None, mods: list, result=None, *, clear=True) -> None:
         entry = resolved_entry
         if entry is not None and not any(saved is entry for saved in self._all_intents):
             entry = None
         if entry is None and intent_id is not None:
             entry = next((e for e in self._all_intents if e["id"] == intent_id), None)
         if entry is None:
-            self._staged_mods.clear()
-            self.call_from_thread(lambda e=resolved_entry: self._clear_intercept_output(e))
+            if clear:
+                self.call_from_thread(lambda e=resolved_entry: self._clear_intercept_output(e))
             return
 
         error = None
@@ -1001,8 +1018,35 @@ class NoxenApp(App):
                 message, title="Intent modification warning", severity="warning", timeout=8
             ))
         self._update_outcome(intent_id, outcome)
-        self._staged_mods.clear()
-        self.call_from_thread(lambda e=resolved_entry: self._clear_intercept_output(e))
+        if clear:
+            self.call_from_thread(lambda e=resolved_entry: self._clear_intercept_output(e))
+
+    def _resolve_interception(self, session, action, decision_id, intent_id, entry, mods):
+        """Run the decision on a worker against the session and hold already selected."""
+        if action == "drop":
+            result = session.drop(decision_id)
+        elif action == "off":
+            result = session.intercept_off_with_mods(mods, decision_id)
+        else:
+            result = session.forward_with_mods(mods, decision_id)
+        if not result:
+            return False
+        if action == "drop":
+            self._update_outcome(intent_id, "dropped")
+        else:
+            self._finalize_forward(intent_id, entry, mods, result, clear=False)
+
+        def finish():
+            if session is not self.frida_session:
+                return
+            if action == "off":
+                self.update_intercept_button(False)
+            if decision_id == self._current_decision_id:
+                self.set_intercept_state(False)
+                self._clear_intercept_output(entry)
+
+        self.call_from_thread(finish)
+        return True
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "home_refresh":
@@ -1452,6 +1496,8 @@ class NoxenApp(App):
                         yield RichLog(id="info_comp_detail", markup=True, highlight=False, auto_scroll=False)
                         yield Rule(classes="section_separator")
                 yield Label("Connect to a target to inspect it.", id="info_empty")
+            with TabPane(" MCP ", id="tab_mcp"):
+                yield MCPPane()
             with TabPane(" Log ", id="tab_log"):
                 with Horizontal(id="log_header"):
                     with Horizontal(id="log_verbose_group", classes="switch-control"):
@@ -1625,16 +1671,9 @@ class NoxenApp(App):
             script_path_raw = extra_source.path
             self.query_one("#home_script_path", Input).value = script_path_raw
 
-        if self.frida_session:
-            self.frida_session.cleanup()
-            self.frida_session = None
-
-        self._startup_messages.clear()
-        self.set_intercept_state(False)
-
         self._save_home_paths(hooks_path_raw, script_path_raw)
         script_path = script_path_raw or None
-        self._init_session(SessionConfig(
+        self._start_validated_connection(device_id, SessionConfig(
             spawn_package=target if mode == "f" else None,
             attach_name=target if mode == "n" else None,
             attach_pid=attach_pid,
@@ -1643,11 +1682,6 @@ class NoxenApp(App):
             extra_script=script_path,
             extra_script_source=extra_source,
         ))
-        for msg in self._startup_messages:
-            self.write_log(msg)
-        self._refresh_history_table()
-
-        self.on_device_selected(device_id)
 
     def on_select_changed(self, event: Select.Changed):
         if event.select.id in ("home_device", "home_mode"):
@@ -1780,7 +1814,7 @@ class NoxenApp(App):
             self.query_one("#home_error", Label).update("Scanning devices...")
         except Exception:
             pass
-        self._populate_home_devices_worker(generation)
+        return self._populate_home_devices_worker(generation)
 
     @work(thread=True)
     def _populate_home_devices_worker(self, generation: int):
@@ -1824,6 +1858,7 @@ class NoxenApp(App):
                 self._home_devices = []
 
             self.call_from_thread(_err)
+            return error
 
     def _clear_home_targets(self):
         self._target_scan_generation += 1
@@ -2450,6 +2485,9 @@ class NoxenApp(App):
 
 
     def _on_intercept_display(self, _text, entry_id=None, decision_id=None):
+        if threading.current_thread() is not threading.main_thread():
+            self.call_from_thread(self._on_intercept_display, _text, entry_id, decision_id)
+            return
         entry = None
         if entry_id is not None:
             entry = next((e for e in self._all_intents if e["id"] == entry_id), None)
@@ -2479,10 +2517,7 @@ class NoxenApp(App):
             except Exception:
                 pass
 
-        if threading.current_thread() is threading.main_thread():
-            _do()
-        else:
-            self.call_from_thread(_do)
+        _do()
 
     # --- DataTable row selection ---
 
@@ -2594,6 +2629,7 @@ class NoxenApp(App):
         if getattr(self, "_quit_in_progress", False):
             return
         self._quit_in_progress = True
+        self.query_one(MCPPane).stop_server()
         pane = self.query_one(MonitorPane)
         async with pane.recording_lock:
             await pane.stop_recording_feed(self.frida_session)
@@ -2654,6 +2690,7 @@ class NoxenApp(App):
         try:
             with self._history_lock:
                 self.db.clear_intents()
+                self._history_epoch += 1
                 self._all_intents.clear()
                 self._history_search_index.clear()
                 self._history_selected_entry = None
@@ -3259,15 +3296,12 @@ class NoxenApp(App):
                     return
             else:
                 mods = list(self._staged_mods)
-            result = self.frida_session.intercept_off_with_mods(
-                mods, self._current_decision_id
+            result = self._resolve_interception(
+                self.frida_session, "off", self._current_decision_id, intent_id, resolved, mods
             )
             if not result:
                 write_fn("[red]Could not disable interception for the active intent[/red]")
                 return
-            self.set_intercept_state(False)
-            self.update_intercept_button(False)
-            self._finalize_forward(intent_id, resolved, mods, result)
             write_fn("[yellow]Intercept OFF[/yellow]")
 
     def _refresh_history_detail(self):
@@ -3327,24 +3361,20 @@ class NoxenApp(App):
                 intent_id = self._current_intercept_id
                 resolved = self._current_intercepted_entry
                 mods = list(self._staged_mods)
-                result = self.frida_session.forward_with_mods(
-                    mods, self._current_decision_id
+                result = self._resolve_interception(
+                    self.frida_session, "forward", self._current_decision_id, intent_id, resolved, mods
                 )
                 if not result:
                     self.write_cmd("[red]No matching intent blocked to forward[/red]")
                     return
-                self.set_intercept_state(False)
-                self._finalize_forward(intent_id, resolved, mods, result)
             elif cmd_base in ["drop", "d"]:
                 intent_id = self._current_intercept_id
                 resolved = self._current_intercepted_entry
-                if not self.frida_session.drop(self._current_decision_id):
+                if not self._resolve_interception(
+                    self.frida_session, "drop", self._current_decision_id, intent_id, resolved, []
+                ):
                     self.write_cmd("[red]No matching intent blocked to drop[/red]")
                     return
-                self.set_intercept_state(False)
-                self._update_outcome(intent_id, "dropped")
-                self._staged_mods.clear()
-                self.call_from_thread(lambda e=resolved: self._clear_intercept_output(e))
 
             else:
                 mod, error = parse_intent_mod_command(parts)
@@ -3396,6 +3426,7 @@ class NoxenApp(App):
             pass
 
     def on_unmount(self):
+        self.mcp_service.enabled = False
         if self.frida_session:
             self.frida_session.connection_failed_cb = None
             self.frida_session.disconnected_cb = None

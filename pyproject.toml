@@ -16,6 +16,7 @@ dependencies = [
     "rich>=13",
     "tabulate>=0.9",
     "textual>=0.80",
+    "mcp>=1.30,<2",
 ]
 
 [project.optional-dependencies]

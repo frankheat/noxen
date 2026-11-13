@@ -332,6 +332,7 @@ Input:light > .input--suggestion {
     color: $foreground-muted;
 }
 #monitor_search,
+#mcp_port,
 #monitor_dialog Input {
     height: 3;
     padding: 0 1;
@@ -339,7 +340,9 @@ Input:light > .input--suggestion {
 }
 #monitor_search { background: transparent; }
 #monitor_search:focus,
+#mcp_port:focus,
 #monitor_dialog Input:focus { border: round $accent; }
+MCPPane Button,
 #monitor_pane .monitor_controls Button,
 #monitor_dialog Button,
 #monitor_restore_dialog Button,
@@ -352,6 +355,9 @@ Input:light > .input--suggestion {
     tint: transparent;
     background-tint: transparent;
 }
+MCPPane Button:hover,
+MCPPane Button:focus,
+MCPPane Button.-active,
 #monitor_pane .monitor_controls Button:hover,
 #monitor_pane .monitor_controls Button:focus,
 #monitor_pane .monitor_controls Button.-active,
@@ -367,6 +373,7 @@ Input:light > .input--suggestion {
     border: round $accent;
     color: $accent;
 }
+MCPPane Button:disabled,
 #monitor_pane .monitor_controls Button:disabled,
 #monitor_dialog Button:disabled {
     border: round $foreground-muted;
@@ -458,6 +465,26 @@ OptionList > .option-list--option-highlighted {
     padding: 1 2;
     color: $foreground;
 }
+MCPPane { padding: 1 2; }
+MCPPane .mcp_title { text-style: bold; height: 1; margin-bottom: 1; }
+MCPPane .mcp_controls { height: 3; margin-bottom: 1; align: left middle; }
+MCPPane .mcp_field_label { width: 8; height: 3; content-align: left middle; }
+#mcp_status_row { height: auto; margin-bottom: 1; }
+#mcp_status_row .mcp_field_label { height: 1; }
+#mcp_state { width: 1fr; height: auto; padding-left: 2; }
+#mcp_port { width: 10; margin-right: 2; background: transparent; }
+#mcp_start, #mcp_stop { width: auto; min-width: 10; padding: 0 1; margin-right: 1; }
+#mcp_control_group { width: auto; }
+#mcp_help, #mcp_empty, #mcp_activity {
+    height: auto; max-width: 90; color: $foreground-muted;
+}
+#mcp_activity { display: none; margin-top: 1; }
+MCPPane .section_separator { margin: 0 0 1 0; }
+#mcp_config {
+    display: none; width: 1fr; max-width: 100; height: 9;
+    border: none; padding: 0; background: $background;
+}
+#mcp_config:focus { border: none; }
 #settings_title {
     text-style: bold;
     color: $success;
