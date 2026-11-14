@@ -248,9 +248,19 @@ test('SQLite bindings are bounded and leave custom objects and the original arra
 });
 
 test('incoming provider call records caller, provider and standard query arguments only', () => {
-  const f = fixture(() => null, 'query');
-  f.Java.use = clazz => clazz === 'android.os.Binder' ? { getCallingUid: () => 10123 }
-    : { query: { overload: () => f.method } };
+  const denied = { $className: 'java.lang.SecurityException' };
+  let originalReturned = false;
+  const f = fixture((_source, _uri, projection) => {
+    if (projection?.[0] === 'denied') throw denied;
+    originalReturned = true;
+    return null;
+  }, 'query');
+  f.Java.use = clazz => {
+    if (clazz === 'android.os.Binder') return { getCallingUid: () => 10123 };
+    if (clazz === 'java.lang.reflect.Array')
+      return { getLength: array => array.items.length, get: (array, i) => array.items[i] };
+    return { query: { overload: () => f.method } };
+  };
   Object.assign(f.hook, { class: 'android.content.ContentProvider$Transport', profile: 'provider-inbound',
     args: ['android.content.AttributionSource', 'android.net.Uri', '[Ljava.lang.String;', 'android.os.Bundle',
       'android.os.ICancellationSignal'] });
@@ -260,14 +270,26 @@ test('incoming provider call records caller, provider and standard query argumen
   const source = { $className: 'android.content.AttributionSource', getPackageName: () => 'app.caller' };
   const uri = { $className: 'android.net.Uri$StringUri', toString: () => 'content://app/notes' };
   const read = [];
+  const selectionArgs = { getClass: () => ({ getName: () => '[Ljava.lang.String;' }), items: ['a', null] };
+  const lazy = { getClass: () => ({ getName: () => 'android.os.Parcel$LazyValue' }),
+    toString() { assert.fail('must not resolve lazy values'); } };
   const bundle = { $className: 'android.os.Bundle',
-    getString(key) { read.push(key); return key.endsWith('selection') ? '1=1 --' : null; },
-    getStringArray(key) { read.push(key); return ['a', null]; },
-    keySet() { assert.fail('must not enumerate caller keys'); } };
+    isParcelled() { return !originalReturned; },
+    mMap: { value: { get(key) {
+      assert.equal(originalReturned, true);
+      read.push(key);
+      if (key.endsWith('selection-args')) return selectionArgs;
+      return key.endsWith('selection') ? '1=1 --' : lazy;
+    } } } };
+  assert.throws(() => f.method.implementation.call(transport, source, uri, ['denied'], bundle, null),
+    error => error === denied);
   f.method.implementation.call(transport, source, uri, ['title'], bundle, null);
-  const subclass = { $className: 'app.Bundle', getString() { assert.fail('must stay opaque'); } };
-  f.method.implementation.call(transport, null, uri, null, subclass, null);
-  const [event, other] = f.monitor.stop().events;
+  const unopened = { $className: 'android.os.Bundle', isParcelled: () => true,
+    get mMap() { assert.fail('must stay opaque'); } };
+  f.method.implementation.call(transport, { ...source, getPackageName: () => null }, uri, null, unopened, null);
+  const [failed, event, other] = f.monitor.stop().events;
+  assert.equal(failed.outcome, 'exception');
+  assert.deepEqual(failed.arguments[3], { type: 'android.os.Bundle', opaque: true });
   assert.equal(event.provider.value, 'app.NotesProvider');
   assert.deepEqual(event.callingUid, { type: 'int', value: 10123 });
   assert.equal(event.arguments[0].value, 'app.caller');
@@ -276,7 +298,7 @@ test('incoming provider call records caller, provider and standard query argumen
   const query = event.arguments[3].queryArguments;
   assert.equal(query.selection.value, '1=1 --');
   assert.deepEqual(query.selectionArgs.items.map(item => item.value), ['a', null]);
-  assert.equal(query.sortOrder.value, null);
+  assert.deepEqual(query.sortOrder, { type: 'java.lang.String', opaque: true });
   assert.equal(read.length, 3);
   assert.equal(other.arguments[0].value, null);
   assert.deepEqual(other.arguments[3], { type: 'android.os.Bundle', opaque: true });

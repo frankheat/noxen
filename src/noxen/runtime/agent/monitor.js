@@ -197,7 +197,7 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
   let webViews = [], webSettingsHooks = [], statuses = [], webViewId = 0;
   let webObservation = '', webGeneration = 0;
   let javaSystem, weakReference;
-  let javaBuffer, javaBinder;
+  let javaBuffer, javaBinder, javaArray;
   function safe(fn, fallback) { try { return fn(); } catch (_) { return fallback; } }
   function textValue(type, text, limit = 2048) {
     return { type: type, value: text.slice(0, limit), truncated: text.length > limit };
@@ -250,18 +250,40 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
   }
   function providerArgument(spec, arg, type) {
     if (arg == null) return value(arg, type);
-    if (type === ATTRIBUTION_SOURCE && arg.$className === type)
-      return textValue(type, String(arg.getPackageName()));
+    if (type === ATTRIBUTION_SOURCE && arg.$className === type) {
+      const packageName = arg.getPackageName();
+      return packageName == null ? value(null, type) : textValue(type, String(packageName));
+    }
     if (type === STRINGS && Array.isArray(arg)) return strings(arg);
-    if (!SQL_ARGUMENT_METHODS.has(spec.method) || type !== BUNDLE || arg.$className !== BUNDLE)
-      return value(arg, type);
-    // ContentProvider reads these same framework keys from the Bundle before
-    // calling the application's implementation.
-    const selectionArgs = arg.getStringArray(QUERY_ARGUMENT + 'selection-args');
-    return { type: type, queryArguments: {
-      selection: value(arg.getString(QUERY_ARGUMENT + 'selection'), STRING),
-      selectionArgs: selectionArgs == null ? value(null, STRINGS) : strings(selectionArgs),
-      sortOrder: value(arg.getString(QUERY_ARGUMENT + 'sort-order'), STRING),
+    return value(arg, type);
+  }
+  function providerQueryArguments(bundle) {
+    const opaque = { type: BUNDLE, opaque: true };
+    // Inspect only the materialized map. Bundle getters can unpack a Parcel
+    // or resolve an individual lazy value on newer Android versions.
+    if (bundle.$className !== BUNDLE || bundle.isParcelled() !== false) return opaque;
+    const map = bundle.mMap.value;
+    if (map == null) return opaque;
+    function read(key, type) {
+      const name = QUERY_ARGUMENT + key;
+      const raw = map.get(name);
+      if (raw == null) return value(null, type);
+      if (typeof raw === 'string' && type === STRING) return value(raw, type);
+      if (String(raw.getClass().getName()) !== type) return { type: type, opaque: true };
+      if (type === STRING) return value(raw, type);
+      javaArray ??= Java.use('java.lang.reflect.Array');
+      const count = javaArray.getLength(raw);
+      const items = [];
+      for (let i = 0; i < Math.min(count, 16); i++) {
+        const item = javaArray.get(raw, i);
+        items.push(item == null ? value(null, 'null') : textValue(STRING, String(item), 512));
+      }
+      return { type: STRINGS, items, count };
+    }
+    return { type: BUNDLE, queryArguments: {
+      selection: read('selection', STRING),
+      selectionArgs: read('selection-args', STRINGS),
+      sortOrder: read('sort-order', STRING),
     } };
   }
   function argumentValue(spec, args, index) {
@@ -479,6 +501,13 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
       throw error;
     }
     event.outcome = 'returned';
+    if (event.class === TRANSPORT && event.arguments && SQL_ARGUMENT_METHODS.has(event.method)) {
+      const index = event.types.indexOf(BUNDLE);
+      if (index >= 0 && args[index] != null) {
+        event.arguments[index] = withoutRecording(() =>
+          safe(() => providerQueryArguments(args[index]), event.arguments[index]));
+      }
+    }
     observeWebResult(webSpec, receiver, args, result, generation);
     if (specs.some(s => s.captureReturn))
       event.result = inspect(() => {
