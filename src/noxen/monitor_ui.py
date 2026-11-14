@@ -972,10 +972,14 @@ class MonitorPane(Vertical):
         return more
 
     @work
-    async def clear_events(self):
+    async def clear_events(self, check_current=None):
         if self.clearing:
-            return
+            return False
         async with self.recording_lock:
+            if check_current is not None:
+                error = check_current()
+                if error is not None:
+                    return error
             self.drain()
             self.clearing = True
             self.request_event_page()
@@ -986,7 +990,7 @@ class MonitorPane(Vertical):
                 self.events_epoch += 1
             except (OSError, sqlite3.Error) as exc:
                 self.app.notify(str(exc), title="Could not clear Monitor events", severity="error", markup=False)
-                return
+                return False
             finally:
                 self.clearing = False
             self.recording = None
@@ -997,6 +1001,7 @@ class MonitorPane(Vertical):
             self.refresh_events(reset=True)
             self.refresh_page_if_visible()
             self.app.write_log(log_success("Monitor events cleared", "monitor"), notify=True)
+            return True
 
     def refresh_event_status(self):
         parts = []

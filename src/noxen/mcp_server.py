@@ -194,10 +194,26 @@ def create_http_app(invoke, token, port):
         """Read the current Info app snapshot; null means unavailable. Does not refresh Android state."""
         return await invoke("get_app_info")
 
+    @server.tool(annotations=write)
+    async def refresh_app_info(expected_connection: str) -> dict[str, Any]:
+        """Fetch a fresh Info app snapshot from the active Frida session. Requires Allow control."""
+        return await invoke("refresh_app_info", expected_connection=expected_connection)
+
     @server.tool(annotations=read)
     async def get_logs(limit: int = 50, scope: Literal["application", "session"] = "application") -> dict[str, Any]:
         """Read recent application logs or logs from the active Frida session. Includes DEBUG. Limit 1..200."""
         return await invoke("get_logs", limit=limit, scope=scope)
+
+    @server.tool(annotations=write)
+    async def clear_logs(expected_connection: str) -> dict[str, Any]:
+        """Clear both application and session logs. Requires Allow control."""
+        return await invoke("clear_logs", expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def clear_events(source: Literal["history", "monitor"], epoch: str,
+                           expected_connection: str) -> dict[str, Any]:
+        """Permanently clear one event history from the project. Requires Allow control and its current epoch."""
+        return await invoke("clear_events", source=source, epoch=epoch, expected_connection=expected_connection)
 
     @server.tool(annotations=read)
     async def get_interception() -> dict[str, Any]:
@@ -301,18 +317,33 @@ def create_http_app(invoke, token, port):
                             expected_connection=expected_connection)
 
     @server.tool(annotations=write)
+    async def restore_monitor_defaults(profile_id: str, expected_revision: str,
+                                       expected_connection: str) -> dict[str, Any]:
+        """Restore a removed built-in Monitor profile or add back its missing default hooks."""
+        return await invoke("restore_monitor_defaults", profile_id=profile_id, expected_revision=expected_revision,
+                            expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def retry_monitor_hooks(expected_revision: str, expected_connection: str) -> dict[str, Any]:
+        """Request reinstallation of enabled Monitor hooks. Read get_monitor_profiles for hook states."""
+        return await invoke("retry_monitor_hooks", expected_revision=expected_revision,
+                            expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
     async def connect(device_id: str, mode: Literal["spawn", "attach_name", "attach_pid"],
                       target: str, expected_connection: str,
-                      hooks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                      hooks: list[dict[str, Any]] | None = None,
+                      extra_script: str | None = None) -> dict[str, Any]:
         """Start a shared Frida session; requires disconnected state and Allow control.
 
         Pass hooks in noxen-analyze JSON format to use them alongside the default hooks
-        instead of the custom file selected in Home. Extra scripts must be started from Home.
+        instead of the custom file selected in Home. Pass JavaScript as extra_script
+        for this session, omit it to use Home's selection, or pass "" to skip it.
         Spawn launches the package; attach_pid takes a positive PID string. Poll get_status
         until agent_ready. A timeout is not proof that the operation did not run; reread status.
         """
         return await invoke("connect", device_id=device_id, mode=mode, target=target,
-                            expected_connection=expected_connection, hooks=hooks)
+                            expected_connection=expected_connection, hooks=hooks, extra_script=extra_script)
 
     @server.tool(annotations=write)
     async def disconnect(expected_connection: str) -> dict[str, Any]:

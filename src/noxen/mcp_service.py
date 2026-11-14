@@ -14,13 +14,14 @@ from contextvars import ContextVar
 from uuid import uuid4
 
 from textual.widgets import Input
+from textual.worker import WorkerCancelled
 from rich.text import Text
 
-from noxen.agent_loader import load_hook_config
+from noxen.agent_loader import ExtraScriptError, ExtraScriptSource, HookConfigError, load_extra_script, load_hook_config
 from noxen.filters import FilterManager
 from noxen.frida_session import SessionConfig
 from noxen.intent_mods import normalize_component, normalize_extra_type, parse_flag_value, validate_extra_value
-from noxen.monitor import signature, validate_hook, validate_profiles
+from noxen.monitor import missing_default_hooks, signature, validate_hook, validate_profiles
 from noxen.monitor_ui import MonitorPane
 from noxen.rendering import capture_order_label, entry_to_filter_context
 
@@ -103,16 +104,20 @@ class MCPService:
             "get_filters": self.filters, "set_filters": self.set_filters,
             "get_stack_settings": self.stack_settings, "set_stack_settings": self.set_stack_settings,
             "list_monitor_events": self.monitor_events, "get_monitor_event": self.monitor_event,
-            "get_app_info": self.app_info, "get_interception": self.interception,
+            "get_app_info": self.app_info, "refresh_app_info": self.refresh_app_info,
+            "get_interception": self.interception,
             "wait_for_interception": self.wait_for_interception,
             "resolve_interception": self.resolve_interception, "set_intercept": self.set_intercept,
             "get_logs": self.logs,
+            "clear_events": self.clear_events, "clear_logs": self.clear_logs,
             "get_monitor_profiles": self.profiles,
             "set_monitor_profile_enabled": self.set_profile_enabled,
             "set_monitor_profiles_enabled": self.set_profiles_enabled,
             "add_monitor_hook": self.add_monitor_hook,
             "save_monitor_profile": self.save_monitor_profile,
             "remove_monitor_profile": self.remove_monitor_profile,
+            "restore_monitor_defaults": self.restore_monitor_defaults,
+            "retry_monitor_hooks": self.retry_monitor_hooks,
             "connect": self.connect, "disconnect": self.disconnect,
         }
         context_token = self._request_access.set(_access_open)
@@ -351,6 +356,21 @@ class MCPService:
     async def app_info(self):
         return {"connection_token": self.connection_token(), "snapshot": copy.deepcopy(self.app._app_info)}
 
+    async def refresh_app_info(self, expected_connection):
+        self.require_control(expected_connection)
+        session = self.app.frida_session
+        if session is None or not session.is_ready():
+            raise OperationError("session_not_ready: wait for the Frida agent")
+        try:
+            snapshot = await self.app._fetch_app_info_worker(session).wait()
+        except WorkerCancelled:
+            snapshot = None
+        if expected_connection != self.connection_token() or self.app.frida_session is not session:
+            raise OperationError("state_changed: read get_status before refreshing Info app")
+        if snapshot is None:
+            raise OperationError("app_info_unavailable: refresh did not produce a new snapshot")
+        return {"connection_token": expected_connection, "snapshot": copy.deepcopy(snapshot)}
+
     async def logs(self, limit=50, scope="application"):
         if not 1 <= limit <= 200:
             raise OperationError("invalid_limit: use a limit between 1 and 200")
@@ -358,6 +378,36 @@ class MCPService:
                    else [] if scope == "session" else self.app._log_entries)
         return {"entries": [Text.from_markup(line).plain for line in entries[-limit:]],
                 "connection_token": self.connection_token(), "includes_debug": True, "scope": scope}
+
+    async def clear_logs(self, expected_connection):
+        self.require_control(expected_connection)
+        self.app._clear_application_logs()
+        return {"cleared": True}
+
+    async def clear_events(self, source, epoch, expected_connection):
+        def check_current():
+            self.require_control(expected_connection)
+            self.check_page(source, epoch, None, 1)
+
+        check_current()
+        if source == "history":
+            self.app.action_clear_history()
+        else:
+            def check_queued_clear():
+                try:
+                    check_current()
+                except OperationError as error:
+                    return error
+
+            result = await self.pane.clear_events(check_queued_clear).wait()
+            if isinstance(result, OperationError):
+                raise result
+            if not result:
+                raise OperationError("clear_failed: Monitor events were not cleared")
+        current_epoch = self.epoch(source)
+        if current_epoch == epoch:
+            raise OperationError("clear_failed: events were not cleared")
+        return {"cleared": True, "epoch": current_epoch}
 
     async def interception(self):
         return {"connection_token": self.connection_token(), "held": self.app._intent_blocked,
@@ -493,6 +543,7 @@ class MCPService:
 
     async def profiles(self):
         return {"revision": self.profile_revision(), "profiles": copy.deepcopy(self.pane.profiles),
+                "missing_builtin_profiles": [p["id"] for p in self.pane.missing_profiles()],
                 "hook_states": [{"profile": key[0], "signature": key[1], "status": value}
                                 for key, value in self.pane.statuses.items()]}
 
@@ -555,7 +606,30 @@ class MCPService:
             raise OperationError("not_found: unknown profile")
         return self._save_profiles(remaining)
 
-    async def connect(self, device_id, mode, target, expected_connection, hooks=None):
+    async def restore_monitor_defaults(self, profile_id, expected_revision, expected_connection):
+        profiles = self._editable_profiles(expected_revision, expected_connection)
+        profile = next((p for p in profiles if p["id"] == profile_id), None)
+        if profile is None:
+            default = next((p for p in self.pane.missing_profiles() if p["id"] == profile_id), None)
+            if default is None:
+                raise OperationError("not_found: unknown built-in profile")
+            profiles.append(default)
+            restored = len(default["hooks"])
+        else:
+            missing = missing_default_hooks(profile)
+            profile["hooks"].extend(missing)
+            restored = len(missing)
+        return {**self._save_profiles(profiles), "restored_hooks": restored}
+
+    async def retry_monitor_hooks(self, expected_revision, expected_connection):
+        self._editable_profiles(expected_revision, expected_connection)
+        session = self.app.frida_session
+        if session is None or session is not self.pane.session or not session.is_ready():
+            raise OperationError("session_not_ready: wait for the Frida agent")
+        self.pane.apply_configuration()
+        return {"configuration": "requested; consult hook_states for installation results"}
+
+    async def connect(self, device_id, mode, target, expected_connection, hooks=None, extra_script=None):
         self.require_control(expected_connection)
         if self.app._connection_state != "disconnected":
             raise OperationError("busy: disconnect the current session first")
@@ -564,8 +638,7 @@ class MCPService:
         devices = self.app._home_devices
         if not any(d.id == device_id for d in devices):
             raise OperationError("unknown_device: call refresh_devices first")
-        if self.app.query_one("#home_script_path", Input).value.strip():
-            raise OperationError("extra_script_selected: connect from Home when using an extra script")
+        script_path = self.app.query_one("#home_script_path", Input).value.strip() or None
         path = self.app.query_one("#home_hooks_path", Input).value.strip() or None
         config = SessionConfig(custom_hooks=path if hooks is None else None)
         if mode == "attach_pid":
@@ -579,16 +652,32 @@ class MCPService:
             config.spawn_package = target
         else:
             config.attach_name = target
-        if hooks is None:
-            config.validated_hooks = await asyncio.to_thread(load_hook_config, path)
-        else:
-            config.validated_hooks = await asyncio.to_thread(load_hook_config, inline_hooks=hooks)
+        try:
+            if hooks is None:
+                config.validated_hooks = await asyncio.to_thread(load_hook_config, path)
+            else:
+                config.validated_hooks = await asyncio.to_thread(load_hook_config, inline_hooks=hooks)
+        except HookConfigError as error:
+            raise OperationError(f"invalid_hook_config: {error}") from None
+        if extra_script is None and script_path:
+            try:
+                config.extra_script_source = await asyncio.to_thread(load_extra_script, script_path)
+            except ExtraScriptError as error:
+                raise OperationError(f"invalid_extra_script: {error}") from None
+            config.extra_script = config.extra_script_source.path
+        elif extra_script:
+            try:
+                extra_script.encode("utf-8")
+            except UnicodeError:
+                raise OperationError("invalid_extra_script: JavaScript must be valid UTF-8") from None
+            config.extra_script_source = ExtraScriptSource("mcp-extra-script.js", extra_script)
         self.require_control(expected_connection)
         current_path = self.app.query_one("#home_hooks_path", Input).value.strip() or None
+        current_script_path = self.app.query_one("#home_script_path", Input).value.strip() or None
         if devices is not self.app._home_devices or (hooks is None and path != current_path):
             raise OperationError("state_changed: Home configuration changed; retry after reading status")
-        if self.app.query_one("#home_script_path", Input).value.strip():
-            raise OperationError("state_changed: an extra script was selected")
+        if extra_script is None and script_path != current_script_path:
+            raise OperationError("state_changed: the extra script selected in Home changed; retry")
         self.app._start_validated_connection(device_id, config, open_intercept=False)
         return await self.status()
 

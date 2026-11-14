@@ -481,12 +481,15 @@ class NoxenApp(App):
         elif self._monitor_events_active():
             self.query_one(MonitorPane).clear_events()
         elif self._active_tab == "tab_log":
-            self._log_entries.clear()
-            self._frida_session_logs.clear()
-            try:
-                self.query_one("#log_output", RichLog).clear()
-            except Exception:
-                pass
+            self._clear_application_logs()
+
+    def _clear_application_logs(self):
+        self._log_entries.clear()
+        self._frida_session_logs.clear()
+        try:
+            self.query_one("#log_output", RichLog).clear()
+        except Exception:
+            pass
 
     def _monitor_events_active(self):
         return (
@@ -2147,11 +2150,12 @@ class NoxenApp(App):
         self._fetch_app_info_worker()
 
     @work(thread=True, exclusive=True, group="app_info")
-    def _fetch_app_info_worker(self) -> None:
+    def _fetch_app_info_worker(self, session=None) -> dict | None:
         # Connect fires right after resume; in spawn mode the app's Application context
         # may not exist yet, so poll a few times until the snapshot is ready.
         worker = get_current_worker()
-        session = self.frida_session
+        if session is None:
+            session = self.frida_session
 
         def is_current():
             return (
@@ -2168,6 +2172,7 @@ class NoxenApp(App):
                 return
             if info is not None:
                 self._apply_app_info(info)
+                return info
             else:
                 self.write_log(log_warning("App info not ready yet — use Refresh", "info"))
 
@@ -2179,8 +2184,7 @@ class NoxenApp(App):
             except Exception:
                 info = None
             if info and not info.get("error") and (info.get("identity") or {}).get("package"):
-                self.call_from_thread(publish, info)
-                return
+                return self.call_from_thread(publish, info)
             if not is_current():
                 return
             time.sleep(0.4)

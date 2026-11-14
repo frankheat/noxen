@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from functools import wraps
+from pathlib import Path
 import socket
 import tempfile
 import threading
@@ -65,6 +66,23 @@ class MCPServiceTests(MCPAppTestCase):
         with self.assertRaisesRegex(OperationError, "invalid_filter"):
             await self.service.set_filters("history", filters * 2, result["revision"], token)
         self.assertEqual(self.app.db.load_history_filters(), result["filters"])
+
+    @with_app
+    async def test_restore_monitor_defaults_preserves_custom_hooks_and_can_restore_a_profile(self):
+        state = await self.service.profiles()
+        token = self.service.connection_token()
+        original = state["profiles"][0]
+        profile_id = original["id"]
+        custom = {"class": "dev.example.Test", "method": "test", "args": []}
+        saved = await self.service.save_monitor_profile({**original, "hooks": [custom]}, state["revision"], token)
+        restored = await self.service.restore_monitor_defaults(profile_id, saved["revision"], token)
+        self.assertEqual(restored["restored_hooks"], len(original["hooks"]))
+        state = await self.service.profiles()
+        self.assertEqual(state["profiles"][0]["hooks"][0]["class"], custom["class"])
+        removed = await self.service.remove_monitor_profile(profile_id, restored["revision"], token)
+        self.assertIn(profile_id, (await self.service.profiles())["missing_builtin_profiles"])
+        await self.service.restore_monitor_defaults(profile_id, removed["revision"], token)
+        self.assertIn(original, (await self.service.profiles())["profiles"])
 
     @with_app
     async def test_monitor_batch_is_atomic_and_custom_hook_requires_fresh_revision(self):
@@ -288,9 +306,64 @@ class MCPServiceTests(MCPAppTestCase):
             config = start.call_args.args[1]
             self.assertEqual(config.spawn_package, "dev.noxen.playground")
             self.assertIsNotNone(config.validated_hooks)
-        self.app.query_one("#home_script_path", Input).value = "/tmp/custom.js"
-        with self.assertRaisesRegex(OperationError, "extra_script_selected"):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            self.app, "_start_validated_connection"
+        ) as start:
+            path = Path(directory) / "custom.js"
+            script_input = self.app.query_one("#home_script_path", Input)
+            script_input.value = str(path)
+            with self.assertRaisesRegex(OperationError, "invalid_extra_script"):
+                await self.service.connect(**args)
+            start.assert_not_called()
+            path.write_text("send('home');", encoding="utf-8")
             await self.service.connect(**args)
+            self.assertEqual(start.call_args.args[1].extra_script_source.code, "send('home');")
+            await self.service.connect(**args, extra_script="send('inline');")
+            self.assertEqual(start.call_args.args[1].extra_script_source.code, "send('inline');")
+            await self.service.connect(**args, extra_script="")
+            self.assertIsNone(start.call_args.args[1].extra_script_source)
+            self.assertEqual(script_input.value, str(path))
+
+    @with_app
+    async def test_refresh_app_info_publishes_the_shared_snapshot(self):
+        token = self.service.connection_token()
+        with self.assertRaisesRegex(OperationError, "session_not_ready"):
+            await self.service.refresh_app_info(token)
+        self.app._init_session(SimpleNamespace())
+        session = self.app.frida_session
+        snapshot = {"identity": {"package": "dev.example"}}
+        with patch.object(session, "is_ready", return_value=True), patch.object(
+            session, "get_app_info", return_value=snapshot,
+        ):
+            result = await self.service.refresh_app_info(token)
+        self.assertEqual(result["snapshot"], snapshot)
+        self.assertEqual(result, await self.service.app_info())
+        self.app.frida_session = None
+
+    @with_app
+    async def test_clear_events_checks_epoch_and_shares_the_ui_state(self):
+        self.capture("remove")
+        token = self.service.connection_token()
+        history_epoch = self.service.epoch("history")
+        monitor_epoch = self.service.epoch("monitor")
+        cleared = await self.service.clear_events("history", history_epoch, token)
+        self.assertNotEqual(cleared["epoch"], history_epoch)
+        self.assertEqual((await self.service.history())["events"], [])
+        self.assertEqual(self.service.epoch("monitor"), monitor_epoch)
+        with self.assertRaisesRegex(OperationError, "events_cleared"):
+            await self.service.clear_events("history", history_epoch, token)
+        async with self.service.pane.recording_lock:
+            pending = asyncio.create_task(self.service.clear_events("monitor", monitor_epoch, token))
+            await asyncio.sleep(0)
+            self.service.allow_control = False
+        with self.assertRaisesRegex(OperationError, "control_disabled"):
+            await pending
+        self.assertEqual(self.service.epoch("monitor"), monitor_epoch)
+        self.service.allow_control = True
+        cleared = await self.service.clear_events("monitor", monitor_epoch, token)
+        self.assertNotEqual(cleared["epoch"], monitor_epoch)
+        await self.service.clear_logs(token)
+        self.assertEqual((await self.service.logs())["entries"], [])
 
     @with_app
     async def test_connect_with_inline_hooks_validates_and_uses_the_requested_receiver(self):
@@ -444,7 +517,9 @@ class MCPTransportTests(MCPAppTestCase):
                         names = {t.name for t in (await client.list_tools()).tools}
                         self.assertIn("connect", names)
                         self.assertIn("get_interception", names)
-                        self.assertTrue({"set_filters", "list_applications", "get_stack_settings", "set_stack_settings",
+                        self.assertTrue({"refresh_app_info", "clear_events", "clear_logs",
+                                         "restore_monitor_defaults", "retry_monitor_hooks",
+                                         "set_filters", "list_applications", "get_stack_settings", "set_stack_settings",
                                          "save_monitor_profile", "remove_monitor_profile"} <= names)
                         self.assertTrue({"refresh_devices", "resolve_interception", "set_intercept"} <= names)
                         status = await client.call_tool("get_status")
@@ -465,6 +540,12 @@ class MCPTransportTests(MCPAppTestCase):
                         })
                         self.assertFalse(stack.isError)
                         self.assertEqual(stack.structuredContent["history"], {"enabled": True, "depth": 9})
+                        with patch.object(session, "is_ready", return_value=True), patch.object(
+                            session, "get_app_info", return_value={"identity": {"package": "dev.example"}},
+                        ):
+                            info = await client.call_tool("refresh_app_info", {"expected_connection": token})
+                        self.assertFalse(info.isError)
+                        self.assertEqual(info.structuredContent["snapshot"]["identity"]["package"], "dev.example")
                         observed = dict(action="real-protocol", component="test/.Main", data=None,
                                         mimeType=None, flags=1, categories=["test.category"],
                                         extras={"amount": {"type": "java.lang.String", "value": "42"}})
