@@ -20,7 +20,7 @@ from rich.text import Text
 from noxen.agent_loader import ExtraScriptError, ExtraScriptSource, HookConfigError, load_extra_script, load_hook_config
 from noxen.filters import FilterManager
 from noxen.frida_session import SessionConfig
-from noxen.intent_mods import normalize_component, normalize_extra_type, parse_flag_value, validate_extra_value
+from noxen.intent_mods import NESTED_INTENT_FIELDS, normalize_component, normalize_extra_type, parse_flag_value, validate_extra_value
 from noxen.monitor import missing_default_hooks, signature, validate_hook, validate_profiles
 from noxen.monitor_ui import MonitorPane
 from noxen.rendering import capture_order_label, entry_to_filter_context
@@ -519,7 +519,7 @@ class MCPService:
                 "component": {"value"}, "action": {"value"}, "data": {"value"}, "mime": {"value"},
                 "cat_add": {"value"}, "cat_rem": {"value"}, "flag_add": {"value"}, "flag_rem": {"value"},
                 "extra_add": {"key", "value", "extra_type"}, "extra_rem": {"key"},
-                "nested_component": {"key", "value"},
+                **dict.fromkeys(NESTED_INTENT_FIELDS, {"key", "value"}),
             }.get(kind)
             if allowed is None or set(change) - {"type"} != allowed:
                 raise OperationError(f"{prefix} has an unsupported type or incorrect fields")
@@ -549,7 +549,7 @@ class MCPService:
             if error := self.app._mod_safety_error(mod):
                 raise OperationError(f"{prefix}: {error}")
             mods.append(mod)
-        nested_keys = {key for kind, key, _, _ in mods if kind == "nested_component"}
+        nested_keys = {key for kind, key, _, _ in mods if kind in NESTED_INTENT_FIELDS}
         if any(key in nested_keys for kind, key, _, _ in mods if kind in {"extra_add", "extra_rem"}):
             raise OperationError("invalid_modification: cannot edit and replace or remove the same Intent extra")
         return mods

@@ -5,6 +5,13 @@ import re
 IntentMod = tuple[str, str, str, str]
 IntentModParseResult = tuple[IntentMod | None, str | None]
 
+NESTED_INTENT_FIELDS = {
+    "nested_component": "component",
+    "nested_action": "action",
+    "nested_data": "data",
+    "nested_mime": "mimeType",
+}
+
 
 EXTRA_TYPE_OPTIONS = (
     ("String", "string"),
@@ -354,17 +361,18 @@ def confirmed_modification(original: dict, report: dict | None, *, require_compo
     return actual, changed, warning
 
 
-def editable_nested_intent(extra: dict | None) -> dict | None:
+def editable_nested_intent(extra: dict | None) -> dict:
     if not isinstance(extra, dict) or extra.get("keyTruncated"):
-        return None
+        return {}
     node = extra.get("structured")
     if (not isinstance(node, dict) or node.get("kind") != "intent"
-            or node.get("type") != "android.content.Intent" or node.get("componentTruncated")):
-        return None
-    component = node.get("component")
-    if "component" in node and (component is None or isinstance(component, str)):
-        return node
-    return None
+            or node.get("type") != "android.content.Intent"):
+        return {}
+    return {
+        field: node[field] for field in NESTED_INTENT_FIELDS.values()
+        if field in node and not node.get(f"{field}Truncated")
+        and (node[field] is None or isinstance(node[field], str))
+    }
 
 
 def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
@@ -399,10 +407,11 @@ def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
                 info["flags"] = (_current_flags(info) & ~flag) & 0xFFFFFFFF
         elif mod_type == "extra_rem":
             info["extras"].pop(key, None)
-        elif mod_type == "nested_component":
-            node = editable_nested_intent(info["extras"].get(key))
-            if node is not None:
-                node["component"] = normalize_component(value) or None
+        elif mod_type in NESTED_INTENT_FIELDS:
+            field = NESTED_INTENT_FIELDS[mod_type]
+            extra = info["extras"].get(key)
+            if field in editable_nested_intent(extra):
+                extra["structured"][field] = (normalize_component(value) if field == "component" else value) or None
         elif mod_type == "extra_add":
             canonical = normalize_extra_type(extra_type) or "string"
             existing = original_extras.get(key, {})
@@ -464,10 +473,11 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
             continue
         old_nested = editable_nested_intent(old_extra)
         new_nested = editable_nested_intent(extra)
-        if old_nested is not None and new_nested is not None:
-            new_component = normalize_component(new_nested["component"] or "")
-            if new_component != (old_nested["component"] or ""):
-                mods.append(("nested_component", key, new_component, ""))
+        if old_nested and new_nested:
+            for kind, field in NESTED_INTENT_FIELDS.items():
+                if field in old_nested and field in new_nested and old_nested[field] != new_nested[field]:
+                    value = new_nested[field] or ""
+                    mods.append((kind, key, normalize_component(value) if field == "component" else value, ""))
             continue
         canonical = normalize_extra_type(
             extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(extra.get("type") or "")

@@ -500,14 +500,15 @@ function serializeIntentNode(value, typeName, context, depth) {
     if (text.truncated) node.componentTruncated = true;
     return text.value;
   });
-  readNestedIntent(intentValue, node, "action", function(intent) {
-    return capturedTextField(intent, "android.content.Intent", "getAction");
-  });
-  readNestedIntent(intentValue, node, "data", function(intent) {
-    return capturedTextField(intent, "android.content.Intent", "getDataString");
-  });
-  readNestedIntent(intentValue, node, "mimeType", function(intent) {
-    return capturedTextField(intent, "android.content.Intent", "getType");
+  Object.entries({ action: "getAction", data: "getDataString", mimeType: "getType" }).forEach(function(entry) {
+    var field = entry[0];
+    readNestedIntent(intentValue, node, field, function(intent) {
+      var value = capturedJavaText(intent, "android.content.Intent", entry[1]);
+      if (value === null) return null;
+      var text = boundedExtraText(value, true);
+      if (text.truncated) node[field + "Truncated"] = true;
+      return text.value;
+    });
   });
   readNestedIntent(intentValue, node, "package", function(intent) {
     return capturedTextField(intent, "android.content.Intent", "getPackage");
@@ -871,6 +872,46 @@ function parseIntentComponent(value) {
   return component;
 }
 
+function parseIntentData(value) {
+  if (value === "") return null;
+  if (!UriJava) throw new Error("android.net.Uri is unavailable");
+  return UriJava.parse(javaStringArgument(value));
+}
+
+var nestedIntentModTypes = {
+  nested_component: true, nested_action: true, nested_data: true, nested_mime: true
+};
+
+function applyNestedIntentMods(intent, key, mods) {
+  var nestedKey = javaStringArgument(key);
+  var nested = intent.getParcelableExtra.overload("java.lang.String").call(intent, nestedKey);
+  if (extraTypeName(nested) !== "android.content.Intent") {
+    throw new Error("Extra no longer contains a supported Intent");
+  }
+  var IntentJava = Java.use("android.content.Intent");
+  var replacement = IntentJava.$new(Java.cast(nested, IntentJava));
+  for (var mod of mods) {
+    if (mod.type === "nested_component") replacement.setComponent(parseIntentComponent(mod.val));
+    else if (mod.type === "nested_action") replacement.setAction(mod.val === "" ? null : javaStringArgument(mod.val));
+  }
+  applyIntentDataAndMime(replacement, mods, "nested_data", "nested_mime");
+  intent.putExtra.overload("java.lang.String", "android.os.Parcelable").call(intent, nestedKey, replacement);
+}
+
+function applyIntentDataAndMime(intent, mods, dataKind, mimeKind) {
+  var dataMod, mimeMod;
+  for (var mod of mods) {
+    if (mod.type === dataKind) dataMod = mod;
+    else if (mod.type === mimeKind) mimeMod = mod;
+  }
+  if (!dataMod && !mimeMod) return;
+  // Updating either field alone would clear the other.
+  var data = dataMod ? parseIntentData(dataMod.val) : intent.getData();
+  var mime = mimeMod ? (mimeMod.val === "" ? null : javaStringArgument(mimeMod.val))
+    : capturedJavaText(intent, "android.content.Intent", "getType");
+  intent.setDataAndType(data, mime);
+}
+
 function applyModifications(intent) {
   if (!intent) {
     modQueue = [];
@@ -879,28 +920,14 @@ function applyModifications(intent) {
 
   var error = null;
   try {
-    // Android's setData() clears the MIME type and setType() clears the data URI.
-    // Resolve both final values first, then update them atomically so changing one
-    // field preserves the other.
-    var dataOrMimeChanged = false;
-    var finalData = null;
-    var finalMimeType = null;
-    for (var index = 0; index < modQueue.length; index++) {
-      var queued = modQueue[index];
-      if (queued.type !== "data" && queued.type !== "mime") continue;
-      if (!dataOrMimeChanged) {
-        finalData = intent.getData();
-        finalMimeType = capturedJavaText(intent, "android.content.Intent", "getType");
-        dataOrMimeChanged = true;
-      }
-      if (queued.type === "data") {
-        if (!UriJava && queued.val !== "") throw new Error("android.net.Uri is unavailable");
-        finalData = queued.val === "" ? null : UriJava.parse(javaStringArgument(queued.val));
-      } else {
-        finalMimeType = queued.val === "" ? null : javaStringArgument(queued.val);
+    applyIntentDataAndMime(intent, modQueue, "data", "mime");
+    var nestedMods = new Map();
+    for (var queued of modQueue) {
+      if (Object.hasOwn(nestedIntentModTypes, queued.type)) {
+        if (!nestedMods.has(queued.key)) nestedMods.set(queued.key, []);
+        nestedMods.get(queued.key).push(queued);
       }
     }
-    if (dataOrMimeChanged) intent.setDataAndType(finalData, finalMimeType);
 
     modQueue.forEach(function(mod) {
       if (mod.type === "action") {
@@ -909,16 +936,11 @@ function applyModifications(intent) {
       else if (mod.type === "component") {
         intent.setComponent(parseIntentComponent(mod.val));
       }
-      else if (mod.type === "nested_component") {
-        var nestedKey = javaStringArgument(mod.key);
-        var nested = intent.getParcelableExtra.overload("java.lang.String").call(intent, nestedKey);
-        if (extraTypeName(nested) !== "android.content.Intent") {
-          throw new Error("Extra no longer contains a supported Intent");
+      else if (Object.hasOwn(nestedIntentModTypes, mod.type)) {
+        if (nestedMods.has(mod.key)) {
+          applyNestedIntentMods(intent, mod.key, nestedMods.get(mod.key));
+          nestedMods.delete(mod.key);
         }
-        var IntentJava = Java.use("android.content.Intent");
-        var replacement = IntentJava.$new(Java.cast(nested, IntentJava));
-        replacement.setComponent(parseIntentComponent(mod.val));
-        intent.putExtra.overload("java.lang.String", "android.os.Parcelable").call(intent, nestedKey, replacement);
       }
       else if (mod.type === "data" || mod.type === "mime") { /* applied together above */ }
       else if (mod.type === "cat_add") {
@@ -1296,10 +1318,10 @@ function normalizeRpcMods(mods) {
     component: true, action: true, data: true, mime: true,
     cat_add: true, cat_rem: true,
     flag_add: true, flag_rem: true,
-    extra_add: true, extra_rem: true, nested_component: true
+    extra_add: true, extra_rem: true
   };
   return mods.map(function (mod) {
-    if (!mod || !supported[mod.type]) {
+    if (!mod || !(Object.hasOwn(supported, mod.type) || Object.hasOwn(nestedIntentModTypes, mod.type))) {
       throw new Error("unsupported modification type");
     }
     return {

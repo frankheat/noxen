@@ -57,13 +57,19 @@ class MCPServiceTests(MCPAppTestCase):
         entry_id = self.app._on_history_intent({
             "infoIntent": {"extras": {"next": {
                 "type": "android.content.Intent", "value": "Intent (0 extras)", "editable": False,
-                "structured": {"kind": "intent", "type": "android.content.Intent", "component": "pkg/pkg.One"},
+                "structured": {"kind": "intent", "type": "android.content.Intent", "component": "pkg/pkg.One",
+                               "action": "OLD", "data": "https://example.org/old", "mimeType": "text/plain"},
             }}},
         }, 1)
         self.app._on_intercept_display("", entry_id, "nested")
         self.app.set_intercept_state(True)
         requested = {"type": "nested_component", "key": "next", "value": "pkg/.Two"}
-        mods = self.service._intent_modifications([requested])
+        mods = self.service._intent_modifications([
+            requested,
+            {"type": "nested_action", "key": "next", "value": "NEW"},
+            {"type": "nested_data", "key": "next", "value": "https://example.org/new"},
+            {"type": "nested_mime", "key": "next", "value": ""},
+        ])
         with self.assertRaisesRegex(OperationError, "must contain a captured Intent"):
             self.service._intent_modifications([{**requested, "key": "missing"}])
         with self.assertRaisesRegex(OperationError, "cannot edit and replace or remove"):
@@ -72,6 +78,9 @@ class MCPServiceTests(MCPAppTestCase):
         await self.pilot.pause()
         control = self.app.query_one(".ef_nested_component", Input)
         control.value = "pkg/.Two"
+        self.app.query_one(".ef_nested_action", Input).value = "NEW"
+        self.app.query_one(".ef_nested_data", Input).value = "https://example.org/new"
+        self.app.query_one(".ef_nested_mimeType", Input).value = ""
         self.assertEqual(self.app._collect_edit_mods(), mods)
         entry = self.app._current_intercepted_entry
         rendered = render_intent_detail({**entry, "original_intent": entry["intent"],
@@ -79,6 +88,8 @@ class MCPServiceTests(MCPAppTestCase):
         changes = rendered.split("CHANGES", 1)[1]
         self.assertIn("pkg/pkg.One", changes)
         self.assertIn("pkg/pkg.Two", changes)
+        self.assertIn("https://example.org/new", changes)
+        self.assertIn("MIME Type", changes)
 
     @with_app
     async def test_frida_crash_is_recorded_once_and_survives_project_reopen(self):

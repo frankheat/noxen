@@ -76,6 +76,7 @@ from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
     JAVA_TYPE_TO_SIMPLE,
+    NESTED_INTENT_FIELDS,
     apply_mods_to_intent,
     confirmed_modification,
     diff_intents,
@@ -735,15 +736,16 @@ class NoxenApp(App):
         if self._current_intent_is_null():
             return "Cannot modify: Intent is null"
         mod_type, key, _value, _extra_type = mod
-        if mod_type not in {"extra_add", "extra_rem", "nested_component"}:
+        nested_field = NESTED_INTENT_FIELDS.get(mod_type)
+        if mod_type not in {"extra_add", "extra_rem"} and nested_field is None:
             return None
         extras = (
             (self._current_intercepted_entry or {}).get("intent", {}).get("extras", {}) or {}
         )
         if (extras.get(key) or {}).get("keyTruncated"):
             return f"Extra '{key}' has a truncated key and cannot be modified safely"
-        if mod_type == "nested_component" and editable_nested_intent(extras.get(key)) is None:
-            return f"Extra '{key}' must contain a captured Intent with a readable component"
+        if nested_field is not None and nested_field not in editable_nested_intent(extras.get(key)):
+            return f"Extra '{key}' must contain a captured Intent with a readable {nested_field}"
         return None
 
     def _apply_command_mod_to_editor(self, mod: tuple) -> str | None:
@@ -805,15 +807,19 @@ class NoxenApp(App):
             Label("Read-only · escaped value", classes="ef_value_note"),
             classes="ef_value_cell",
         ) if preview_only else value_input
-        if nested is not None and not is_new:
-            self._edit_extra_rows[n]["nested_component"] = True
-            value_cell = Vertical(
-                value_input,
-                Label("Component", classes="ef_value_note"),
-                ExtraValueInput(id=f"ef_nested_component_{n}", value=nested["component"] or "",
-                                placeholder="e.g. com.example/.Activity", classes="ef_nested_component"),
-                classes="ef_value_cell",
-            )
+        if nested and not is_new:
+            fields = []
+            for field, label in (("component", "Component"), ("action", "Action"),
+                                 ("data", "Data URI"), ("mimeType", "MIME Type")):
+                if field not in nested or needs_value_preview(nested[field] or ""):
+                    continue
+                fields.extend((
+                    Label(label, classes="ef_value_note"),
+                    ExtraValueInput(id=f"ef_nested_{field}_{n}", value=nested[field] or "",
+                                    placeholder="(none)", classes=f"ef_nested_{field}"),
+                ))
+            if fields:
+                value_cell = Vertical(value_input, *fields, classes="ef_value_cell")
 
         if is_new:
             selected_type = simple_type or "string"
@@ -915,16 +921,21 @@ class NoxenApp(App):
                 )
 
             snapshot = displayed_extras.get(key)
-            if row_info.get("nested_component"):
-                selector = f"#ef_nested_component_{n}"
-                captured = snapshot["structured"]["component"]
-                entered = self.query_one(selector, Input).value
-                try:
-                    component = captured if entered == (captured or "") else normalize_component(entered) or None
-                except ValueError as error:
-                    raise _EditValidationError(str(error), selector, title="Invalid component") from None
+            nested = editable_nested_intent(snapshot)
+            if nested and not row_info["is_new"]:
                 extras[key] = copy.deepcopy(snapshot)
-                extras[key]["structured"]["component"] = component
+                for field, captured in nested.items():
+                    if needs_value_preview(captured or ""):
+                        continue
+                    selector = f"#ef_nested_{field}_{n}"
+                    entered = self.query_one(selector, Input).value
+                    if entered == (captured or ""):
+                        continue
+                    try:
+                        value = normalize_component(entered) if field == "component" else entered
+                    except ValueError as error:
+                        raise _EditValidationError(str(error), selector, title="Invalid component") from None
+                    extras[key]["structured"][field] = value or None
                 continue
             if snapshot is not None and (snapshot.get("editable") is False or row_info.get("value_read_only")):
                 extras[key] = copy.deepcopy(snapshot)
