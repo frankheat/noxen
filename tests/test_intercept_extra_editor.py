@@ -215,6 +215,34 @@ class InterceptExtraEditorTests(IsolatedAppTestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    async def test_next_hold_replaces_pending_editor_without_disabling_intercept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NoxenApp(project_args(os.path.join(tmp, "next-hold.noxen")))
+            async with app.run_test(size=(120, 36)) as pilot:
+                app.query_one("#main_tabs").active = "tab_intercept"
+                first = app._on_history_intent({"infoIntent": {"action": "FIRST"}}, 1)
+                second = app._on_history_intent({"infoIntent": {"action": "SECOND"}}, 2)
+                app._on_intercept_display("", first, "first")
+                app.set_intercept_state(True)
+                app._enter_edit_mode()
+                app.query_one("#ef_action", Input).value = "DRAFT"
+                app._set_edit_forward_pending(True)
+
+                app._on_intercept_display("", first, "first")
+                self.assertTrue(app._edit_forward_pending)
+                self.assertEqual(app.query_one("#ef_action", Input).value, "DRAFT")
+
+                app._on_intercept_display("", second, "second")
+                app.set_intercept_state(True)
+                await pilot.pause()
+                self.assertFalse(app._edit_mode)
+                self.assertFalse(app._edit_forward_pending)
+                self.assertTrue(app._intent_blocked)
+                self.assertEqual(app._current_decision_id, "second")
+                self.assertFalse(app.query_one("#btn_forward", Button).disabled)
+                app._enter_edit_mode()
+                self.assertEqual(app.query_one("#ef_action", Input).value, "SECOND")
+
     async def test_ctrl_f_forwards_and_ctrl_d_drops_outside_edit_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_cwd = os.getcwd()

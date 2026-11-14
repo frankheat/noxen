@@ -2598,6 +2598,10 @@ class NoxenApp(App):
         if threading.current_thread() is not threading.main_thread():
             self.call_from_thread(self._on_intercept_display, _text, entry_id, decision_id)
             return
+        # The next hook can publish its hold before the previous forward RPC
+        # reaches the UI. Retire the old draft when the decision changes.
+        if self._edit_mode and self._current_decision_id != decision_id:
+            self._exit_edit_mode()
         entry = None
         if entry_id is not None:
             entry = next((e for e in self._all_intents if e["id"] == entry_id), None)
