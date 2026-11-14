@@ -21,10 +21,22 @@ class SystemServerSession:
         self._connect_thread = None
         self._connecting = False
         self._ready = threading.Event()
+        self._installed_overloads = 0
         self._lock = threading.Lock()
         self._rpc_lock = threading.Lock()
         self._generation = 0
         self._active_holds: dict[str, dict] = {}
+
+    def installation_status(self) -> dict:
+        with self._lock:
+            if self._connecting:
+                state = "starting"
+            elif self._ready.is_set() and self._installed_overloads > 0:
+                state = "active"
+            else:
+                state = "unavailable"
+            return {"state": state,
+                    "installed_overloads": self._installed_overloads if self._ready.is_set() else 0}
 
     def connect(self, device_id: str) -> None:
         with self._lock:
@@ -104,6 +116,7 @@ class SystemServerSession:
             if not self._is_current(generation):
                 return
             status = script.exports_sync.status()
+            installed = int((status or {}).get("installedOverloads") or 0)
             if session.is_detached:
                 self._on_detached(generation, session, "connection-terminated", None)
                 return
@@ -111,6 +124,7 @@ class SystemServerSession:
             with self._lock:
                 if generation != self._generation or self._session is not session:
                     return
+                self._installed_overloads = installed
                 self._ready.set()
                 self._connecting = False
                 keep_session = True
@@ -178,6 +192,7 @@ class SystemServerSession:
         with self._lock:
             if generation != self._generation or self._script is not script:
                 return
+        # The log callback may wait for the UI loop, which also reads this state.
         self._on_message(message, data)
 
     def _log_status(self, status: dict | None) -> None:

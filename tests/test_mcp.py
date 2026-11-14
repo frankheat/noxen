@@ -10,7 +10,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from textual.widgets import Input, TabbedContent
+from textual.widgets import Input, Switch, TabbedContent
 
 from noxen.app import NoxenApp
 from noxen.frida_session import ModificationResume
@@ -49,6 +49,64 @@ class MCPAppTestCase(IsolatedAppTestCase):
 
 
 class MCPServiceTests(MCPAppTestCase):
+    @with_app
+    async def test_export_history_preserves_full_entries_and_continues_at_size_limit(self):
+        first, excluded, last = self.capture("SHOW"), self.capture("HIDE"), self.capture("SHOW")
+        with self.app._history_lock:
+            entries = {entry["id"]: entry for entry in self.app._all_intents}
+            entries[last]["intent"]["extras"] = {"body": {"type": "string", "value": "♣" * 130}}
+            entries[last]["original_intent"] = {"action": "ORIGINAL"}
+            entries[first]["intent"]["extras"] = {"body": {"type": "string", "value": "♣" * 130}}
+        state = await self.service.filters("history")
+        state = await self.service.set_filters(
+            "history", [{"id": 1, "type": "focus", "rule": {"action": "SHOW"}}],
+            state["revision"], self.service.connection_token(),
+        )
+        revision = state["revision"]
+        with patch("noxen.mcp_service.MAX_RESULT_BYTES", 2000):
+            page = await self.service.invoke("export_history", filter_revision=revision)
+            self.assertEqual([entry["id"] for entry in page["events"]], [last])
+            self.assertEqual(page["events"][0]["original_intent"], {"action": "ORIGINAL"})
+            self.assertEqual(page["events"][0]["intent"]["extras"]["body"]["value"], "♣" * 130)
+            following = await self.service.invoke(
+                "export_history", filter_revision=revision, epoch=page["epoch"], before_id=page["next_before_id"],
+            )
+            self.assertEqual([entry["id"] for entry in following["events"]], [first])
+            self.assertIsNone(following["next_before_id"])
+        with patch("noxen.mcp_service.MAX_RESULT_BYTES", 500):
+            with self.assertRaisesRegex(OperationError, f"result_too_large: History event #{last}"):
+                await self.service.invoke("export_history", filter_revision=revision)
+        self.assertIn(excluded, [entry["id"] for entry in (await self.service.export_history())["events"]])
+
+    @with_app
+    async def test_input_anr_bypass_uses_home_switch_and_reports_installation_state(self):
+        switch = self.app.query_one("#home_system_anr_bypass", Switch)
+        token = self.service.connection_token()
+        ready = {"state": "active", "installed_overloads": 3}
+        bypass = SimpleNamespace(installation_status=lambda: ready, cleanup=lambda: None)
+        self.assertEqual((await self.service.status())["input_anr_bypass"]["state"], "disabled")
+        self.service.allow_control = False
+        with self.assertRaisesRegex(OperationError, "control_disabled"):
+            await self.service.set_input_anr_bypass(True, token)
+        self.service.allow_control = True
+        with patch.object(self.app, "_ensure_system_anr_bypass") as attach:
+            status = await self.service.set_input_anr_bypass(True, token)
+            self.assertTrue(switch.value)
+            self.assertEqual(status["input_anr_bypass"]["state"], "waiting_for_connection")
+            attach.assert_not_called()
+            await self.service.set_input_anr_bypass(False, token)
+            self.app._connection_state = "connected"
+            self.app._session_device_id = "emulator"
+            token = self.service.connection_token()
+            attach.side_effect = lambda _: setattr(self.app, "system_server_session", bypass)
+            status = await self.service.set_input_anr_bypass(True, token)
+            self.assertEqual(status["input_anr_bypass"], {"enabled": True, **ready})
+            await self.service.set_input_anr_bypass(True, token)
+            attach.assert_called_once_with("emulator")
+            switch.value = False
+            await wait_for(lambda: self.app.system_server_session is None)
+            self.assertEqual((await self.service.status())["input_anr_bypass"]["state"], "disabled")
+
     @with_app
     async def test_project_filters_are_persisted_and_can_scope_history(self):
         shown, hidden = self.capture("SHOW"), self.capture("HIDE")
@@ -529,6 +587,12 @@ class MCPTransportTests(MCPAppTestCase):
                         result = await client.call_tool("list_history", {"query": "real-protocol"})
                         self.assertEqual(result.structuredContent["events"][0]["action"], "real-protocol")
                         event_id = result.structuredContent["events"][0]["id"]
+                        exported = await client.call_tool("export_history", {"query": "real-protocol"})
+                        self.assertEqual(exported.structuredContent["events"][0]["intent"]["action"], "real-protocol")
+                        bypass = await client.call_tool("set_input_anr_bypass", {
+                            "enabled": True, "expected_connection": status.structuredContent["connection_token"],
+                        })
+                        self.assertEqual(bypass.structuredContent["input_anr_bypass"]["state"], "waiting_for_connection")
                         self.app._init_session(SimpleNamespace())
                         session = self.app.frida_session
                         self.app._on_intercept_display("", event_id, "http-hold")

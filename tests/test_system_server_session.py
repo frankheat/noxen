@@ -126,6 +126,22 @@ class SystemServerLifecycleTests(unittest.TestCase):
         old_callback("process-terminated", None)
         self.assert_new_ready()
 
+    def test_installation_status_distinguishes_startup_no_hooks_and_active_hooks(self):
+        self.assertEqual(self.owner.installation_status(), {"state": "unavailable", "installed_overloads": 0})
+        old = self.sessions["old"]
+        entered, release = self.pause(old, "status")
+        self.owner.connect("old")
+        worker = self.owner._connect_thread
+        self.workers.append(worker)
+        self.assertTrue(entered.wait(2))
+        self.assertEqual(self.owner.installation_status(), {"state": "starting", "installed_overloads": 0})
+        release.set()
+        worker.join(2)
+        self.assertEqual(self.owner.installation_status(), {"state": "active", "installed_overloads": 1})
+        self.sessions["new"].script.exports_sync.status = lambda: {"installedOverloads": 0}
+        self.finish("new")
+        self.assertEqual(self.owner.installation_status(), {"state": "unavailable", "installed_overloads": 0})
+
     def test_system_session_uses_the_connection_discovery_context(self):
         resolver = self.fake_frida.get_device
         calls = []

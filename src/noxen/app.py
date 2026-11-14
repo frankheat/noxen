@@ -1782,12 +1782,19 @@ class NoxenApp(App):
             self._refresh_log_output()
             return
 
-        if event.switch.id != "home_system_anr_bypass":
+        if event.switch.id == "home_system_anr_bypass" and event.value == event.switch.value:
+            self.set_input_anr_bypass(event.value)
+
+    def set_input_anr_bypass(self, enabled: bool) -> None:
+        switch = self.query_one("#home_system_anr_bypass", Switch)
+        with switch.prevent(Switch.Changed):
+            switch.value = enabled
+        if self._system_anr_bypass_enabled == enabled:
             return
-        self._system_anr_bypass_enabled = event.value
-        if event.value and self._connection_state == "connected" and self._session_device_id:
+        self._system_anr_bypass_enabled = enabled
+        if enabled and self._connection_state == "connected" and self._session_device_id:
             self._ensure_system_anr_bypass(self._session_device_id)
-        elif not event.value and self.system_server_session:
+        elif not enabled and self.system_server_session:
             self._cleanup_system_server_session()
             self.write_log(log_warning("Input ANR bypass disabled", "input-anr"))
 

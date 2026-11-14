@@ -30,6 +30,9 @@ class OperationError(ValueError):
     pass
 
 
+MAX_RESULT_BYTES = 512 * 1024
+
+
 def json_value(value):
     """Preserve numbers a JSON client cannot represent without loss."""
     if isinstance(value, int) and not isinstance(value, bool) and abs(value) > 2**53 - 1:
@@ -100,7 +103,8 @@ class MCPService:
             "refresh_devices": self.refresh_devices,
             "list_processes": self.list_processes,
             "list_applications": self.list_applications,
-            "list_history": self.history, "get_intent": self.intent,
+            "list_history": self.history, "export_history": self.export_history, "get_intent": self.intent,
+            "set_input_anr_bypass": self.set_input_anr_bypass,
             "get_filters": self.filters, "set_filters": self.set_filters,
             "get_stack_settings": self.stack_settings, "set_stack_settings": self.set_stack_settings,
             "list_monitor_events": self.monitor_events, "get_monitor_event": self.monitor_event,
@@ -126,7 +130,7 @@ class MCPService:
         finally:
             self._request_access.reset(context_token)
         result = json_value(result)
-        if len(json.dumps(result, ensure_ascii=True, allow_nan=False).encode()) > 512 * 1024:
+        if len(json.dumps(result, ensure_ascii=True, allow_nan=False)) > MAX_RESULT_BYTES:
             raise OperationError("result_too_large: use a smaller page or a narrower query")
         return result
 
@@ -142,11 +146,25 @@ class MCPService:
             "allow_control": self.allow_control,
             "history_epoch": self.epoch("history"), "monitor_epoch": self.epoch("monitor"),
             "intent_held": app._intent_blocked,
+            "input_anr_bypass": self.input_anr_bypass_status(),
             "monitor_recording_error": self.pane.recording_error or None,
             "monitor_lost_events": self.pane.lost,
             "monitor_unsaved_events": self.pane.saved_unsaved,
             "monitor_incomplete_recordings": self.pane.interrupted_recordings,
         }
+
+    def input_anr_bypass_status(self):
+        app = self.app
+        if not app._system_anr_bypass_enabled:
+            return {"enabled": False, "state": "disabled", "installed_overloads": 0}
+        if app.system_server_session is None:
+            return {"enabled": True, "state": "waiting_for_connection", "installed_overloads": 0}
+        return {"enabled": True, **app.system_server_session.installation_status()}
+
+    async def set_input_anr_bypass(self, enabled, expected_connection):
+        self.require_control(expected_connection)
+        self.app.set_input_anr_bypass(enabled)
+        return {"connection_token": self.connection_token(), "input_anr_bypass": self.input_anr_bypass_status()}
 
     async def devices(self):
         return {"devices": [{"id": d.id, "name": d.name, "type": d.type}
@@ -222,6 +240,12 @@ class MCPService:
             raise OperationError("invalid_cursor: before_id requires the epoch from the previous page")
 
     async def history(self, query="", before_id=None, epoch=None, limit=25, filter_revision=None):
+        return await self._history_page(query, before_id, epoch, limit, filter_revision, full=False)
+
+    async def export_history(self, query="", before_id=None, epoch=None, limit=25, filter_revision=None):
+        return await self._history_page(query, before_id, epoch, limit, filter_revision, full=True)
+
+    async def _history_page(self, query, before_id, epoch, limit, filter_revision, *, full):
         self.check_page("history", epoch, before_id, limit)
         app = self.app
         current_epoch = self.epoch("history")
@@ -251,14 +275,29 @@ class MCPService:
         with app._history_lock:
             rows = []
             for _, _, entry in matches[:limit]:
+                if full:
+                    rows.append(copy.deepcopy(entry))
+                    continue
                 row = {k: copy.deepcopy(entry.get(k)) for k in ("id", "timestamp", "class", "method", "outcome")}
                 row.update({k: copy.deepcopy(entry.get("intent", {}).get(k)) for k in ("component", "action")})
                 row["capture_order"] = capture_order_label(entry)
                 rows.append(row)
             unsaved = sum(row[0] <= 0 for row in snapshot)
-        return {"events": rows, "epoch": current_epoch, "unsaved_events": unsaved,
-                "filter_revision": filter_revision,
-                "next_before_id": rows[-1]["id"] if len(matches) > limit else None}
+        page = {"events": rows, "epoch": current_epoch, "unsaved_events": unsaved,
+                "filter_revision": filter_revision, "next_before_id": None}
+        if full:
+            # Leave room for the actual cursor and the JSON list separators.
+            size = len(json.dumps({**page, "events": [], "next_before_id": rows[0]["id"] if rows else None}))
+            for index, row in enumerate(rows):
+                size += len(json.dumps(json_value(row), ensure_ascii=True, allow_nan=False)) + 2
+                if size > MAX_RESULT_BYTES:
+                    if index == 0:
+                        raise OperationError(f"result_too_large: History event #{row['id']} exceeds the export limit")
+                    del rows[index:]
+                    break
+        if len(matches) > len(rows):
+            page["next_before_id"] = rows[-1]["id"]
+        return page
 
     def _filter_manager(self, scope):
         if scope == "intercept":

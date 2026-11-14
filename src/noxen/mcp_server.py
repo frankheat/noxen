@@ -103,8 +103,17 @@ def create_http_app(invoke, token, port):
 
     @server.tool(annotations=read)
     async def get_status() -> dict[str, Any]:
-        """Read current connection, agent readiness, control permission and event epochs."""
+        """Read connection state, agent readiness, Input ANR bypass status, control permission and event epochs."""
         return await invoke("get_status")
+
+    @server.tool(annotations=write)
+    async def set_input_anr_bypass(enabled: bool, expected_connection: str) -> dict[str, Any]:
+        """Toggle the experimental Home Input ANR bypass. Requires Allow control.
+
+        When enabled, noxen attempts to install hooks in Android's system_server.
+        Read get_status for the installation result.
+        """
+        return await invoke("set_input_anr_bypass", enabled=enabled, expected_connection=expected_connection)
 
     @server.tool(annotations=read)
     async def list_devices() -> dict[str, Any]:
@@ -140,6 +149,18 @@ def create_http_app(invoke, token, port):
         To apply project History filters, pass their revision from get_filters on every page.
         """
         return await invoke("list_history", query=query, before_id=before_id, epoch=epoch, limit=limit,
+                            filter_revision=filter_revision)
+
+    @server.tool(annotations=read)
+    async def export_history(query: str = "", before_id: int | None = None,
+                             epoch: str | None = None, limit: int = 25,
+                             filter_revision: str | None = None) -> dict[str, Any]:
+        """Export full saved History entries as JSON, newest ID first, with no server-side file.
+
+        Pass next_before_id as before_id and reuse the epoch, query and filter revision.
+        The response may contain fewer than limit entries to fit the result size limit.
+        """
+        return await invoke("export_history", query=query, before_id=before_id, epoch=epoch, limit=limit,
                             filter_revision=filter_revision)
 
     @server.tool(annotations=read)
