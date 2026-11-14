@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from rich.text import Text
@@ -12,6 +13,7 @@ from textual.widgets import (
     DirectoryTree,
     Input,
     Label,
+    RichLog,
     Rule,
     Select,
     Switch,
@@ -24,6 +26,7 @@ from noxen.history_columns import (
     normalize_column_widths,
     parse_history_column_width,
 )
+from noxen.rendering import format_capture_time
 from noxen.textual_compat import is_select_empty
 from noxen.ui_theme import enabled_cell, themed_markup
 
@@ -72,6 +75,81 @@ class ExtraKeyModal(ModalScreen):
     def on_button_pressed(self, event: Button.Pressed):
         event.stop()
         if event.button.id == "extra_key_close":
+            self.dismiss()
+
+
+class CrashesModal(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Close")]
+    CSS = """
+    CrashesModal { align: center middle; }
+    #crash_dialog {
+        width: 90%; max-width: 120; height: 85%;
+        background: $surface; border: solid $foreground-muted; padding: 1 2;
+    }
+    #crash_title { text-style: bold; margin-bottom: 1; }
+    #crash_table { height: 2fr; background: $surface; border: none; }
+    #crash_report { height: 3fr; margin-bottom: 1; background: $surface; border: none; }
+    #crash_actions { height: 3; align: right middle; }
+    #crash_actions Button { margin-left: 1; }
+    """
+
+    def __init__(self, db):
+        super().__init__()
+        self._db = db
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="crash_dialog"):
+            yield Label("Crashes", id="crash_title", markup=False)
+            yield DataTable(id="crash_table", cursor_type="row", show_row_labels=False)
+            yield Rule(classes="section_separator")
+            yield RichLog(id="crash_report", wrap=True, auto_scroll=False)
+            with Horizontal(id="crash_actions"):
+                yield ModalButton("Close", id="crash_close")
+
+    def on_mount(self):
+        table = self.query_one("#crash_table", DataTable)
+        table.add_columns("#", "Time", "Process", "PID", "Session", "Summary")
+        records = self._db.list_crashes()
+        for crash in records:
+            table.add_row(
+                str(crash["id"]), format_capture_time(datetime.fromisoformat(crash["timestamp"]), precise=True),
+                Text(crash["process"]),
+                str(crash["pid"]), str(crash["captureSessionNumber"] or ""),
+                Text(crash["summary"]), key=str(crash["id"]),
+            )
+        if records:
+            self._show_crash(records[0]["id"])
+            table.focus()
+        else:
+            self.query_one("#crash_report", RichLog).write("No crashes recorded in this project.")
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
+        if event.row_key.value is not None:
+            self._show_crash(int(event.row_key.value))
+
+    def _show_crash(self, crash_id):
+        crash = self._db.get_crash(crash_id)
+        if crash is None:
+            return
+        fields = (
+            ("Crash", f"#{crash_id}"), ("Time", crash["timestamp"]),
+            ("Device", crash["device"]), ("Target", crash["target"]),
+            ("Process", f"{crash['process']} (PID {crash['pid']})"),
+            ("Session", crash["captureSessionNumber"]), ("Reason", crash["reason"]),
+            ("Summary", crash["summary"]),
+        )
+        lines = [f"{label:<8} : {value}" for label, value in fields if value is not None]
+        lines.extend(("", crash["report"] or "No report supplied by Frida."))
+        if crash["report_truncated"]:
+            lines.append("\nReport truncated.")
+        report = self.query_one("#crash_report", RichLog)
+        report.clear()
+        report.write(Text("\n".join(lines)))
+        report.scroll_home(animate=False)
+
+    def on_button_pressed(self, event: Button.Pressed):
+        event.stop()
+        if event.button.id == "crash_close":
             self.dismiss()
 
 

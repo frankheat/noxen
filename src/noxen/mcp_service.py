@@ -113,6 +113,7 @@ class MCPService:
             "wait_for_interception": self.wait_for_interception,
             "resolve_interception": self.resolve_interception, "set_intercept": self.set_intercept,
             "get_logs": self.logs,
+            "list_crashes": self.list_crashes, "get_crash": self.get_crash,
             "clear_events": self.clear_events, "clear_logs": self.clear_logs,
             "get_monitor_profiles": self.profiles,
             "set_monitor_profile_enabled": self.set_profile_enabled,
@@ -409,6 +410,23 @@ class MCPService:
         if snapshot is None:
             raise OperationError("app_info_unavailable: refresh did not produce a new snapshot")
         return {"connection_token": expected_connection, "snapshot": copy.deepcopy(snapshot)}
+
+    async def list_crashes(self, limit=25, before_id=None):
+        if not 1 <= limit <= 100:
+            raise OperationError("invalid_limit: use a limit between 1 and 100")
+        if before_id is not None and before_id <= 0:
+            raise OperationError("invalid_cursor: before_id must be positive")
+        records = await asyncio.to_thread(self.app.db.list_crashes, limit + 1, before_id)
+        return {
+            "crashes": records[:limit],
+            "next_before_id": records[limit - 1]["id"] if len(records) > limit else None,
+        }
+
+    async def get_crash(self, crash_id):
+        crash = await asyncio.to_thread(self.app.db.get_crash, crash_id)
+        if crash is None:
+            raise OperationError("not_found: crash is not available in this project")
+        return {"crash": crash}
 
     async def logs(self, limit=50, scope="application"):
         if not 1 <= limit <= 200:

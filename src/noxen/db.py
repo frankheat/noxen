@@ -286,6 +286,10 @@ class ProjectDB:
                 key   TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE TABLE IF NOT EXISTS crashes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS monitor_recordings (
                 id TEXT PRIMARY KEY,
                 started TEXT NOT NULL,
@@ -322,6 +326,29 @@ class ProjectDB:
             );
         """)
         self._conn.commit()
+
+    def save_crash(self, crash: dict) -> int:
+        with self._lock, self._require_connection() as conn:
+            return conn.execute("INSERT INTO crashes (payload) VALUES (?)", (json.dumps(crash),)).lastrowid
+
+    def list_crashes(self, limit: int = -1, before_id: int | None = None) -> list[dict]:
+        with self._lock:
+            rows = self._require_connection().execute(
+                "SELECT id, payload FROM crashes WHERE ? IS NULL OR id < ? ORDER BY id DESC LIMIT ?",
+                (before_id, before_id, limit),
+            )
+            summaries = []
+            for crash_id, payload in rows:
+                summary = json.loads(payload)
+                summary.pop("report", None)
+                summary["id"] = crash_id
+                summaries.append(summary)
+            return summaries
+
+    def get_crash(self, crash_id: int) -> dict | None:
+        with self._lock:
+            row = self._require_connection().execute("SELECT payload FROM crashes WHERE id = ?", (crash_id,)).fetchone()
+        return dict(json.loads(row[0]), id=crash_id) if row else None
 
     def _migrate(self) -> None:
         """Add columns introduced after the initial schema, if missing."""

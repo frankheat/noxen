@@ -88,6 +88,7 @@ from noxen.intent_mods import (
 from noxen.logging_ui import is_debug_log, log_debug, log_error, log_info, log_success, log_warning
 from noxen.modals import (
     ColumnSelectModal,
+    CrashesModal,
     ExtraKeyModal,
     FileBrowserModal,
     HelpModal,
@@ -460,7 +461,12 @@ class NoxenApp(App):
             device_resolver=getattr(self._home_devices, "get_device", None),
             begin_capture_session=self.db.begin_capture_session,
             release_cb=self._on_intent_released,
+            crash_cb=self._record_crash,
         )
+
+    def _record_crash(self, crash):
+        crash_id = self.db.save_crash(crash)
+        self.write_log(log_warning(f"Crash #{crash_id} recorded (PID {crash['pid']})", "frida"))
 
     def _start_validated_connection(self, device_id: str, config: SessionConfig, *, open_intercept=True):
         """Start the same session from Home or MCP after source validation."""
@@ -1061,7 +1067,10 @@ class NoxenApp(App):
         return True
 
     def on_button_pressed(self, event: Button.Pressed):
-        if event.button.id == "home_refresh":
+        if event.button.id == "log_crashes":
+            self.push_screen(CrashesModal(self.db))
+            return
+        elif event.button.id == "home_refresh":
             self._populate_home_devices()
             return
         elif event.button.id == "home_target_refresh":
@@ -1516,6 +1525,7 @@ class NoxenApp(App):
                     with Horizontal(id="log_verbose_group", classes="switch-control"):
                         yield Switch(value=self._log_verbose, id="log_verbose")
                         yield Label("Verbose logs", id="log_verbose_label", classes="switch-control-label")
+                    yield ModalButton("Crashes", id="log_crashes")
                 yield Rule(classes="section_separator")
                 yield RichLog(id="log_output", markup=True, highlight=False)
                 yield Rule(classes="section_separator")

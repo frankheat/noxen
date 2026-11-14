@@ -13,7 +13,8 @@ from unittest.mock import patch
 from textual.widgets import Input, Switch, TabbedContent
 
 from noxen.app import NoxenApp
-from noxen.frida_session import ModificationResume
+from noxen.db import ProjectDB
+from noxen.frida_session import MAX_CRASH_REPORT_CHARS, ModificationResume
 from noxen.mcp_server import MCPServer
 from noxen.mcp_service import OperationError, json_value
 from noxen.mcp_ui import MCPPane
@@ -49,6 +50,59 @@ class MCPAppTestCase(IsolatedAppTestCase):
 
 
 class MCPServiceTests(MCPAppTestCase):
+    @with_app
+    async def test_frida_crash_is_recorded_once_and_survives_project_reopen(self):
+        from textual.widgets import DataTable, RichLog
+
+        self.app._init_session(SimpleNamespace(target_label=lambda: "dev.example"))
+        session = self.app.frida_session
+        session._device_id = "emulator"
+        session._capture_session_number = 4
+        session._hook_report_event = threading.Event()
+        crash = SimpleNamespace(pid=42, process_name="dev.example", summary="SIGABRT",
+                                report="🛑" * (MAX_CRASH_REPORT_CHARS + 1))
+        await asyncio.to_thread(session._on_detached, "process-terminated", None, session._generation)
+        self.assertEqual((await self.service.invoke("list_crashes"))["crashes"], [])
+        await asyncio.to_thread(session._on_detached, "process-terminated", crash, session._generation - 1)
+        self.assertEqual((await self.service.invoke("list_crashes"))["crashes"], [])
+        for _ in range(2):
+            await asyncio.to_thread(session._on_detached, "process-terminated", crash, session._generation)
+
+        page = await self.service.invoke("list_crashes", limit=1)
+        self.assertEqual(len(page["crashes"]), 1)
+        self.assertIsNone(page["next_before_id"])
+        summary = page["crashes"][0]
+        self.assertEqual(summary["captureSessionNumber"], 4)
+        self.assertNotIn("report", summary)
+        saved = (await self.service.invoke("get_crash", crash_id=summary["id"]))["crash"]
+        self.assertEqual(saved["captureSession"], session._capture_session)
+        self.assertEqual(len(saved["report"]), MAX_CRASH_REPORT_CHARS)
+        self.assertTrue(saved["report_truncated"])
+        self.app.frida_session = None
+        reopened = ProjectDB(self.app.db._path)
+        reopened.open_existing()
+        try:
+            self.assertEqual(reopened.get_crash(summary["id"]), saved)
+        finally:
+            reopened.close()
+        self.app.db.save_crash({**saved, "summary": "SIGSEGV", "report": "First short report"})
+        self.app.db.save_crash({**saved, "summary": "SIGILL", "report": "Second report"})
+        tabs = self.app.query_one("#main_tabs", TabbedContent)
+        tabs.active = "tab_log"
+        await self.pilot.pause()
+        await self.pilot.click("#log_crashes")
+        table = self.app.screen.query_one("#crash_table", DataTable)
+        report = self.app.screen.query_one("#crash_report", RichLog)
+        self.assertEqual(table.row_count, 3)
+        self.assertIn("Second report", "\n".join(line.text for line in report.lines))
+        table.move_cursor(row=1, animate=False)
+        await self.pilot.pause()
+        self.assertIn("First short report", "\n".join(line.text for line in report.lines))
+        self.assertEqual(tabs.active, "tab_log")
+        await self.pilot.click("#crash_close")
+        await self.pilot.pause()
+        self.assertEqual(tabs.active, "tab_log")
+
     @with_app
     async def test_export_history_preserves_full_entries_and_continues_at_size_limit(self):
         first, excluded, last = self.capture("SHOW"), self.capture("HIDE"), self.capture("SHOW")

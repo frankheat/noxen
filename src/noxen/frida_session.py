@@ -1,5 +1,6 @@
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from noxen.agent_loader import ExtraScriptSource, HooksLoadResult, load_agent_script, load_hook_config
@@ -11,6 +12,7 @@ from noxen.rendering import capture_datetime, payload_to_filter_context, render_
 MODIFICATION_CONFIRM_TIMEOUT = 5
 HOOK_REPORT_TIMEOUT = 30
 MAX_PENDING_RELEASES = 64
+MAX_CRASH_REPORT_CHARS = 32768
 
 
 @dataclass
@@ -59,6 +61,7 @@ class FridaSession:
         device_resolver: callable = None,
         begin_capture_session: callable = None,
         release_cb: callable = None,
+        crash_cb: callable = None,
     ):
         self._config = config
         self.filter_manager = filter_manager
@@ -74,6 +77,7 @@ class FridaSession:
         self.device_resolver = device_resolver
         self.begin_capture_session = begin_capture_session
         self.release_cb = release_cb
+        self.crash_cb = crash_cb
         self.api_level_cb = None
         self.hook_warning_cb = None
         self.connected_cb = None
@@ -93,6 +97,8 @@ class FridaSession:
         self._lock = threading.Lock()
         self._generation = 0
         self._capture_session = uuid4().hex
+        self._capture_session_number = None
+        self._crash_reported = False
         self._ready = False
         self._blocking_enabled = True
         self._intercept_counter = 0
@@ -106,6 +112,8 @@ class FridaSession:
             self._device_id = device_id
             self._generation += 1
             self._capture_session = uuid4().hex
+            self._capture_session_number = None
+            self._crash_reported = False
             self._pending_releases.clear()
             self._ready = False
             self.hook_registration_count = None
@@ -244,6 +252,9 @@ class FridaSession:
             stage = "hooks"
             if self.begin_capture_session is not None:
                 previous, session_number = self.begin_capture_session()
+                with self._lock:
+                    if generation == self._generation:
+                        self._capture_session_number = session_number
                 if script.exports_sync.set_capture_order_start(previous, session_number) is not True:
                     raise RuntimeError("Could not initialize the project's capture order")
             self._hooks_result = hooks_result
@@ -429,6 +440,12 @@ class FridaSession:
         with self._lock:
             if generation != self._generation:
                 return
+            record_crash = crash is not None and not self._crash_reported and self.crash_cb is not None
+            if record_crash:
+                self._crash_reported = True
+                capture_session = self._capture_session
+                session_number = self._capture_session_number
+                device_id = self._device_id
             self._script = None
             self._session = None
             self._ready = False
@@ -437,6 +454,24 @@ class FridaSession:
             if initializing:
                 self._hook_report_event.set()
         msg = reason.replace("-", " ") if reason else "unknown reason"
+        if record_crash:
+            try:
+                report = crash.report or ""
+                self.crash_cb({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "device": device_id,
+                    "target": self._config.target_label(),
+                    "reason": reason,
+                    "pid": crash.pid,
+                    "process": (crash.process_name or "")[:512],
+                    "summary": (crash.summary or "")[:512],
+                    "report": report[:MAX_CRASH_REPORT_CHARS],
+                    "report_truncated": len(report) > MAX_CRASH_REPORT_CHARS,
+                    "captureSession": capture_session,
+                    "captureSessionNumber": session_number,
+                })
+            except Exception as error:
+                self.log_cb(log_warning(f"Could not record crash: {error}", "frida"))
         self.log_cb(log_warning(f"Session detached: {msg}", "frida"))
         if not initializing and self.disconnected_cb:
             self.disconnected_cb()
