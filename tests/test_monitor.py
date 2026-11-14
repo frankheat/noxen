@@ -125,11 +125,13 @@ class MonitorRecordingTests(IsolatedAppTestCase):
                 await wait_until(lambda: len(pane.events) == 3)
                 table = reopened.query_one("#monitor_events", DataTable)
                 self.assertEqual([table.get_row_at(i)[0] for i in range(table.row_count)], [3, 2, 1])
-                await pilot.click("#monitor_events", offset=(2, 0))
-                await wait_until(lambda: table.columns["id"].label.plain == "ID ↑")
-                await pilot.click("#monitor_events", offset=(2, 0))
-                await wait_until(lambda: table.columns["id"].label.plain == "ID ↓")
-                self.assertEqual([table.get_row_at(i)[0] for i in range(table.row_count)], [3, 2, 1])
+                # Exercise Monitor's sort handler independently of terminal
+                # layout and mouse hit-testing while the reopened view settles.
+                for arrow, expected in (("↑", [1, 2, 3]), ("↓", [3, 2, 1])):
+                    column = table.columns["id"]
+                    table.post_message(DataTable.HeaderSelected(table, column.key, 0, column.label))
+                    await wait_until(lambda: table.columns["id"].label.plain == f"ID {arrow}")
+                    self.assertEqual([table.get_row_at(i)[0] for i in range(table.row_count)], expected)
                 self.assertTrue(pane.status_text.startswith("9 lost during capture"))
                 reopened.query_one("#monitor_search", Input).value = "finalcall"
                 await wait_until(lambda: [e["method"] for e in pane.events] == ["finalCall"])
