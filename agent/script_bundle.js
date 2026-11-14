@@ -14528,7 +14528,10 @@ std_string_c_str (StdString * self)
     };
     readNestedIntent(intentValue, node, "component", function(intent) {
       var component = intent.getComponent();
-      return component ? capturedTextField(component, "android.content.ComponentName", "flattenToString") : null;
+      if (component === null) return null;
+      var text = boundedExtraText(capturedJavaText(component, "android.content.ComponentName", "flattenToString"), true);
+      if (text.truncated) node.componentTruncated = true;
+      return text.value;
     });
     readNestedIntent(intentValue, node, "action", function(intent) {
       return capturedTextField(intent, "android.content.Intent", "getAction");
@@ -14888,6 +14891,17 @@ std_string_c_str (StdString * self)
     infoIntent.extras = extrasObj;
     return infoIntent;
   }
+  function parseIntentComponent(value) {
+    if (value === "") return null;
+    var name = String(value);
+    var separator = name.indexOf("/");
+    if (separator < 1 || separator === name.length - 1 || name.indexOf("/", separator + 1) !== -1 || /[\s\x00-\x1f\x7f]/.test(name) || name.slice(separator + 1) === ".") {
+      throw new Error("Component must use package/class syntax");
+    }
+    var component = Java.use("android.content.ComponentName").unflattenFromString(name);
+    if (component === null) throw new Error("Bad component name: " + name);
+    return component;
+  }
   function applyModifications(intent) {
     if (!intent) {
       modQueue = [];
@@ -14918,18 +14932,17 @@ std_string_c_str (StdString * self)
         if (mod.type === "action") {
           intent.setAction(mod.val === "" ? null : javaStringArgument(mod.val));
         } else if (mod.type === "component") {
-          if (mod.val === "") {
-            intent.setComponent(null);
-          } else {
-            var name = String(mod.val);
-            var separator = name.indexOf("/");
-            if (separator < 1 || separator === name.length - 1 || name.indexOf("/", separator + 1) !== -1 || /[\s\x00-\x1f\x7f]/.test(name) || name.slice(separator + 1) === ".") {
-              throw new Error("Component must use package/class syntax");
-            }
-            var component = Java.use("android.content.ComponentName").unflattenFromString(name);
-            if (component === null) throw new Error("Bad component name: " + name);
-            intent.setComponent(component);
+          intent.setComponent(parseIntentComponent(mod.val));
+        } else if (mod.type === "nested_component") {
+          var nestedKey = javaStringArgument(mod.key);
+          var nested = intent.getParcelableExtra.overload("java.lang.String").call(intent, nestedKey);
+          if (extraTypeName(nested) !== "android.content.Intent") {
+            throw new Error("Extra no longer contains a supported Intent");
           }
+          var IntentJava = Java.use("android.content.Intent");
+          var replacement = IntentJava.$new(Java.cast(nested, IntentJava));
+          replacement.setComponent(parseIntentComponent(mod.val));
+          intent.putExtra.overload("java.lang.String", "android.os.Parcelable").call(intent, nestedKey, replacement);
         } else if (mod.type === "data" || mod.type === "mime") {
         } else if (mod.type === "cat_add") {
           intent.addCategory(javaStringArgument(mod.val));
@@ -15267,7 +15280,8 @@ std_string_c_str (StdString * self)
       flag_add: true,
       flag_rem: true,
       extra_add: true,
-      extra_rem: true
+      extra_rem: true,
+      nested_component: true
     };
     return mods.map(function(mod) {
       if (!mod || !supported[mod.type]) {

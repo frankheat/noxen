@@ -79,6 +79,7 @@ from noxen.intent_mods import (
     apply_mods_to_intent,
     confirmed_modification,
     diff_intents,
+    editable_nested_intent,
     java_type_display,
     normalize_component,
     parse_flag_value,
@@ -626,6 +627,7 @@ class NoxenApp(App):
                 is_new=is_new,
                 java_type=java_type,
                 removable=not extra.get("keyTruncated", False),
+                nested=editable_nested_intent(extra),
             )
 
         flags_val = info.get("flags") or 0
@@ -733,13 +735,15 @@ class NoxenApp(App):
         if self._current_intent_is_null():
             return "Cannot modify: Intent is null"
         mod_type, key, _value, _extra_type = mod
-        if mod_type not in {"extra_add", "extra_rem"}:
+        if mod_type not in {"extra_add", "extra_rem", "nested_component"}:
             return None
         extras = (
             (self._current_intercepted_entry or {}).get("intent", {}).get("extras", {}) or {}
         )
         if (extras.get(key) or {}).get("keyTruncated"):
             return f"Extra '{key}' has a truncated key and cannot be modified safely"
+        if mod_type == "nested_component" and editable_nested_intent(extras.get(key)) is None:
+            return f"Extra '{key}' must contain a captured Intent with a readable component"
         return None
 
     def _apply_command_mod_to_editor(self, mod: tuple) -> str | None:
@@ -781,6 +785,7 @@ class NoxenApp(App):
         is_new: bool,
         java_type: str = "",
         removable: bool = True,
+        nested: dict | None = None,
     ):
         self._edit_extra_counter += 1
         n = self._edit_extra_counter
@@ -800,6 +805,15 @@ class NoxenApp(App):
             Label("Read-only · escaped value", classes="ef_value_note"),
             classes="ef_value_cell",
         ) if preview_only else value_input
+        if nested is not None and not is_new:
+            self._edit_extra_rows[n]["nested_component"] = True
+            value_cell = Vertical(
+                value_input,
+                Label("Component", classes="ef_value_note"),
+                ExtraValueInput(id=f"ef_nested_component_{n}", value=nested["component"] or "",
+                                placeholder="e.g. com.example/.Activity", classes="ef_nested_component"),
+                classes="ef_value_cell",
+            )
 
         if is_new:
             selected_type = simple_type or "string"
@@ -901,6 +915,17 @@ class NoxenApp(App):
                 )
 
             snapshot = displayed_extras.get(key)
+            if row_info.get("nested_component"):
+                selector = f"#ef_nested_component_{n}"
+                captured = snapshot["structured"]["component"]
+                entered = self.query_one(selector, Input).value
+                try:
+                    component = captured if entered == (captured or "") else normalize_component(entered) or None
+                except ValueError as error:
+                    raise _EditValidationError(str(error), selector, title="Invalid component") from None
+                extras[key] = copy.deepcopy(snapshot)
+                extras[key]["structured"]["component"] = component
+                continue
             if snapshot is not None and (snapshot.get("editable") is False or row_info.get("value_read_only")):
                 extras[key] = copy.deepcopy(snapshot)
                 continue

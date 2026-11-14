@@ -272,7 +272,9 @@ def create_http_app(invoke, token, port):
         Forward can apply modifications in one request. Use type component, action,
         data or mime with a string value (empty clears it), cat_add/cat_rem or
         flag_add/flag_rem with a string value, extra_add with key,
-        value and extra_type strings, or extra_rem with key. For example,
+        value and extra_type strings, or extra_rem with key. Use nested_component
+        with key and value to set or clear the component of a direct Intent extra.
+        For example,
         {"type":"extra_add","key":"message","value":"hello","extra_type":"string"}.
         For modified forwards, inspect outcome and modification_error, then
         retrieve the recorded result with event_id and history_epoch.

@@ -519,6 +519,7 @@ class MCPService:
                 "component": {"value"}, "action": {"value"}, "data": {"value"}, "mime": {"value"},
                 "cat_add": {"value"}, "cat_rem": {"value"}, "flag_add": {"value"}, "flag_rem": {"value"},
                 "extra_add": {"key", "value", "extra_type"}, "extra_rem": {"key"},
+                "nested_component": {"key", "value"},
             }.get(kind)
             if allowed is None or set(change) - {"type"} != allowed:
                 raise OperationError(f"{prefix} has an unsupported type or incorrect fields")
@@ -528,7 +529,7 @@ class MCPService:
             try:
                 key.encode("utf-8")
                 value.encode("utf-8")
-                if kind == "component":
+                if kind in {"component", "nested_component"}:
                     value = normalize_component(value)
             except ValueError as error:
                 raise OperationError(f"{prefix}: {error}") from None
@@ -548,6 +549,9 @@ class MCPService:
             if error := self.app._mod_safety_error(mod):
                 raise OperationError(f"{prefix}: {error}")
             mods.append(mod)
+        nested_keys = {key for kind, key, _, _ in mods if kind == "nested_component"}
+        if any(key in nested_keys for kind, key, _, _ in mods if kind in {"extra_add", "extra_rem"}):
+            raise OperationError("invalid_modification: cannot edit and replace or remove the same Intent extra")
         return mods
 
     async def _resolve(self, session, action, decision_id, modifications=()):

@@ -354,6 +354,19 @@ def confirmed_modification(original: dict, report: dict | None, *, require_compo
     return actual, changed, warning
 
 
+def editable_nested_intent(extra: dict | None) -> dict | None:
+    if not isinstance(extra, dict) or extra.get("keyTruncated"):
+        return None
+    node = extra.get("structured")
+    if (not isinstance(node, dict) or node.get("kind") != "intent"
+            or node.get("type") != "android.content.Intent" or node.get("componentTruncated")):
+        return None
+    component = node.get("component")
+    if "component" in node and (component is None or isinstance(component, str)):
+        return node
+    return None
+
+
 def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
     """Return an Intent snapshot with ordered modifications applied."""
     original_intent = copy.deepcopy(intent or {})
@@ -386,6 +399,10 @@ def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
                 info["flags"] = (_current_flags(info) & ~flag) & 0xFFFFFFFF
         elif mod_type == "extra_rem":
             info["extras"].pop(key, None)
+        elif mod_type == "nested_component":
+            node = editable_nested_intent(info["extras"].get(key))
+            if node is not None:
+                node["component"] = normalize_component(value) or None
         elif mod_type == "extra_add":
             canonical = normalize_extra_type(extra_type) or "string"
             existing = original_extras.get(key, {})
@@ -444,6 +461,13 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
     for key, extra in new_extras.items():
         old_extra = old_extras.get(key)
         if old_extra == extra:
+            continue
+        old_nested = editable_nested_intent(old_extra)
+        new_nested = editable_nested_intent(extra)
+        if old_nested is not None and new_nested is not None:
+            new_component = normalize_component(new_nested["component"] or "")
+            if new_component != (old_nested["component"] or ""):
+                mods.append(("nested_component", key, new_component, ""))
             continue
         canonical = normalize_extra_type(
             extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(extra.get("type") or "")

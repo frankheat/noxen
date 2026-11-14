@@ -1225,13 +1225,28 @@ def _changes_lines(original: dict, info: dict) -> list[str]:
     mod_extras = info.get("extras") or {}
     removed_keys = [k for k in orig_extras if k not in mod_extras]
     added_keys = [k for k in mod_extras if k not in orig_extras]
+    nested_changes = {}
+    for key in orig_extras.keys() & mod_extras.keys():
+        before = orig_extras[key].get("structured") or {}
+        after = mod_extras[key].get("structured") or {}
+        if (isinstance(before, dict) and isinstance(after, dict)
+                and before.get("kind") == after.get("kind") == "intent"
+                and "component" in before and "component" in after
+                and not (before.get("componentTruncated") or after.get("componentTruncated"))
+                and before["component"] != after["component"]):
+            nested_changes[key] = (before["component"], after["component"])
     changed_keys = [
         k for k in orig_extras
         if k in mod_extras and str(orig_extras[k].get("value", "")) != str(mod_extras[k].get("value", ""))
     ]
-    if removed_keys or added_keys or changed_keys:
+    if removed_keys or added_keys or changed_keys or nested_changes:
         has_changes = True
         out += ["", _section("EXTRAS")]
+        for key in orig_extras:
+            if key in nested_changes:
+                before, after = nested_changes[key]
+                out.append(f"  \\[~] [bold]{_markup(key)}[/bold] · Component  "
+                           f"[dim]{_markup(before or '(none)')}[/dim] → {_markup(after or '(none)')}")
         for key in changed_keys:
             old_value, new_value = orig_extras[key], mod_extras[key]
             out.append(
