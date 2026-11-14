@@ -274,7 +274,9 @@ def create_http_app(invoke, token, port):
         flag_add/flag_rem with a string value, extra_add with key,
         value and extra_type strings, or extra_rem with key. Use nested_component
         (or nested_action, nested_data, nested_mime) with key and value to edit
-        a direct Intent extra. An empty value clears the selected field.
+        a direct Intent extra, or path and value to edit an Intent at a captured
+        path such as ["extras", "payload", "next"], ["selector"], or ["clipData", 0].
+        An empty value clears the selected field.
         For example,
         {"type":"extra_add","key":"message","value":"hello","extra_type":"string"}.
         For modified forwards, inspect outcome and modification_error, then

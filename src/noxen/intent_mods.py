@@ -1,5 +1,7 @@
 import copy
+import json
 import re
+from collections.abc import Sequence
 
 
 IntentMod = tuple[str, str, str, str]
@@ -301,7 +303,9 @@ def apply_mods_to_entry(entry: dict, mods: list[IntentMod]) -> None:
     entry["intent"] = apply_mods_to_intent(entry["original_intent"], mods)
 
 
-def confirmed_modification(original: dict, report: dict | None, *, require_component=False) -> tuple[dict | None, bool, str | None]:
+def confirmed_modification(
+    original: dict, report: dict | None, *, require_component=False, mods: Sequence[IntentMod] = (),
+) -> tuple[dict | None, bool, str | None]:
     """Return the agent-observed Intent, actual change flag, and any warning.
 
     A missing result is never replaced by a prediction from the requested mods.
@@ -315,7 +319,15 @@ def confirmed_modification(original: dict, report: dict | None, *, require_compo
     if actual.get("component") is not None and not isinstance(actual["component"], str):
         return None, False, "Resulting Component could not be verified; requested changes are not shown as applied"
 
+    expected = {
+        (nested_mod_path(key, encoded_path), NESTED_INTENT_FIELDS[kind]): value or None
+        for kind, key, value, encoded_path in mods if kind in NESTED_INTENT_FIELDS
+    }
+    observed_nodes = dict(nested_intents(actual)) if expected else {}
     actual = copy.deepcopy(actual)
+    for field in ("selector", "clipData"):
+        if field not in actual and field in original:
+            actual[field] = copy.deepcopy(original[field])
     extras_meta = actual.get("extrasMeta")
     if not isinstance(extras_meta, dict):
         extras_meta = {}
@@ -353,18 +365,22 @@ def confirmed_modification(original: dict, report: dict | None, *, require_compo
 
     changed = any(
         comparable(original, field) != comparable(actual, field)
-        for field in ("component", "action", "data", "mimeType", "flags", "categories", "extras")
+        for field in ("component", "action", "data", "mimeType", "flags", "categories", "extras", "selector", "clipData")
     )
     if not report.get("ok"):
         detail = str(report.get("error") or "unknown agent error")
         warning = f"Modification failed; Intent may be partially changed: {detail}"
+    elif expected:
+        for (path, field), value in expected.items():
+            fields = nested_intent_fields(observed_nodes.get(path))
+            if field not in fields or fields[field] != value:
+                detail = f"Could not verify {field} at {nested_intent_path_label(path)}"
+                warning = f"{warning}; {detail}" if warning else detail
+                break
     return actual, changed, warning
 
 
-def editable_nested_intent(extra: dict | None) -> dict:
-    if not isinstance(extra, dict) or extra.get("keyTruncated"):
-        return {}
-    node = extra.get("structured")
+def nested_intent_fields(node: dict | None) -> dict:
     if (not isinstance(node, dict) or node.get("kind") != "intent"
             or node.get("type") != "android.content.Intent"):
         return {}
@@ -373,6 +389,44 @@ def editable_nested_intent(extra: dict | None) -> dict:
         if field in node and not node.get(f"{field}Truncated")
         and (node[field] is None or isinstance(node[field], str))
     }
+
+
+def nested_intents(intent):
+    """Yield captured Intent nodes with unambiguous paths through supported containers."""
+    def walk(node, path):
+        if not isinstance(node, dict):
+            return
+        kind = node.get("kind")
+        if kind == "intent" and node.get("type") == "android.content.Intent":
+            yield path, node
+            for field in ("extras", "selector", "clipData"):
+                yield from walk(node.get(field), (*path, field))
+        elif kind == "bundle" and node.get("type") == "android.os.Bundle":
+            for item in node.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("key")
+                if isinstance(key, str) and not item.get("keyTruncated"):
+                    yield from walk(item.get("value"), (*path, key))
+        elif kind == "clipdata":
+            for index, item in enumerate(node.get("items") or []):
+                if isinstance(item, dict) and item.get("kind") == "clipitem":
+                    yield from walk(item.get("intent"), (*path, index))
+
+    for key, extra in (intent.get("extras") or {}).items():
+        if isinstance(extra, dict) and not extra.get("keyTruncated"):
+            yield from walk(extra.get("structured"), ("extras", key))
+    for field in ("selector", "clipData"):
+        yield from walk(intent.get(field), (field,))
+
+
+def nested_intent_path_label(path):
+    return " → ".join(json.dumps(part, ensure_ascii=False) if isinstance(part, str) else f"Item {part}"
+                      for part in path)
+
+
+def nested_mod_path(key, encoded_path):
+    return tuple(json.loads(encoded_path)) if encoded_path else ("extras", key)
 
 
 def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
@@ -409,9 +463,9 @@ def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
             info["extras"].pop(key, None)
         elif mod_type in NESTED_INTENT_FIELDS:
             field = NESTED_INTENT_FIELDS[mod_type]
-            extra = info["extras"].get(key)
-            if field in editable_nested_intent(extra):
-                extra["structured"][field] = (normalize_component(value) if field == "component" else value) or None
+            node = dict(nested_intents(info)).get(nested_mod_path(key, extra_type))
+            if field in nested_intent_fields(node):
+                node[field] = (normalize_component(value) if field == "component" else value) or None
         elif mod_type == "extra_add":
             canonical = normalize_extra_type(extra_type) or "string"
             existing = original_extras.get(key, {})
@@ -471,14 +525,6 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
         old_extra = old_extras.get(key)
         if old_extra == extra:
             continue
-        old_nested = editable_nested_intent(old_extra)
-        new_nested = editable_nested_intent(extra)
-        if old_nested and new_nested:
-            for kind, field in NESTED_INTENT_FIELDS.items():
-                if field in old_nested and field in new_nested and old_nested[field] != new_nested[field]:
-                    value = new_nested[field] or ""
-                    mods.append((kind, key, normalize_component(value) if field == "component" else value, ""))
-            continue
         canonical = normalize_extra_type(
             extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(extra.get("type") or "")
         )
@@ -491,6 +537,16 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
         value = "" if extra.get("value") is None else str(extra.get("value"))
         mods.append(("extra_add", key, value, canonical))
 
+    old_nodes = dict(nested_intents(before))
+    for path, node in nested_intents(after):
+        old_fields = nested_intent_fields(old_nodes.get(path))
+        new_fields = nested_intent_fields(node)
+        direct = len(path) == 2 and path[0] == "extras"
+        key, encoded_path = (path[1], "") if direct else ("", json.dumps(path))
+        for kind, field in NESTED_INTENT_FIELDS.items():
+            if field in old_fields and field in new_fields and old_fields[field] != new_fields[field]:
+                value = new_fields[field] or ""
+                mods.append((kind, key, normalize_component(value) if field == "component" else value, encoded_path))
     return mods
 
 

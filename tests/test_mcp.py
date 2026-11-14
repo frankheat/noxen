@@ -51,6 +51,79 @@ class MCPAppTestCase(IsolatedAppTestCase):
 
 class MCPServiceTests(MCPAppTestCase):
     @with_app
+    async def test_nested_paths_keep_equal_keys_in_separate_branches(self):
+        from noxen.intent_mods import apply_mods_to_intent, confirmed_modification, diff_intents, nested_intents
+        from noxen.rendering import render_intent_detail
+
+        child = {"kind": "intent", "type": "android.content.Intent", "action": "OLD", "component": None}
+        bundle = {"kind": "bundle", "type": "android.os.Bundle", "items": [{"key": "next", "value": child}]}
+        original = {
+            "component": None, "action": "OUTER", "data": None, "mimeType": None, "flags": 0, "categories": [],
+            "extras": {key: {"structured": json.loads(json.dumps(bundle))} for key in ("left", "right")},
+            "selector": dict(child),
+            "clipData": {"kind": "clipdata", "items": [{"kind": "clipitem", "intent": dict(child)}]},
+        }
+        event_id = self.app._on_history_intent({"infoIntent": original}, 1)
+        self.app._on_intercept_display("", event_id, "paths")
+        paths = (["extras", "right", "next"], ["selector"], ["clipData", 0])
+        mods = self.service._intent_modifications([
+            {"type": "nested_action", "path": path, "value": "NEW"} for path in paths
+        ])
+        for path in (["extras", "missing", "next"], ["clipData", True], ["clipData", 1]):
+            with self.assertRaises(OperationError):
+                self.service._intent_modifications([{"type": "nested_action", "path": path, "value": "NEW"}])
+        with self.assertRaisesRegex(OperationError, "cannot edit and replace or remove"):
+            self.service._intent_modifications([
+                {"type": "nested_action", "path": paths[0], "value": "NEW"},
+                {"type": "extra_rem", "key": "right"},
+            ])
+        draft = apply_mods_to_intent(original, mods)
+        self.assertCountEqual(diff_intents(original, draft), mods)
+        node = dict(nested_intents(draft))
+        self.assertEqual(node[("extras", "left", "next")]["action"], "OLD")
+        self.assertTrue(all(node[tuple(path)]["action"] == "NEW" for path in paths))
+        _, changed, warning = confirmed_modification(original, {"ok": True, "infoIntent": draft}, mods=mods)
+        self.assertTrue(changed)
+        self.assertIsNone(warning)
+        _, _, warning = confirmed_modification(original, {"ok": True, "infoIntent": original}, mods=mods)
+        self.assertIn("Could not verify", warning)
+        self.app.query_one("#main_tabs").active = "tab_intercept"
+        self.app._enter_edit_mode()
+        await self.pilot.pause()
+        controls = {}
+        for row_id, row in self.app._edit_extra_rows.items():
+            panel = self.app.query_one(f"#ef_x_{row_id}")
+            self.assertIn("└─ next", str(panel.query_one(".ef_tree_line").render()))
+            path = ("extras", row["key"], "next")
+            control_id = next(control for target, field, _, control in self.app._edit_nested_fields
+                              if target == path and field == "action")
+            control = panel.query_one(f"#{control_id}", Input)
+            self.assertEqual(control.value, "OLD")
+            self.assertLess(control.region.x, panel.query_one(f"#ef_xv_{row_id}").region.x)
+            controls[row["key"]] = control
+        selector = self.app.query_one("#ef_selector_body")
+        clip = self.app.query_one("#ef_clip_body")
+        self.assertEqual(selector.query_one(".ef_nested_action", Input).value, "OLD")
+        self.assertEqual(clip.query_one(".ef_nested_action", Input).value, "OLD")
+        self.assertEqual(sum("Item 0" in str(label.render()) for label in clip.query(".ef_tree_line")), 1)
+        self.assertFalse(any("OLD" in str(label.render()) for label in clip.query(".ef_tree_line")))
+        self.assertEqual(self.app._collect_edit_mods(), [])
+        controls["right"].value = "NEW"
+        selector.query_one(".ef_nested_action", Input).value = "NEW"
+        clip.query_one(".ef_nested_action", Input).value = "NEW"
+        self.assertCountEqual(self.app._collect_edit_mods(), mods)
+        self.app.db.update_modified_intent(event_id, original, draft)
+        reopened = ProjectDB(self.app.db.path)
+        try:
+            saved = next(entry for entry in reopened.open_existing() if entry["id"] == event_id)
+            changes = render_intent_detail(saved).split("CHANGES", 1)[1]
+            self.assertIn('"right" → "next"', changes)
+            self.assertIn('"selector"', changes)
+            self.assertIn('"clipData" → Item 0', changes)
+        finally:
+            reopened.close()
+
+    @with_app
     async def test_nested_component_edit_is_shared_by_tui_and_mcp(self):
         from noxen.rendering import render_intent_detail
 

@@ -630,7 +630,7 @@ class ProjectDB:
             self._conn.execute(
                 """UPDATE intents SET
                    action=?, component=?, data=?, mime_type=?, flags=?, categories=?, extras=?, original_intent=?, intent_package=?,
-                   capture_metadata=?
+                   capture_metadata=?, selector=?, clip_data=?
                    WHERE id=?""",
                 (
                     modified_info.get("action"),
@@ -643,6 +643,8 @@ class ProjectDB:
                     json.dumps(original_info),
                     _stored_package(modified_info),
                     _stored_capture_metadata(modified_info),
+                    _stored_selector(modified_info),
+                    _stored_clip_data(modified_info),
                     intent_id,
                 ),
             )

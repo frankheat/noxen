@@ -37,7 +37,10 @@ def context_text(info, attack_surface):
 
 
 def widget_context(app):
-    return "\n".join(str(app.query_one(f"#ef_{key}_body", Static).render()) for key in ("routing", "selector", "clip"))
+    labels = [app.query_one("#ef_routing_body", Static)]
+    for key in ("selector", "clip"):
+        labels.extend(app.query(f"#ef_{key}_body Static"))
+    return "\n".join(str(label.render()) for label in labels)
 
 
 class EditContextRenderingTests(unittest.TestCase):
@@ -321,7 +324,7 @@ class EditContextUITests(IsolatedAppTestCase):
                             self.assertEqual([str(h.render()) for h in headers],
                                              ["Routing", "Base Intent", "Categories", "Extras", "Selector", "ClipData"])
                             self.assertEqual([str(label.render()) for label in app.query(".ef_section_meta")],
-                                             ["Derived from capture", "Read-only", "Read-only"])
+                                             ["Derived from capture"])
                             self.assertEqual(len({str(h.styles.color) for h in headers}), 1)
                             self.assertEqual(len({h.content_region.x for h in headers}), 1)
                             field = app.query_one("#ef_action", Input)
@@ -335,7 +338,7 @@ class EditContextUITests(IsolatedAppTestCase):
                             remove_header = app.query_one(".ef_x_remove_header")
                             self.assertEqual(remove_header.region.x, remove_buttons[-1].region.x)
                             for key in ("selector", "clip"):
-                                body = app.query_one(f"#ef_{key}_body", Static)
+                                body = app.query_one(f"#ef_{key}_body")
                                 self.assertEqual(body.content_region.x, headers[0].content_region.x)
                                 self.assertEqual(field.content_region.x - body.content_region.x, 16)
 

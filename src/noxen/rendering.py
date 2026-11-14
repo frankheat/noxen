@@ -4,6 +4,8 @@ import unicodedata
 from rich.markup import escape
 from rich.text import Text
 
+from noxen.intent_mods import nested_intent_fields, nested_intent_path_label, nested_intents
+
 
 PENDING_INTENT_FLAGS = [
     (0x40000000, "FLAG_ONE_SHOT"),
@@ -689,6 +691,8 @@ def _payload_lines(info: dict, *, component_details=None, show_component=False, 
 _EXTRA_RENDER_MAX_DEPTH = 12
 _EXTRA_RENDER_MAX_LINES = 400
 _EXTRA_RENDER_MAX_TEXT = 2048
+_INTENT_TREE_FIELDS = {"Component": "component", "Action": "action",
+                       "Data (URI)": "data", "MIME Type": "mimeType"}
 
 _ARRAY_DISPLAY_TYPES = {
     "[Z": "boolean[]",
@@ -816,7 +820,7 @@ def _extra_node_children(node: dict) -> list[tuple[str | None, dict]]:
     return children
 
 
-def _extra_node_header(label: str | None, node: dict) -> str:
+def _extra_node_header(label: str | None, node: dict, *, field_row=None) -> str:
     kind = node.get("kind")
     label_text = f"[bold]{_markup(label)}[/bold]" if label is not None else ""
     if kind == "status":
@@ -825,6 +829,8 @@ def _extra_node_header(label: str | None, node: dict) -> str:
         value = node.get("markup") if node.get("markup") is not None else (
             '""' if node.get("value") == "" else _extra_display_text(node.get("value"))
         )
+        if field_row is not None:
+            return field_row(label, value)
         return f"[dim]{_markup(label or ''):<13} :[/dim] {value}"
 
     type_name = _extra_type_name(node)
@@ -867,23 +873,30 @@ def _render_extra_node(
     is_last: bool,
     context: dict,
     depth: int,
+    parent: dict | None = None,
 ) -> None:
     if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
         return
-    if depth > _EXTRA_RENDER_MAX_DEPTH:
-        lines.append(_extra_tree_prefix(prefix, is_last) + "[dim]rendering depth limit reached[/dim]")
+    branch = _extra_tree_prefix(prefix, is_last)
+    continuation = prefix + ("   " if is_last else "│  ")
+    emit = context.get("emit")
+    if depth > _EXTRA_RENDER_MAX_DEPTH or id(node) in context["active"]:
+        reason = "rendering depth limit reached" if depth > _EXTRA_RENDER_MAX_DEPTH else "invalid recursive model"
+        status = {"kind": "status", "value": reason}
+        if emit is None:
+            lines.append(branch + _extra_node_header(None, status))
+        else:
+            emit(branch, label, status, parent, continuation)
         context["lines"] += 1
         return
     if not isinstance(node, dict):
         node = {"kind": "error", "reason": "invalid structured value"}
 
     node_id = id(node)
-    if node_id in context["active"]:
-        lines.append(_extra_tree_prefix(prefix, is_last) + "[dim]invalid recursive model[/dim]")
-        context["lines"] += 1
-        return
-
-    lines.append(_extra_tree_prefix(prefix, is_last) + _extra_node_header(label, node))
+    if emit is None:
+        lines.append(branch + _extra_node_header(label, node))
+    else:
+        emit(branch, label, node, parent, continuation)
     context["lines"] += 1
     if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
         return
@@ -891,21 +904,57 @@ def _render_extra_node(
     context["active"].add(node_id)
     try:
         children = _extra_node_children(node)
-        child_prefix = prefix + ("   " if is_last else "│  ")
         for index, (child_label, child_node) in enumerate(children):
             _render_extra_node(
                 lines,
                 child_label,
                 child_node,
-                child_prefix,
+                continuation,
                 index == len(children) - 1,
                 context,
                 depth + 1,
+                node,
             )
             if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
                 break
     finally:
         context["active"].discard(node_id)
+
+
+def render_edit_tree(root, editable_nodes, *, attack_surface=None):
+    """Render the capture tree with editable fields in their original positions."""
+    rows = []
+    selector_details = None
+    if attack_surface is not None and root.get("kind") == "intent":
+        selector_details = _captured_component_info(root.get("component"), attack_surface, "selector")
+
+    def emit(branch, label, node, parent, continuation):
+        field = _INTENT_TREE_FIELDS.get(label) if node.get("kind") == "field" else None
+        target = editable_nodes.get(id(parent))
+        if field is not None and target is not None and field in target[1]:
+            path, fields = target
+            rows.append((branch, "Data URI" if label == "Data (URI)" else label, path, field, fields[field]))
+        else:
+            text = _extra_node_header(label, node, field_row=_edit_context_row)
+            rows.append((branch + text, None, None, None, None))
+        if field == "component" and parent is root and selector_details:
+            # These details describe the captured component.
+            indent = f"[dim]{_markup(continuation)}[/dim]"
+            rows.extend((line, None, None, None, None) for line in
+                        _component_lines(root.get("component"), selector_details, indent=indent)[1:])
+
+    context = {"lines": 0, "active": {id(root)}, "emit": emit}
+    children = _extra_node_children(root)
+    if root.get("kind") == "clipdata" and isinstance(root.get("count"), int):
+        children.insert(0, ("Items", {"kind": "field", "value": root["count"]}))
+    if not children:
+        return [(_extra_node_header(None, root), None, None, None, None)]
+    for index, (label, node) in enumerate(children):
+        _render_extra_node([], label, node, "", index == len(children) - 1, context, 0, root)
+        if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
+            rows.append(("[dim]… rendering limit reached[/dim]", None, None, None, None))
+            break
+    return rows
 
 
 def _extras_lines(extras: dict, metadata: dict | None = None) -> list[str]:
@@ -1068,24 +1117,12 @@ def _edit_context_row(label: str, value: str) -> str:
     return f"[dim]{label:<16}[/dim]{value}"
 
 
-def render_edit_context(info: dict, attack_surface: dict, method=None) -> dict[str, str]:
+def render_edit_context(info: dict, attack_surface: dict, method=None, *, include_trees=True) -> dict[str, str]:
     """Reuse bounded, read-only trees; editable outer grant flags live in the form."""
     if attack_surface.get("intentPresent") is False:
         return {}
     named_components = _is_component_event(method, attack_surface)
-    selector_info = info.get("selector")
-    selector_details = _captured_component_info(
-        selector_info.get("component"), attack_surface, "selector",
-    ) if named_components and isinstance(selector_info, dict) else None
-    selector = _selector_lines(
-        selector_info, row=_edit_context_row, indent="", component_details=selector_details,
-        component_indent=" " * 16,
-    )
     routing = _routing_lines(info, attack_surface, method=method, row=_edit_context_row, include_target=False)
-    clip = info.get("clipData")
-    clip_lines = _clip_data_lines(clip, None, include_grant_flags=False, row=_edit_context_row, indent="")
-    if clip_lines and clip.get("kind") == "clipdata" and isinstance(clip.get("count"), int):
-        clip_lines.insert(1, _edit_context_row("Items", str(clip["count"])))
     sections = {}
     call = _broadcast_call_lines(method, attack_surface, row=_edit_context_row)
     if call:
@@ -1095,9 +1132,24 @@ def render_edit_context(info: dict, attack_surface: dict, method=None) -> dict[s
             info.get("component"), _captured_component_info(info.get("component"), attack_surface, "base"),
             row=_edit_context_row, indent=" " * 16,
         ))
-    for key, lines in (("routing", routing), ("selector", selector), ("clipData", clip_lines)):
-        if lines:
-            sections[key] = "\n".join(lines[1:])
+    if routing:
+        sections["routing"] = "\n".join(routing[1:])
+    if include_trees:
+        selector_info = info.get("selector")
+        selector_details = _captured_component_info(
+            selector_info.get("component"), attack_surface, "selector",
+        ) if named_components and isinstance(selector_info, dict) else None
+        selector = _selector_lines(
+            selector_info, row=_edit_context_row, indent="", component_details=selector_details,
+            component_indent=" " * 16,
+        )
+        clip = info.get("clipData")
+        clip_lines = _clip_data_lines(clip, None, include_grant_flags=False, row=_edit_context_row, indent="")
+        if clip_lines and clip.get("kind") == "clipdata" and isinstance(clip.get("count"), int):
+            clip_lines.insert(1, _edit_context_row("Items", str(clip["count"])))
+        for key, lines in (("selector", selector), ("clipData", clip_lines)):
+            if lines:
+                sections[key] = "\n".join(lines[1:])
     return sections
 
 
@@ -1226,20 +1278,14 @@ def _changes_lines(original: dict, info: dict) -> list[str]:
     removed_keys = [k for k in orig_extras if k not in mod_extras]
     added_keys = [k for k in mod_extras if k not in orig_extras]
     nested_changes = []
-    for key in orig_extras:
-        if key not in mod_extras:
-            continue
-        before = orig_extras[key].get("structured") or {}
-        after = mod_extras[key].get("structured") or {}
-        if not (isinstance(before, dict) and isinstance(after, dict)
-                and before.get("kind") == after.get("kind") == "intent"):
-            continue
+    original_nodes = dict(nested_intents(original))
+    for path, node in nested_intents(info):
+        before = nested_intent_fields(original_nodes.get(path))
+        after = nested_intent_fields(node)
         for field, label in (("component", "Component"), ("action", "Action"),
                              ("data", "Data (URI)"), ("mimeType", "MIME Type")):
-            if (field in before and field in after
-                    and not (before.get(f"{field}Truncated") or after.get(f"{field}Truncated"))
-                    and before[field] != after[field]):
-                nested_changes.append((key, label, before[field], after[field]))
+            if field in before and field in after and before[field] != after[field]:
+                nested_changes.append((nested_intent_path_label(path), label, before[field], after[field]))
     changed_keys = [
         k for k in orig_extras
         if k in mod_extras and str(orig_extras[k].get("value", "")) != str(mod_extras[k].get("value", ""))

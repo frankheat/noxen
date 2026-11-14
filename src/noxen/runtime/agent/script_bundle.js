@@ -14862,6 +14862,7 @@ std_string_c_str (StdString * self)
             if (Object.prototype.hasOwnProperty.call(extrasObj, capturedKey)) {
               var suffix = "\u2026#" + (i + 1);
               capturedKey = capturedKey.slice(0, Math.max(0, EXTRA_MAX_STRING_LENGTH - suffix.length)) + suffix;
+              item.keyTruncated = true;
             }
             extrasObj[capturedKey] = extraEnvelopeFromNode(item.value);
             if (item.keyTruncated) {
@@ -14914,20 +14915,72 @@ std_string_c_str (StdString * self)
     nested_data: true,
     nested_mime: true
   };
-  function applyNestedIntentMods(intent, key, mods) {
-    var nestedKey = javaStringArgument(key);
-    var nested = intent.getParcelableExtra.overload("java.lang.String").call(intent, nestedKey);
-    if (extraTypeName(nested) !== "android.content.Intent") {
-      throw new Error("Extra no longer contains a supported Intent");
+  function nestedIntentPath(mod) {
+    var path = mod.extraType ? JSON.parse(mod.extraType) : ["extras", mod.key];
+    if (!Array.isArray(path) || path.length < 1 || path.length > 18 || !path.every((part) => typeof part === "string" || Number.isSafeInteger(part) && part >= 0)) {
+      throw new Error("Invalid nested Intent path");
     }
-    var IntentJava = Java.use("android.content.Intent");
-    var replacement = IntentJava.$new(Java.cast(nested, IntentJava));
-    for (var mod of mods) {
-      if (mod.type === "nested_component") replacement.setComponent(parseIntentComponent(mod.val));
-      else if (mod.type === "nested_action") replacement.setAction(mod.val === "" ? null : javaStringArgument(mod.val));
+    return path;
+  }
+  function applyNestedIntentMods(intent, path, mods) {
+    function edit(node, index) {
+      var type = extraTypeName(node);
+      if (index === path.length) {
+        if (type !== "android.content.Intent") throw new Error("Path no longer contains an Intent");
+        var IntentJava = Java.use(type);
+        var replacement = IntentJava.$new(Java.cast(node, IntentJava));
+        for (var mod of mods) {
+          if (mod.type === "nested_component") replacement.setComponent(parseIntentComponent(mod.val));
+          else if (mod.type === "nested_action") replacement.setAction(mod.val === "" ? null : javaStringArgument(mod.val));
+        }
+        applyIntentDataAndMime(replacement, mods, "nested_data", "nested_mime");
+        return replacement;
+      }
+      var step = path[index];
+      if (type === "android.content.Intent") {
+        var IntentClass = Java.use(type);
+        var copy2 = IntentClass.$new(Java.cast(node, IntentClass));
+        updateIntent(copy2, index);
+        return copy2;
+      }
+      if (type === "android.os.Bundle" && typeof step === "string") {
+        var Bundle = Java.use(type);
+        var bundle = Java.cast(node, Bundle);
+        var key = javaStringArgument(step);
+        var child = edit(bundle.get(key), index + 1);
+        var bundleCopy = Bundle.$new(bundle);
+        bundleCopy.putParcelable(key, child);
+        return bundleCopy;
+      }
+      if (type === "android.content.ClipData" && Number.isSafeInteger(step) && step < node.getItemCount()) {
+        var Clip = Java.use(type);
+        var clip = Java.cast(node, Clip);
+        var item = clip.getItemAt(step);
+        var next = edit(item.getIntent(), index + 1);
+        var itemCopy = Java.use("android.content.ClipData$Item").$new(item);
+        itemCopy.mIntent.value = next;
+        var clipCopy = Clip.$new(clip);
+        clipCopy.setItemAt(step, itemCopy);
+        return clipCopy;
+      }
+      throw new Error("Nested Intent path no longer matches the payload");
     }
-    applyIntentDataAndMime(replacement, mods, "nested_data", "nested_mime");
-    intent.putExtra.overload("java.lang.String", "android.os.Parcelable").call(intent, nestedKey, replacement);
+    function updateIntent(target, index) {
+      var step = path[index];
+      if (step === "extras" && typeof path[index + 1] === "string") {
+        var key = javaStringArgument(path[index + 1]);
+        var extras = target.getExtras();
+        var child = edit(extras === null ? null : extras.get(key), index + 2);
+        target.putExtra.overload("java.lang.String", "android.os.Parcelable").call(target, key, child);
+      } else if (step === "selector") {
+        target.setSelector(edit(target.getSelector(), index + 1));
+      } else if (step === "clipData") {
+        target.setClipData(edit(target.getClipData(), index + 1));
+      } else {
+        throw new Error("Invalid step in nested Intent path");
+      }
+    }
+    updateIntent(intent, 0);
   }
   function applyIntentDataAndMime(intent, mods, dataKind, mimeKind) {
     var dataMod, mimeMod;
@@ -14951,8 +15004,9 @@ std_string_c_str (StdString * self)
       var nestedMods = /* @__PURE__ */ new Map();
       for (var queued of modQueue) {
         if (Object.hasOwn(nestedIntentModTypes, queued.type)) {
-          if (!nestedMods.has(queued.key)) nestedMods.set(queued.key, []);
-          nestedMods.get(queued.key).push(queued);
+          var pathKey = JSON.stringify(nestedIntentPath(queued));
+          if (!nestedMods.has(pathKey)) nestedMods.set(pathKey, []);
+          nestedMods.get(pathKey).push(queued);
         }
       }
       modQueue.forEach(function(mod) {
@@ -14961,9 +15015,11 @@ std_string_c_str (StdString * self)
         } else if (mod.type === "component") {
           intent.setComponent(parseIntentComponent(mod.val));
         } else if (Object.hasOwn(nestedIntentModTypes, mod.type)) {
-          if (nestedMods.has(mod.key)) {
-            applyNestedIntentMods(intent, mod.key, nestedMods.get(mod.key));
-            nestedMods.delete(mod.key);
+          var path = nestedIntentPath(mod);
+          var pathKey2 = JSON.stringify(path);
+          if (nestedMods.has(pathKey2)) {
+            applyNestedIntentMods(intent, path, nestedMods.get(pathKey2));
+            nestedMods.delete(pathKey2);
           }
         } else if (mod.type === "data" || mod.type === "mime") {
         } else if (mod.type === "cat_add") {

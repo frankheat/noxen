@@ -80,7 +80,9 @@ from noxen.intent_mods import (
     apply_mods_to_intent,
     confirmed_modification,
     diff_intents,
-    editable_nested_intent,
+    nested_intent_fields,
+    nested_intents,
+    nested_mod_path,
     java_type_display,
     normalize_component,
     parse_flag_value,
@@ -104,6 +106,7 @@ from noxen.rendering import (
     payload_to_history_entry,
     render_intent_detail,
     render_edit_context,
+    render_edit_tree,
     format_uri_grant_flags,
 )
 from noxen.settings import DARK_THEME, LIGHT_THEME, load_settings, save_settings
@@ -365,6 +368,8 @@ class NoxenApp(App):
         self._edit_mode = False
         self._edit_forward_pending = False
         self._edit_extra_counter = 0
+        self._edit_path_ids = count()
+        self._edit_nested_fields = []
         self._edit_extra_rows: dict = {}
         self._edit_display_info: dict = {}
         self._edit_cat_counter = 0
@@ -608,6 +613,12 @@ class NoxenApp(App):
         original_extras = (
             (self._current_intercepted_entry or {}).get("intent", {}).get("extras", {}) or {}
         )
+        self._edit_nested_fields = []
+        editable_nodes = {
+            id(node): (path, {field: value for field, value in nested_intent_fields(node).items()
+                             if not needs_value_preview(value or "")})
+            for path, node in nested_intents(info)
+        }
         for key, extra in (info.get("extras", {}) or {}).items():
             java_type = extra.get("type") or ""
             simple_type = None if extra.get("editable") is False else (
@@ -621,6 +632,11 @@ class NoxenApp(App):
             is_new = original_extra is None or (
                 simple_type is not None and simple_type != original_type
             )
+            structured = extra.get("structured")
+            tree = ()
+            if not is_new and simple_type is None and isinstance(structured, dict):
+                if structured.get("kind") in {"bundle", "intent", "clipdata", "array", "list"}:
+                    tree = self._edit_tree(structured, editable_nodes)
             self._add_edit_extra_row(
                 key,
                 simple_type,
@@ -628,7 +644,7 @@ class NoxenApp(App):
                 is_new=is_new,
                 java_type=java_type,
                 removable=not extra.get("keyTruncated", False),
-                nested=editable_nested_intent(extra),
+                tree=tree,
             )
 
         flags_val = info.get("flags") or 0
@@ -638,7 +654,8 @@ class NoxenApp(App):
             self.query_one("#ef_flags", Input).value = ""
 
         entry = self._current_intercepted_entry or {}
-        context = render_edit_context(info, entry.get("attackSurface") or {}, entry.get("method"))
+        attack_surface = entry.get("attackSurface") or {}
+        context = render_edit_context(info, attack_surface, entry.get("method"), include_trees=False)
         for key in ("call", "component"):
             body = self.query_one(f"#ef_{key}_body", Static)
             text = context.get(key, "")
@@ -646,11 +663,41 @@ class NoxenApp(App):
                 text = text.partition("\n")[2]  # The name is already in its editable Input.
             body.display = bool(text)
             body.update(self._render_markup(text))
-        for key, widget in (("routing", "routing"), ("selector", "selector"), ("clipData", "clip")):
-            self.query_one(f"#ef_{widget}_section").display = key in context
-            self.query_one(f"#ef_{widget}_body", Static).update(self._render_markup(context.get(key, "")))
-        self.query_one("#ef_readonly_context").display = any(key in context for key in ("selector", "clipData"))
+        self.query_one("#ef_routing_section").display = "routing" in context
+        self.query_one("#ef_routing_body", Static).update(self._render_markup(context.get("routing", "")))
+        has_tree = False
+        for key, widget in (("selector", "selector"), ("clipData", "clip")):
+            root = info.get(key)
+            visible = isinstance(root, dict) and attack_surface.get("intentPresent") is not False
+            self.query_one(f"#ef_{widget}_section").display = visible
+            body = self.query_one(f"#ef_{widget}_body", Vertical)
+            body.remove_children()
+            if visible:
+                has_tree = True
+                body.mount(*self._edit_tree(root, editable_nodes,
+                                           attack_surface=attack_surface if key == "selector" else None))
+        self.query_one("#ef_readonly_context").display = has_tree
         self._update_edit_grant_flags()
+
+    def _edit_tree(self, root, editable_nodes, *, attack_surface=None):
+        widgets = []
+        rows = render_edit_tree(root, editable_nodes, attack_surface=attack_surface)
+        for markup, label, path, field, captured in rows:
+            text = self._render_markup(markup)
+            if field is None:
+                widgets.append(Static(text, classes="ef_tree_line", markup=False))
+                continue
+            control_id = f"ef_path_{next(self._edit_path_ids)}"
+            self._edit_nested_fields.append((path, field, captured, control_id))
+            text.append(label, style="dim")
+            text.pad_right(max(0, 16 - len(label)))
+            widgets.append(Horizontal(
+                Static(text, classes="ef_tree_label", markup=False),
+                ExtraValueInput(value=captured or "", placeholder="(none)", id=control_id,
+                                classes=f"ef_nested_{field}"),
+                classes="ef_tree_field",
+            ))
+        return widgets
 
     def _update_edit_component_context(self) -> None:
         value = self.query_one("#ef_component", Input).value.strip()
@@ -663,7 +710,8 @@ class NoxenApp(App):
             entry = self._current_intercepted_entry or {}
             # Only this field is changing; do not re-render nested trees per keypress.
             info = {"component": value or None}
-            context = render_edit_context(info, entry.get("attackSurface") or {}, entry.get("method"))
+            context = render_edit_context(info, entry.get("attackSurface") or {}, entry.get("method"),
+                                          include_trees=False)
             text = context.get("component", "").partition("\n")[2]
         body = self.query_one("#ef_component_body", Static)
         body.display = bool(text)
@@ -735,7 +783,7 @@ class NoxenApp(App):
     def _mod_safety_error(self, mod: tuple) -> str | None:
         if self._current_intent_is_null():
             return "Cannot modify: Intent is null"
-        mod_type, key, _value, _extra_type = mod
+        mod_type, key, _value, encoded_path = mod
         nested_field = NESTED_INTENT_FIELDS.get(mod_type)
         if mod_type not in {"extra_add", "extra_rem"} and nested_field is None:
             return None
@@ -744,8 +792,11 @@ class NoxenApp(App):
         )
         if (extras.get(key) or {}).get("keyTruncated"):
             return f"Extra '{key}' has a truncated key and cannot be modified safely"
-        if nested_field is not None and nested_field not in editable_nested_intent(extras.get(key)):
-            return f"Extra '{key}' must contain a captured Intent with a readable {nested_field}"
+        if nested_field is not None:
+            info = (self._current_intercepted_entry or {}).get("intent") or {}
+            node = dict(nested_intents(info)).get(nested_mod_path(key, encoded_path))
+            if nested_field not in nested_intent_fields(node):
+                return f"Path must contain a captured Intent with a readable {nested_field}"
         return None
 
     def _apply_command_mod_to_editor(self, mod: tuple) -> str | None:
@@ -787,40 +838,32 @@ class NoxenApp(App):
         is_new: bool,
         java_type: str = "",
         removable: bool = True,
-        nested: dict | None = None,
+        tree=(),
     ):
         self._edit_extra_counter += 1
         n = self._edit_extra_counter
-        self._edit_extra_rows[n] = {"key": key, "is_new": is_new, "type": simple_type or "string"}
+        self._edit_extra_rows[n] = {
+            "key": key, "is_new": is_new, "type": simple_type or "string", "is_tree": bool(tree),
+        }
         if simple_type == "null":
             value = ""
         preview_only = needs_value_preview(value)
         self._edit_extra_rows[n]["value_read_only"] = preview_only
-        value_input = ExtraValueInput(
-            id=f"ef_xv_{n}",
-            value=extra_value_preview(value) if preview_only else value,
-            disabled=preview_only or (simple_type is None and not is_new) or simple_type == "null",
-            placeholder=EXTRA_VALUE_PLACEHOLDERS.get(simple_type or "string", "value") if is_new else "",
-        )
-        value_cell = Vertical(
-            value_input,
-            Label("Read-only · escaped value", classes="ef_value_note"),
-            classes="ef_value_cell",
-        ) if preview_only else value_input
-        if nested and not is_new:
-            fields = []
-            for field, label in (("component", "Component"), ("action", "Action"),
-                                 ("data", "Data URI"), ("mimeType", "MIME Type")):
-                if field not in nested or needs_value_preview(nested[field] or ""):
-                    continue
-                fields.extend((
-                    Label(label, classes="ef_value_note"),
-                    ExtraValueInput(id=f"ef_nested_{field}_{n}", value=nested[field] or "",
-                                    placeholder="(none)", classes=f"ef_nested_{field}"),
-                ))
-            if fields:
-                value_cell = Vertical(value_input, *fields, classes="ef_value_cell")
-
+        if tree:
+            summary = extra_value_preview(value) if preview_only else value
+            value_cell = Static(Text(summary), id=f"ef_xv_{n}", classes="ef_value_summary")
+        else:
+            value_input = ExtraValueInput(
+                id=f"ef_xv_{n}",
+                value=extra_value_preview(value) if preview_only else value,
+                disabled=preview_only or (simple_type is None and not is_new) or simple_type == "null",
+                placeholder=EXTRA_VALUE_PLACEHOLDERS.get(simple_type or "string", "value") if is_new else "",
+            )
+            value_cell = Vertical(
+                value_input,
+                Label("Read-only · escaped value", classes="ef_value_note"),
+                classes="ef_value_cell",
+            ) if preview_only else value_input
         if is_new:
             selected_type = simple_type or "string"
             row = Horizontal(
@@ -829,7 +872,7 @@ class NoxenApp(App):
                        allow_blank=False, classes="ef_x_type_select", disabled=preview_only),
                 value_cell,
                 Button(Text("[×]"), id=f"ef_xrm_{n}", classes="ef_x_rm"),
-                id=f"ef_x_{n}", classes="ef_x_row",
+                id=None if tree else f"ef_x_{n}", classes="ef_x_row",
             )
         else:
             type_label = simple_type or java_type_display(java_type)
@@ -842,9 +885,12 @@ class NoxenApp(App):
                 Label(type_label, classes="ef_x_type_label"),
                 value_cell,
                 Button(Text("[×]"), id=f"ef_xrm_{n}", classes="ef_x_rm", disabled=not removable),
-                id=f"ef_x_{n}", classes="ef_x_row",
+                id=None if tree else f"ef_x_{n}", classes="ef_x_row",
             )
 
+        if tree:
+            row = Vertical(row, Vertical(*tree, classes="ef_extra_tree"),
+                           id=f"ef_x_{n}", classes="ef_extra_block")
         self.query_one("#ef_extras").mount(row)
         self.query_one("#ef_extras").add_class("has-rows")
 
@@ -905,7 +951,8 @@ class NoxenApp(App):
             else:
                 key = row_info["key"]
                 extra_type = row_info["type"]
-                value = self.query_one(f"#ef_xv_{n}", Input).value
+                control = self.query_one(f"#ef_xv_{n}")
+                value = control.value if isinstance(control, Input) else ""
 
             # The command removes/replaces every row with this key, so its old
             # invalid values or duplicates are not part of the resulting draft.
@@ -921,23 +968,9 @@ class NoxenApp(App):
                 )
 
             snapshot = displayed_extras.get(key)
-            nested = editable_nested_intent(snapshot)
-            if nested and not row_info["is_new"]:
-                extras[key] = copy.deepcopy(snapshot)
-                for field, captured in nested.items():
-                    if needs_value_preview(captured or ""):
-                        continue
-                    selector = f"#ef_nested_{field}_{n}"
-                    entered = self.query_one(selector, Input).value
-                    if entered == (captured or ""):
-                        continue
-                    try:
-                        value = normalize_component(entered) if field == "component" else entered
-                    except ValueError as error:
-                        raise _EditValidationError(str(error), selector, title="Invalid component") from None
-                    extras[key]["structured"][field] = value or None
-                continue
-            if snapshot is not None and (snapshot.get("editable") is False or row_info.get("value_read_only")):
+            if snapshot is not None and (
+                snapshot.get("editable") is False or row_info.get("value_read_only") or row_info["is_tree"]
+            ):
                 extras[key] = copy.deepcopy(snapshot)
                 continue
 
@@ -962,6 +995,17 @@ class NoxenApp(App):
             )
             extras[key] = rebuilt["extras"][key]
         draft["extras"] = extras
+        nodes = dict(nested_intents(draft))
+        for path, field, captured, control_id in self._edit_nested_fields:
+            if path not in nodes:
+                continue
+            selector = f"#{control_id}"
+            entered = self.query_one(selector, Input).value
+            if entered != (captured or ""):
+                try:
+                    nodes[path][field] = (normalize_component(entered) if field == "component" else entered) or None
+                except ValueError as error:
+                    raise _EditValidationError(str(error), selector, title="Invalid component") from None
 
         flags_text = self.query_one("#ef_flags", Input).value.strip()
         flags = parse_flag_value(flags_text) if flags_text else 0
@@ -1049,7 +1093,7 @@ class NoxenApp(App):
             report = getattr(result, "report", None)
             before = copy.deepcopy(entry.get("intent") or {}) if entry else {}
             actual, changed, error = confirmed_modification(
-                before, report, require_component=any(mod[0] == "component" for mod in mods)
+                before, report, require_component=any(mod[0] == "component" for mod in mods), mods=mods,
             )
             if actual is not None and entry is not None:
                 entry["intent"] = actual
@@ -1483,14 +1527,12 @@ class NoxenApp(App):
                             yield Rule(classes="section_separator")
                             with Horizontal(classes="ef_section_header"):
                                 yield Label("Selector", classes="ef_section")
-                                yield Label("Read-only", classes="ef_section_meta")
-                            yield Static(id="ef_selector_body", classes="ef_context_body", markup=False)
+                            yield Vertical(id="ef_selector_body", classes="ef_context_body")
                         with Vertical(id="ef_clip_section", classes="ef_readonly_section"):
                             yield Rule(classes="section_separator")
                             with Horizontal(classes="ef_section_header"):
                                 yield Label("ClipData", classes="ef_section")
-                                yield Label("Read-only", classes="ef_section_meta")
-                            yield Static(id="ef_clip_body", classes="ef_context_body", markup=False)
+                            yield Vertical(id="ef_clip_body", classes="ef_context_body")
                 yield Rule(classes="section_separator")
                 yield RichLog(id="intercept_cmd_output", markup=True, highlight=False)
                 yield OptionList(id="intercept_cmd_suggestions")
