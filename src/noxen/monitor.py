@@ -11,9 +11,15 @@ from noxen.rendering import (capture_datetime, capture_order_label, capture_orde
 
 MAX_PROFILES = 32
 MAX_HOOKS = 128
-PROFILE_FORMAT_VERSION = 11
+PROFILE_FORMAT_VERSION = 12
 _INTENT = "android.content.Intent"
 _RESOLVER = "android.content.ContentResolver"
+_TRANSPORT = "android.content.ContentProvider$Transport"
+_ATTRIBUTION_SOURCE = "android.content.AttributionSource"
+_REMOTE_CANCEL = "android.os.ICancellationSignal"
+_PARCEL_FILE = "android.os.ParcelFileDescriptor"
+_PARCEL_FILE_MODES = {0x10000000: "READ_ONLY", 0x20000000: "WRITE_ONLY", 0x30000000: "READ_WRITE"}
+_PARCEL_FILE_FLAGS = {0x08000000: "CREATE", 0x04000000: "TRUNCATE", 0x02000000: "APPEND"}
 _SQLITE = "android.database.sqlite.SQLiteDatabase"
 _ANDROID_LOG = "android.util.Log"
 _PREFERENCES_EDITOR = "android.app.SharedPreferencesImpl$EditorImpl"
@@ -164,7 +170,7 @@ def default_profiles():
                    for method, args in definitions]}
         for pid, name, clazz, definitions in (
             ("webview", "WebView", _WEBVIEW, methods),
-            ("content-provider", "Content Provider", _RESOLVER, resolver_methods),
+            ("content-provider", "Content Resolver", _RESOLVER, resolver_methods),
         )
     ]
     profiles[0]["hooks"].append(validate_hook({
@@ -209,6 +215,7 @@ def default_profiles():
                 (_FILE, "renameTo", [_FILE]),
                 (_FILES, "copy", [_PATH, _PATH, _COPY_OPTIONS]),
                 (_FILES, "move", [_PATH, _PATH, _COPY_OPTIONS]),
+                (_PARCEL_FILE, "open", [_FILE, "int"]),
             )
         ],
     })
@@ -316,6 +323,23 @@ def default_profiles():
             )
         ],
     })
+    # Binder entry point of every provider in the process (signatures since Android 12).
+    profiles.append({
+        "id": "provider-inbound", "name": "Incoming Provider", "enabled": False,
+        "hooks": [
+            validate_hook({"class": _TRANSPORT, "method": method, "args": [_ATTRIBUTION_SOURCE, *args]})
+            for method, args in (
+                ("query", [_URI, _STRINGS, _BUNDLE, _REMOTE_CANCEL]),
+                ("call", [_STRING, _STRING, _STRING, _BUNDLE]),
+                ("openFile", [_URI, _STRING, _REMOTE_CANCEL]),
+                ("openAssetFile", [_URI, _STRING, _REMOTE_CANCEL]),
+                ("openTypedAssetFile", [_URI, _STRING, _BUNDLE, _REMOTE_CANCEL]),
+                ("insert", [_URI, _CONTENT_VALUES, _BUNDLE]),
+                ("update", [_URI, _CONTENT_VALUES, _BUNDLE]),
+                ("delete", [_URI, _BUNDLE]),
+            )
+        ],
+    })
     return profiles
 
 
@@ -366,6 +390,11 @@ def load_profiles(raw):
             new_defaults = default_profiles()[version + 1:]
         else:
             raise ValueError("Unsupported Monitor profile format")
+        # The caller-side profile was renamed when the provider-side one was added.
+        for p in profiles:
+            if (p["id"] == "content-provider" and p["name"] == "Content Provider"
+                    and all(other["name"].casefold() != "content resolver" for other in profiles)):
+                p["name"] = "Content Resolver"
         # Add only profiles introduced since this project was saved.
         for default in new_defaults:
             if any(p["id"] == default["id"] or p["name"].casefold() == default["name"].casefold()
@@ -501,6 +530,20 @@ def _argument_names(event):
         return ("Destination",)
     if clazz == _FILES and method in ("copy", "move") and types == [_PATH, _PATH, _COPY_OPTIONS]:
         return ("Source", "Destination", "Options")
+    if clazz == _PARCEL_FILE and method == "open" and types == [_FILE, "int"]:
+        return ("Path", "Open mode")
+    if clazz == _TRANSPORT and types[:1] == [_ATTRIBUTION_SOURCE]:
+        names = {
+            "query": ("URI", "Projection", "Query arguments", "Cancellation signal"),
+            "call": ("Authority", "Command", "Argument", "Extras"),
+            "openFile": ("URI", "Mode", "Cancellation signal"),
+            "openAssetFile": ("URI", "Mode", "Cancellation signal"),
+            "openTypedAssetFile": ("URI", "MIME filter", "Options", "Cancellation signal"),
+            "insert": ("URI", "Values", "Extras"),
+            "update": ("URI", "Values", "Extras"),
+            "delete": ("URI", "Extras"),
+        }.get(method)
+        return ("Caller", *names) if names else ()
     if clazz == _CONTEXT_IMPL and method in ("grantUriPermission", "revokeUriPermission"):
         if types == [_STRING, _URI, "int"]:
             return ("Target package", "URI", "Mode flags")
@@ -572,6 +615,14 @@ def render_event_detail(event) -> Text:
         else:
             text.append(rendered)
 
+    def string_list(indent, name, value):
+        items, count = value["items"], value["count"]
+        text.append(f"\n{indent}{name} :", "dim")
+        text.append(f" {count}")
+        text.append(f" (showing {len(items)})" if count > len(items) else "", "dim")
+        for index, item in enumerate(items, 1):
+            typed_value(indent + "  ", f"[{index}] ", item, display_value(item))
+
     section("CALL")
     if order := capture_order_label(event):
         call_field("Capture order", order)
@@ -587,6 +638,10 @@ def render_event_detail(event) -> Text:
         call_field("WebView ID", event["webViewId"])
     if event.get("target"):
         call_field("Target", event["target"])
+    if "provider" in event:
+        call_field("Provider", display_value(event["provider"]))
+    if "callingUid" in event:
+        call_field("Caller UID", display_value(event["callingUid"]))
     if event.get("class") == _ANDROID_LOG and event.get("method") in _LOG_LEVELS:
         call_field("Level", _LOG_LEVELS[event["method"]])
     if event.get("class") == _PREFERENCES_EDITOR:
@@ -610,12 +665,20 @@ def render_event_detail(event) -> Text:
         names = _argument_names(event)
         for i, value in enumerate(event["arguments"]):
             name = names[i] if i < len(names) else i
-            if name in ("Bindings", "Options", "DEX buffers") and isinstance(value.get("items"), list):
-                items = value["items"]
-                count = value["count"]
-                field(name, count, f" (showing {len(items)})" if count > len(items) else "")
-                for index, item in enumerate(items, 1):
-                    typed_value("    ", f"[{index}] ", item, display_value(item))
+            if isinstance(query := value.get("queryArguments"), dict):
+                text.append(f"\n  {name} ")
+                text.append(f"[{value.get('type', 'unknown')}]", "dim")
+                for label, key in (("Selection", "selection"), ("Selection arguments", "selectionArgs"),
+                                   ("Sort order", "sortOrder")):
+                    item = query.get(key)
+                    if isinstance(item, dict) and isinstance(item.get("items"), list):
+                        string_list("    ", label, item)
+                    else:
+                        typed_value("    ", f"{label} ", item or {}, display_value(item))
+                continue
+            if (name in ("Bindings", "Options", "DEX buffers", "Projection")
+                    and isinstance(value.get("items"), list)):
+                string_list("  ", name, value)
                 continue
             rendered = display_value(value)
             flags = value.get("value")
@@ -632,6 +695,10 @@ def render_event_detail(event) -> Text:
                     rendered += f" ({labels})"
             if name == "Priority" and type(flags) is int and flags in _LOG_PRIORITIES:
                 rendered = f"{flags} ({_LOG_PRIORITIES[flags]})"
+            if name == "Open mode" and type(flags) is int:
+                labels = [_PARCEL_FILE_MODES.get(flags & 0x30000000, "unknown access")]
+                labels += [label for bit, label in _PARCEL_FILE_FLAGS.items() if flags & bit]
+                rendered = f"0x{flags & 0xffffffff:08X} ({' | '.join(labels)})"
             if name == "Mode" and event.get("class") == _CIPHER and type(flags) is int and flags in _CIPHER_MODES:
                 rendered = f"{flags} ({_CIPHER_MODES[flags]})"
             if event.get("class") == _WEB_SETTINGS and event.get("method") == "setMixedContentMode" and type(flags) is int:
@@ -676,7 +743,7 @@ def render_event_detail(event) -> Text:
         section("RETURN")
         result = event["result"]
         label = ""
-        if event.get("class") == _RESOLVER:
+        if event.get("class") in (_RESOLVER, _TRANSPORT):
             label = {"insert": "Inserted URI ", "update": "Rows affected ", "delete": "Rows affected "}.get(
                 event.get("method"), ""
             )

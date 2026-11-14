@@ -1,6 +1,11 @@
 // Passive, bounded Monitor. Unknown objects are never stringified or traversed.
 const MAX_QUEUED_EVENTS = 512;
 const RESOLVER = 'android.content.ContentResolver';
+const TRANSPORT = 'android.content.ContentProvider$Transport';
+const ATTRIBUTION_SOURCE = 'android.content.AttributionSource';
+const BUNDLE = 'android.os.Bundle';
+const QUERY_ARGUMENT = 'android:query-arg-sql-';
+const SQL_ARGUMENT_METHODS = new Set(['query', 'update', 'delete']);
 const SQLITE = 'android.database.sqlite.SQLiteDatabase';
 const ANDROID_LOG = 'android.util.Log';
 const CIPHER = 'javax.crypto.Cipher';
@@ -192,7 +197,7 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
   let webViews = [], webSettingsHooks = [], statuses = [], webViewId = 0;
   let webObservation = '', webGeneration = 0;
   let javaSystem, weakReference;
-  let javaBuffer;
+  let javaBuffer, javaBinder;
   function safe(fn, fallback) { try { return fn(); } catch (_) { return fallback; } }
   function textValue(type, text, limit = 2048) {
     return { type: type, value: text.slice(0, limit), truncated: text.length > limit };
@@ -240,8 +245,28 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
     // representation intact rather than rounding it through a JS number.
     return textValue(type, String(binding.toString()), 512);
   }
+  function strings(array) {
+    return { type: STRINGS, items: array.slice(0, 16).map(sqlBinding), count: array.length };
+  }
+  function providerArgument(spec, arg, type) {
+    if (arg == null) return value(arg, type);
+    if (type === ATTRIBUTION_SOURCE && arg.$className === type)
+      return textValue(type, String(arg.getPackageName()));
+    if (type === STRINGS && Array.isArray(arg)) return strings(arg);
+    if (!SQL_ARGUMENT_METHODS.has(spec.method) || type !== BUNDLE || arg.$className !== BUNDLE)
+      return value(arg, type);
+    // ContentProvider reads these same framework keys from the Bundle before
+    // calling the application's implementation.
+    const selectionArgs = arg.getStringArray(QUERY_ARGUMENT + 'selection-args');
+    return { type: type, queryArguments: {
+      selection: value(arg.getString(QUERY_ARGUMENT + 'selection'), STRING),
+      selectionArgs: selectionArgs == null ? value(null, STRINGS) : strings(selectionArgs),
+      sortOrder: value(arg.getString(QUERY_ARGUMENT + 'sort-order'), STRING),
+    } };
+  }
   function argumentValue(spec, args, index) {
     const type = spec.args[index], arg = args[index];
+    if (spec.class === TRANSPORT) return providerArgument(spec, arg, type);
     if (spec.class === INTENT && arg != null && arg.$className === type) {
       if (spec.method === 'setComponent' && type === COMPONENT_NAME)
         return textValue(type, String(Java.cast(arg, Java.use(type)).flattenToString()));
@@ -277,6 +302,9 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
     if (!bindings || !Array.isArray(arg)) return value(arg, type);
     const items = arg.slice(0, 16).map(binding => safe(() => sqlBinding(binding), { captureError: true }));
     return { type: type, items: items, count: arg.length };
+  }
+  function binder() {
+    return javaBinder ??= Java.use('android.os.Binder');
   }
   function dexBuffer(buffer) {
     if (buffer == null) return { type: BYTE_BUFFER, value: null };
@@ -423,6 +451,11 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
       class: specs[0].class, method: specs[0].method, types: specs[0].args,
       thread: thread === null ? 'unknown' : String(thread) };
     annotateWebEvent(event, webSpec, receiver);
+    if (event.class === TRANSPORT) {
+      // Transport is the Binder entry point shared by every provider in the process.
+      event.provider = inspect(() => textValue(STRING, String(receiver.this$0.value.getClass().getName())));
+      event.callingUid = inspect(() => ({ type: 'int', value: binder().getCallingUid() }));
+    }
     if (specs.some(s => s.captureArguments) && specs.some(isProcessExecution)) {
       processArguments(event, receiver, args);
     } else if (specs.some(s => s.captureArguments)) {

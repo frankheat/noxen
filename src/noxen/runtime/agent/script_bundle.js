@@ -1764,6 +1764,11 @@
       init_node_globals();
       var MAX_QUEUED_EVENTS = 512;
       var RESOLVER = "android.content.ContentResolver";
+      var TRANSPORT = "android.content.ContentProvider$Transport";
+      var ATTRIBUTION_SOURCE = "android.content.AttributionSource";
+      var BUNDLE = "android.os.Bundle";
+      var QUERY_ARGUMENT = "android:query-arg-sql-";
+      var SQL_ARGUMENT_METHODS = /* @__PURE__ */ new Set(["query", "update", "delete"]);
       var SQLITE = "android.database.sqlite.SQLiteDatabase";
       var ANDROID_LOG = "android.util.Log";
       var CIPHER = "javax.crypto.Cipher";
@@ -1926,7 +1931,7 @@
         let webViews = [], webSettingsHooks = [], statuses = [], webViewId = 0;
         let webObservation = "", webGeneration = 0;
         let javaSystem, weakReference;
-        let javaBuffer;
+        let javaBuffer, javaBinder;
         function safe(fn, fallback) {
           try {
             return fn();
@@ -1974,8 +1979,26 @@
           if (!SQL_BOXED_SCALARS.has(type)) return { type, opaque: true };
           return textValue(type, String(binding.toString()), 512);
         }
+        function strings(array) {
+          return { type: STRINGS, items: array.slice(0, 16).map(sqlBinding), count: array.length };
+        }
+        function providerArgument(spec, arg, type) {
+          if (arg == null) return value(arg, type);
+          if (type === ATTRIBUTION_SOURCE && arg.$className === type)
+            return textValue(type, String(arg.getPackageName()));
+          if (type === STRINGS && Array.isArray(arg)) return strings(arg);
+          if (!SQL_ARGUMENT_METHODS.has(spec.method) || type !== BUNDLE || arg.$className !== BUNDLE)
+            return value(arg, type);
+          const selectionArgs = arg.getStringArray(QUERY_ARGUMENT + "selection-args");
+          return { type, queryArguments: {
+            selection: value(arg.getString(QUERY_ARGUMENT + "selection"), STRING),
+            selectionArgs: selectionArgs == null ? value(null, STRINGS) : strings(selectionArgs),
+            sortOrder: value(arg.getString(QUERY_ARGUMENT + "sort-order"), STRING)
+          } };
+        }
         function argumentValue(spec, args, index) {
           const type = spec.args[index], arg = args[index];
+          if (spec.class === TRANSPORT) return providerArgument(spec, arg, type);
           if (spec.class === INTENT && arg != null && arg.$className === type) {
             if (spec.method === "setComponent" && type === COMPONENT_NAME)
               return textValue(type, String(Java2.cast(arg, Java2.use(type)).flattenToString()));
@@ -2005,6 +2028,9 @@
           if (!bindings || !Array.isArray(arg)) return value(arg, type);
           const items = arg.slice(0, 16).map((binding) => safe(() => sqlBinding(binding), { captureError: true }));
           return { type, items, count: arg.length };
+        }
+        function binder() {
+          return javaBinder ??= Java2.use("android.os.Binder");
         }
         function dexBuffer(buffer) {
           if (buffer == null) return { type: BYTE_BUFFER, value: null };
@@ -2157,6 +2183,10 @@
             thread: thread === null ? "unknown" : String(thread)
           };
           annotateWebEvent(event, webSpec, receiver);
+          if (event.class === TRANSPORT) {
+            event.provider = inspect2(() => textValue(STRING, String(receiver.this$0.value.getClass().getName())));
+            event.callingUid = inspect2(() => ({ type: "int", value: binder().getCallingUid() }));
+          }
           if (specs.some((s) => s.captureArguments) && specs.some(isProcessExecution)) {
             processArguments(event, receiver, args);
           } else if (specs.some((s) => s.captureArguments)) {

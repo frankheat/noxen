@@ -329,6 +329,13 @@ class MonitorModelTests(unittest.TestCase):
         self.assertEqual(load_profiles(json.dumps(version_nine)), (profiles, None))
         version_ten = {"version": 10, "profiles": profiles[:11]}
         self.assertEqual(load_profiles(json.dumps(version_ten)), (profiles, None))
+        version_eleven = {"version": 11, "profiles": profiles[:12]}
+        self.assertEqual(load_profiles(json.dumps(version_eleven)), (profiles, None))
+        legacy = [dict(profile) for profile in profiles[:12]]
+        legacy[1]["name"] = "Content Provider"
+        self.assertEqual(load_profiles(json.dumps({"version": 11, "profiles": legacy})), (profiles, None))
+        legacy[1]["name"] = "My resolver"
+        self.assertEqual(load_profiles(json.dumps({"version": 11, "profiles": legacy}))[0][1]["name"], "My resolver")
         current = {"version": PROFILE_FORMAT_VERSION, "profiles": profiles[:1]}
         self.assertEqual(load_profiles(json.dumps(current)), (profiles[:1], None))
         self.assertEqual(enabled_hooks(profiles), [])
@@ -344,6 +351,42 @@ class MonitorModelTests(unittest.TestCase):
             validate_profiles(profiles)
         for raw in ('[]x', 'null', '{}', '[{}]'):
             self.assertIsNotNone(load_profiles(raw)[1])
+
+    def test_incoming_provider_detail_names_the_caller_and_query_arguments(self):
+        text = {"type": "java.lang.String", "value": "title"}
+        detail = event_detail({
+            "class": "android.content.ContentProvider$Transport",
+            "method": "query",
+            "types": ["android.content.AttributionSource", "android.net.Uri", "[Ljava.lang.String;",
+                      "android.os.Bundle", "android.os.ICancellationSignal"],
+            "provider": {"type": "java.lang.String", "value": "dev.example.NotesProvider"},
+            "callingUid": {"type": "int", "value": 10123},
+            "arguments": [
+                {"type": "android.content.AttributionSource", "value": "dev.example.caller"},
+                {"type": "android.net.Uri", "value": "content://dev.example/notes"},
+                {"type": "[Ljava.lang.String;", "items": [text], "count": 1},
+                {"type": "android.os.Bundle", "queryArguments": {
+                    "selection": {"type": "java.lang.String", "value": "1=1 --"},
+                    "selectionArgs": {"type": "[Ljava.lang.String;", "items": [text] * 2, "count": 20},
+                    "sortOrder": {"type": "java.lang.String", "value": None},
+                }},
+                {"type": "android.os.ICancellationSignal", "value": None},
+            ],
+        })
+        self.assertIn('Provider      : "dev.example.NotesProvider"', detail)
+        self.assertIn("Caller UID    : 10123", detail)
+        self.assertIn('Caller [android.content.AttributionSource] : "dev.example.caller"', detail)
+        self.assertIn('Projection : 1\n    [1] [java.lang.String] : "title"', detail)
+        self.assertIn('Query arguments [android.os.Bundle]\n    Selection [java.lang.String] : "1=1 --"', detail)
+        self.assertIn("    Selection arguments : 20 (showing 2)\n      [1] ", detail)
+        self.assertIn("    Sort order [java.lang.String] : null", detail)
+
+    def test_parcel_file_descriptor_open_decodes_the_mode(self):
+        detail = event_detail({
+            "class": "android.os.ParcelFileDescriptor", "method": "open", "types": ["java.io.File", "int"],
+            "arguments": [{"type": "java.io.File", "value": "/data/report"}, {"type": "int", "value": 0x3C000000}],
+        })
+        self.assertIn("Open mode [int] : 0x3C000000 (READ_WRITE | CREATE | TRUNCATE)", detail)
 
     def test_uri_grant_detail_names_the_destination_and_decodes_flags(self):
         detail = event_detail({
@@ -916,7 +959,7 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertEqual(hooks.row_count, sum(len(p["hooks"]) for p in pane.profiles))
                 provider_hook = len(pane.profiles[0]["hooks"])
                 self.assertEqual(hooks.get_row_at(provider_hook)[0], "Disabled")
-                self.assertEqual(hooks.get_row_at(provider_hook)[1].plain, "Content Provider")
+                self.assertEqual(hooks.get_row_at(provider_hook)[1].plain, "Content Resolver")
                 self.assertEqual(hooks.get_row_at(provider_hook)[2].plain, signature(pane.profiles[1]["hooks"][0]))
                 hooks.focus()
                 await pilot.pause()
@@ -934,13 +977,13 @@ class MonitorUITests(IsolatedAppTestCase):
                 await pilot.click("#monitor_hook_details")
                 details = app.screen.query_one(TextArea).text
                 self.assertIn("android.content.ContentResolver.query(", details)
-                self.assertIn("Profile: Content Provider", details)
+                self.assertIn("Profile: Content Resolver", details)
                 await pilot.press("escape")
                 self.assertIs(app.focused, hooks)
                 await pilot.click("#monitor_hooks", offset=(17, 0))
                 profile_names = [hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)]
                 self.assertEqual(profile_names, sorted(profile_names, key=str.casefold))
-                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[1].plain, "Content Provider")
+                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[1].plain, "Content Resolver")
                 await pilot.click("#monitor_hooks", offset=(17, 0))
                 self.assertEqual([hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)],
                                  sorted(profile_names, key=str.casefold, reverse=True))

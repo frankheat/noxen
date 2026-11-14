@@ -247,6 +247,41 @@ test('SQLite bindings are bounded and leave custom objects and the original arra
   assert.equal(captured.items[1].opaque, true);
 });
 
+test('incoming provider call records caller, provider and standard query arguments only', () => {
+  const f = fixture(() => null, 'query');
+  f.Java.use = clazz => clazz === 'android.os.Binder' ? { getCallingUid: () => 10123 }
+    : { query: { overload: () => f.method } };
+  Object.assign(f.hook, { class: 'android.content.ContentProvider$Transport', profile: 'provider-inbound',
+    args: ['android.content.AttributionSource', 'android.net.Uri', '[Ljava.lang.String;', 'android.os.Bundle',
+      'android.os.ICancellationSignal'] });
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+  const transport = { this$0: { value: { getClass: () => ({ getName: () => 'app.NotesProvider' }) } } };
+  const source = { $className: 'android.content.AttributionSource', getPackageName: () => 'app.caller' };
+  const uri = { $className: 'android.net.Uri$StringUri', toString: () => 'content://app/notes' };
+  const read = [];
+  const bundle = { $className: 'android.os.Bundle',
+    getString(key) { read.push(key); return key.endsWith('selection') ? '1=1 --' : null; },
+    getStringArray(key) { read.push(key); return ['a', null]; },
+    keySet() { assert.fail('must not enumerate caller keys'); } };
+  f.method.implementation.call(transport, source, uri, ['title'], bundle, null);
+  const subclass = { $className: 'app.Bundle', getString() { assert.fail('must stay opaque'); } };
+  f.method.implementation.call(transport, null, uri, null, subclass, null);
+  const [event, other] = f.monitor.stop().events;
+  assert.equal(event.provider.value, 'app.NotesProvider');
+  assert.deepEqual(event.callingUid, { type: 'int', value: 10123 });
+  assert.equal(event.arguments[0].value, 'app.caller');
+  assert.equal(event.arguments[1].value, 'content://app/notes');
+  assert.deepEqual(event.arguments[2].items.map(item => item.value), ['title']);
+  const query = event.arguments[3].queryArguments;
+  assert.equal(query.selection.value, '1=1 --');
+  assert.deepEqual(query.selectionArgs.items.map(item => item.value), ['a', null]);
+  assert.equal(query.sortOrder.value, null);
+  assert.equal(read.length, 3);
+  assert.equal(other.arguments[0].value, null);
+  assert.deepEqual(other.arguments[3], { type: 'android.os.Bundle', opaque: true });
+});
+
 test('resolver delegation keeps the outer call and still reports a custom inner hook', () => {
   const messages = [];
   let flush, calls = 0;
