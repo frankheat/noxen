@@ -69,14 +69,14 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertTrue(field.disabled)
                 self.assertNotIn("\n", field.value)
                 self.assertEqual(json.loads(field.value), "one\ntwo\u0000three")
-                await pilot.click("#sender_request_exact")
+                await pilot.click("#sender_field_action .scalar_edit")
                 await pilot.pause()
                 exact = app.screen
-                exact.query_one("#sender_exact_text", TextArea).load_text("unquoted")
-                await pilot.click("#sender_exact_apply")
+                exact.query_one("#sender_text_value", TextArea).load_text("bad\\escape")
+                await pilot.click("#sender_text_apply")
                 await pilot.pause()
                 self.assertIs(app.screen, exact)
-                await pilot.click("#sender_exact_cancel")
+                await pilot.click("#sender_text_cancel")
                 await pilot.pause()
                 self.assertIs(app.screen, modal)
                 with patch.object(app.db, "save_sender_request", side_effect=sqlite3.OperationalError("disk full")):
@@ -132,26 +132,23 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertIsInstance(modal, SenderRequestModal)
                 modal.query_one("#sender_request_name", Input).value = "An empty action"
                 modal.query_one("#sender_value_package", Input).value = r"sample\npackage"
-                await pilot.click("#sender_request_exact")
+                await pilot.click("#sender_field_action .scalar_edit")
                 await pilot.pause()
-                exact = app.screen
-                exact.query_one("#sender_exact_field", Select).value = "action"
+                app.screen.query_one("#sender_text_state", Select).value = "text"
+                app.screen.query_one("#sender_text_value", TextArea).load_text("")
+                await pilot.click("#sender_text_apply")
                 await pilot.pause()
-                exact.query_one("#sender_exact_mode", Select).value = True
+                await pilot.click("#sender_field_data .scalar_edit")
                 await pilot.pause()
-                exact.query_one("#sender_exact_text", TextArea).load_text('""')
-                exact.query_one("#sender_exact_field", Select).value = "data"
-                await pilot.pause()
-                exact.query_one("#sender_exact_mode", Select).value = True
-                await pilot.pause()
-                exact.query_one("#sender_exact_text", TextArea).load_text(json.dumps("one\ntwo\x00"))
+                app.screen.query_one("#sender_text_state", Select).value = "text"
+                app.screen.query_one("#sender_text_value", TextArea).load_text(r"one\ntwo\u0000")
                 await pilot.resize_terminal(60, 24)
                 await pilot.pause()
-                await pilot.click("#sender_exact_apply")
+                await pilot.click("#sender_text_apply")
                 await pilot.resize_terminal(130, 50)
                 await pilot.pause()
                 self.assertIs(app.screen, modal)
-                self.assertEqual(modal.query_one("#sender_value_action", Input).value, "(empty string)")
+                self.assertEqual(modal.query_one("#sender_value_action", Input).placeholder, "Empty string")
                 await pilot.click("#sender_request_save")
                 await pilot.pause()
                 rows = app.db.sender_requests()
@@ -159,7 +156,7 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual(rows[0]["request"]["intent"]["action"], "")
                 self.assertEqual(rows[0]["request"]["intent"]["data"], "one\ntwo\x00")
                 self.assertEqual(rows[0]["request"]["intent"]["package"], r"sample\npackage")
-                self.assertIsNone(rows[0]["request"]["intent"]["component"])
+                self.assertNotIn("component", rows[0]["request"]["intent"])
                 app.mcp_service.enabled = True
                 app.mcp_service.allow_control = True
                 await pilot.click("#sender_edit")
@@ -184,9 +181,9 @@ class SenderUITests(IsolatedAppTestCase):
                 modal.query_one("#sender_operation", Select).value = "query"
                 await pilot.pause()
                 modal.query_one("#sender_value_uri", Input).value = "content://test/notes"
-                self.assertFalse(modal.query_one("#sender_field_component").display)
+                self.assertFalse(modal.query("#sender_field_component"))
                 self.assertTrue(modal.query_one("#sender_field_uri").display)
-                self.assertNotIn("intent", json.loads(modal.query_one("#sender_arguments", TextArea).text))
+                self.assertNotIn("intent", modal.collect_request())
                 await pilot.click("#sender_request_save")
                 await pilot.pause()
                 self.assertEqual(app.db.sender_requests()[0]["request"]["operation"], "query")

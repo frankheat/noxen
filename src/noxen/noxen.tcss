@@ -350,8 +350,8 @@ SenderRequestModal #sender_request_name:focus,
 #monitor_dialog Input:focus { border: round $accent; }
 MCPPane Button,
 SenderPane .sender_controls Button,
-SenderRequestModal .buttons Button,
-SenderExactValuesModal Button,
+SenderRequestModal Button,
+SenderTextModal Button,
 SenderCaptureModal Button,
 SenderCompareModal Button,
 #log_crashes,
@@ -373,12 +373,12 @@ MCPPane Button:hover,
 SenderPane .sender_controls Button:hover,
 SenderPane .sender_controls Button:focus,
 SenderPane .sender_controls Button.-active,
-SenderRequestModal .buttons Button:hover,
-SenderRequestModal .buttons Button:focus,
-SenderRequestModal .buttons Button.-active,
-SenderExactValuesModal Button:hover,
-SenderExactValuesModal Button:focus,
-SenderExactValuesModal Button.-active,
+SenderRequestModal Button:hover,
+SenderRequestModal Button:focus,
+SenderRequestModal Button.-active,
+SenderTextModal Button:hover,
+SenderTextModal Button:focus,
+SenderTextModal Button.-active,
 SenderCaptureModal Button:hover,
 SenderCaptureModal Button:focus,
 SenderCaptureModal Button.-active,
@@ -413,7 +413,7 @@ MCPPane Button.-active,
 }
 MCPPane Button:disabled,
 SenderPane .sender_controls Button:disabled,
-SenderRequestModal .buttons Button:disabled,
+SenderRequestModal Button:disabled,
 #monitor_pane .monitor_controls Button:disabled,
 #monitor_dialog Button:disabled {
     border: round $foreground-muted;
@@ -708,13 +708,13 @@ Switch.-on > .switch--slider {
 }
 SenderPane Select > SelectCurrent,
 SenderRequestModal Select > SelectCurrent,
-SenderExactValuesModal Select > SelectCurrent,
+SenderTextModal Select > SelectCurrent,
 SenderCaptureModal Select > SelectCurrent {
     border: round $foreground-muted;
     background: $background;
 }
 SenderRequestModal TextArea,
-SenderExactValuesModal TextArea {
+SenderTextModal TextArea {
     border: round $foreground-muted;
     background: $background;
 }
@@ -966,3 +966,36 @@ Footer {
 #info_perm_table, #info_comp_table { height: 1fr; margin: 1 1; }
 #info_comp_detail { height: 12; margin: 1 1; background: $surface; }
 #info_overview_log { height: 1fr; padding: 1 2; }
+
+/* Sender values use the same compact rows as the interception editor. */
+SenderRequestModal ScalarField { height: 1; margin-bottom: 1; }
+SenderRequestModal ScalarField > Label { height: 1; content-align: left middle; }
+SenderRequestModal ScalarField Input { height: 1; padding: 0; border: none; }
+SenderRequestModal ScalarField > Button {
+    width: 6; min-width: 6; height: 1; margin-left: 1; padding: 0;
+    border: none; color: $foreground-muted;
+}
+SenderRequestModal ScalarField > Button:hover,
+SenderRequestModal ScalarField > Button:focus { color: $accent; border: none; }
+SenderRequestModal ValueEditor .entry_header { height: 1; }
+SenderRequestModal ValueEditor .entry_header > Label { height: 1; }
+SenderRequestModal ValueEditor .entry_header > Button {
+    width: 5; min-width: 5; height: 1; padding: 0; border: none;
+}
+SenderRequestModal ValueEditor .entry_header > Select,
+SenderRequestModal ScalarField Select { height: 1; }
+SenderRequestModal ValueEditor Select > SelectCurrent {
+    border: none; height: 1; padding: 0;
+}
+SenderRequestModal ValueEditor Select > SelectOverlay { width: 22; }
+SenderRequestModal ValueEditor .column_headings > .remove_heading { width: 5; }
+SenderRequestModal ValueEditor .entry_body { padding-left: 1; }
+SenderRequestModal Collapsible { border: none; padding: 0; background-tint: transparent; }
+SenderRequestModal Collapsible > Contents { padding: 1 0 0 2; }
+SenderRequestModal ValueEditor.narrow > .column_headings { display: none; }
+SenderRequestModal EntryRow.narrow > .entry_header { layout: vertical; height: auto; }
+SenderRequestModal EntryRow.narrow > .entry_header > ScalarField { width: 1fr; }
+SenderRequestModal EntryRow.narrow > .entry_header > ScalarField > Label { display: block; width: 8; }
+SenderRequestModal EntryRow.narrow > .entry_header > Select { width: 100%; margin: 0 0 1 0; }
+SenderRequestModal EntryRow.narrow > .entry_header > .entry_preview { width: 100%; }
+SenderRequestModal EntryRow.narrow > .entry_header > .entry_preview ScalarField > Label { display: block; width: 8; }

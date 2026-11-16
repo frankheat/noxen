@@ -1,5 +1,6 @@
 """Sender requests and execution records. UI and MCP share SenderService."""
 
+import copy
 import json
 import sqlite3
 from uuid import uuid4
@@ -13,140 +14,17 @@ from textual.widgets import Button, DataTable, Input, Label, RichLog, Rule, Sele
 from noxen.modals import ModalButton, ColumnSelectModal
 from noxen.monitor_ui import RecordingDialog
 from noxen.history_columns import normalize_column_widths
-from noxen.sender import OPERATIONS, INTENT_OPERATIONS, empty_request, render_sender_detail, compare_sender_runs, string
+from noxen.sender import OPERATIONS, INTENT_OPERATIONS, empty_request, render_sender_detail, compare_sender_runs
 from noxen.exporting import write_sender_export
 from noxen.sender_capture import prepare_intent_request
 from noxen.sender_service import endpoint_for_app, sender_io
 from noxen.textual_compat import is_select_empty
-from noxen.extra_value_input import ExtraValueInput, needs_value_preview, extra_value_preview
+from noxen.sender_editor import MISSING, ScalarField, OptionalSection, object_fields, object_sections, changing_draft, check_draft_ready
 
 SENDER_COLUMNS = {
     "sender_requests": [("name", "Name"), ("operation", "Operation"), ("revision", "Revision")],
     "sender_runs": [("id", "ID"), ("name", "Request"), ("state", "State"), ("sender", "Sender"), ("createdAt", "Time")],
 }
-FIELD_LABELS = {"mimeType": "MIME type", "data": "Data URI", "receiverPermission": "Receiver perm",
-                "uri": "URI", "sortOrder": "Sort order"}
-REQUIRED_TEXT_FIELDS = {"uri", "method"}
-
-
-class SenderExactValuesModal(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel")]
-    DEFAULT_CSS = """
-    SenderExactValuesModal { align: center middle; }
-    SenderExactValuesModal > Vertical {
-        width: 90%; max-width: 76; height: 21; max-height: 95%;
-        padding: 1 2; border: solid $foreground-muted; background: $surface;
-    }
-    SenderExactValuesModal .title { text-style: bold; margin-bottom: 1; }
-    SenderExactValuesModal .exact_row { height: 3; align: left middle; }
-    SenderExactValuesModal .exact_row Label { width: 8; height: 3; content-align: left middle; }
-    SenderExactValuesModal Select { width: 1fr; }
-    SenderExactValuesModal TextArea { height: 1fr; min-height: 3; }
-    SenderExactValuesModal #sender_exact_preview { height: 1; color: $foreground-muted; }
-    SenderExactValuesModal .buttons { height: 3; align: right middle; }
-    SenderExactValuesModal Button { width: auto; min-width: 10; margin-left: 1; }
-    """
-
-    def __init__(self, fields, initial):
-        super().__init__()
-        self.fields = fields
-        self.current = initial
-        self.drafts = {key: (value is not None or key in REQUIRED_TEXT_FIELDS,
-                             extra_value_preview(value if value is not None else ""))
-                       for key, value in fields.items()}
-
-    def compose(self):
-        is_set, text = self.drafts[self.current]
-        with Vertical():
-            yield Label("Exact values", classes="title")
-            with Horizontal(classes="exact_row"):
-                yield Label("Field")
-                yield Select([(FIELD_LABELS.get(key, key.capitalize()), key) for key in self.fields],
-                             value=self.current, allow_blank=False, id="sender_exact_field")
-            with Horizontal(classes="exact_row"):
-                yield Label("Value")
-                yield Select([("Unset", False), ("Set", True)], value=is_set, allow_blank=False,
-                             disabled=self.current in REQUIRED_TEXT_FIELDS, id="sender_exact_mode")
-            yield Label("Text (JSON string)")
-            yield TextArea(text, soft_wrap=True, disabled=not is_set, id="sender_exact_text")
-            yield Label("", id="sender_exact_preview")
-            with Horizontal(classes="buttons"):
-                yield ModalButton("Cancel", id="sender_exact_cancel")
-                yield ModalButton("Apply", id="sender_exact_apply")
-
-    def decode(self, key):
-        is_set, text = self.drafts[key]
-        if not is_set:
-            return None
-        value = json.loads(text)
-        string(value, FIELD_LABELS.get(key, key.capitalize()))
-        return value
-
-    def remember_current(self):
-        mode = self.query_one("#sender_exact_mode", Select)
-        self.drafts[self.current] = (mode.value is True, self.query_one("#sender_exact_text", TextArea).text)
-
-    def refresh_preview(self):
-        self.remember_current()
-        area = self.query_one("#sender_exact_text", TextArea)
-        area.disabled = not self.drafts[self.current][0]
-        try:
-            value = self.decode(self.current)
-        except ValueError:
-            caption = 'Enter a valid quoted JSON string'
-        else:
-            if value is None:
-                caption = "Unset"
-            elif value == "":
-                caption = "Empty string"
-            else:
-                caption = f"Length: {len(value)}"
-                line_breaks = value.count("\n")
-                nul_chars = value.count("\0")
-                if line_breaks:
-                    caption += f" · Newlines: {line_breaks}"
-                if nul_chars:
-                    caption += f" · NUL: {nul_chars}"
-        self.query_one("#sender_exact_preview", Label).update(caption)
-
-    def on_mount(self):
-        self.refresh_preview()
-
-    def on_select_changed(self, event):
-        event.stop()
-        if event.select.id == "sender_exact_field" and event.value != self.current:
-            self.remember_current()
-            self.current = event.value
-            is_set, text = self.drafts[self.current]
-            mode = self.query_one("#sender_exact_mode", Select)
-            mode.disabled = self.current in REQUIRED_TEXT_FIELDS
-            mode.value = is_set
-            self.query_one("#sender_exact_text", TextArea).load_text(text)
-        self.refresh_preview()
-
-    def on_text_area_changed(self, event):
-        event.stop()
-        self.refresh_preview()
-
-    def on_button_pressed(self, event):
-        event.stop()
-        if event.button.id == "sender_exact_cancel":
-            self.dismiss(None)
-            return
-        self.remember_current()
-        values = {}
-        for key in self.fields:
-            try:
-                value = self.decode(key)
-            except ValueError:
-                self.query_one("#sender_exact_field", Select).value = key
-                self.notify("Enter a valid quoted JSON string", severity="error")
-                return
-            if value != self.fields[key]:
-                values[key] = value
-        self.dismiss(values)
-
-
 class SenderCompareModal(ModalScreen):
     BINDINGS = [("escape", "dismiss", "Close")]
     DEFAULT_CSS = """
@@ -242,157 +120,112 @@ class SenderRequestModal(ModalScreen):
     SenderRequestModal { align: center middle; }
     SenderRequestModal > Vertical { width: 90%; max-width: 120; height: 90%; padding: 1 2; background: $surface; border: solid $foreground-muted; }
     SenderRequestModal .title { text-style: bold; margin-bottom: 1; }
-    SenderRequestModal Input { height: 3; margin-bottom: 1; }
-    SenderRequestModal Select { height: 3; margin-bottom: 1; }
+    SenderRequestModal #sender_request_name { height: 3; margin-bottom: 1; }
+    SenderRequestModal #sender_operation { height: 3; margin-bottom: 1; }
     SenderRequestModal #sender_request_body { height: 1fr; }
-    SenderRequestModal #sender_request_fields { height: 1fr; min-height: 27; }
-    SenderRequestModal TextArea { height: 1fr; min-height: 4; }
-    SenderRequestModal #sender_fields { height: auto; max-height: 40%; }
-    SenderRequestModal .sender_field { height: 1; margin-bottom: 1; }
-    SenderRequestModal .sender_field Label { width: 16; height: 1; color: $foreground-muted; }
-    SenderRequestModal .sender_field Input { width: 1fr; height: 1; border: none; padding: 0; margin: 0; }
-    SenderRequestModal .buttons { height: 3; align: left middle; margin-top: 1; }
-    SenderRequestModal .button_spacer { width: 1fr; }
-    SenderRequestModal Button { width: auto; min-width: 10; margin-left: 1; border: round $foreground-muted; background: transparent; }
+    SenderRequestModal #sender_fields { height: auto; }
+    SenderRequestModal .buttons { height: 3; align: right middle; margin-top: 1; }
+    SenderRequestModal Button { width: auto; min-width: 8; border: round $foreground-muted; background: transparent; }
+    SenderRequestModal .buttons Button { min-width: 10; margin-left: 1; }
+    SenderRequestModal Collapsible { background: transparent; }
+    SenderRequestModal .editor_heading { text-style: bold; margin-top: 1; }
     """
 
     def __init__(self, service, saved=None):
         super().__init__()
         self.service, self.saved = service, saved
-        self.operation = saved["request"]["operation"] if saved else "sendBroadcast"
-        self.exact_previews = {}
-        self.advanced_drafts = {}
-        self.field_names = ("component", "package", "action", "data", "mimeType", "flags", "receiverPermission",
-                            "uri", "selection", "sortOrder", "method", "arg")
+        request = saved["request"] if saved else empty_request()
+        self.operation = request["operation"]
+        self.drafts = {self.operation: copy.deepcopy(request)}
+        self.fields = []
 
-    def common_fields(self, operation):
-        if operation in INTENT_OPERATIONS:
-            return ["component", "package", "action", "data", "mimeType", "flags"] + (
-                ["receiverPermission"] if operation in ("sendBroadcast", "sendOrderedBroadcast") else [])
-        return ["uri"] + ({"query": ["selection", "sortOrder"], "update": ["selection"],
-                           "delete": ["selection"], "call": ["method", "arg"]}.get(operation, []))
+    def build_fields(self):
+        request = self.drafts.setdefault(self.operation, empty_request(self.operation))
+        intent = self.operation in INTENT_OPERATIONS
+        body = request["intent"] if intent else request
+        specs = object_fields("Intent") if intent else [("uri", "String", False, False)]
+        if intent and self.operation in ("sendBroadcast", "sendOrderedBroadcast"):
+            specs = [*specs, ("receiverPermission", "String", True, True)]
+        if not intent:
+            text_keys = {"query": ["selection", "sortOrder"], "update": ["selection"],
+                         "delete": ["selection"], "call": ["method", "arg"]}.get(self.operation, [])
+            specs += [(key, "String", key != "method", key != "method") for key in text_keys]
+            if self.operation == "query":
+                specs += [("maxRows", "int", True, False)]
+            if self.operation in ("query", "openFileDescriptor"):
+                specs += [("maxBytes", "int", True, False)]
+        self.fields = []
+        for key, kind, optional, nullable in specs:
+            source = request if key == "receiverPermission" else body
+            field = ScalarField(key, kind, source.get(key, MISSING), optional=optional, nullable=nullable,
+                                input_id=f"sender_value_{key}")
+            field.id = f"sender_field_{key}"
+            self.fields.append(field)
+        sections = object_sections("Intent") if intent else {
+            "query": [("projection", "String[]"), ("selectionArgs", "String[]")],
+            "insert": [("values", "ContentValues")],
+            "update": [("values", "ContentValues"), ("selectionArgs", "String[]")],
+            "delete": [("selectionArgs", "String[]")], "call": [("extras", "Bundle")],
+        }.get(self.operation, [])
+        for key, kind in sections:
+            field = OptionalSection(key, kind, body.get(key, {} if key == "values" else MISSING),
+                                    depth=1 if key == "selector" else 0, required=key == "values")
+            self.fields.append(field)
+        return self.fields
 
     def compose(self):
-        request = self.saved["request"] if self.saved else empty_request()
-        body = {key: value for key, value in request.items() if key != "operation"}
-        common = body.get("intent", {}) if self.operation in INTENT_OPERATIONS else body
-        advanced = dict(body)
-        if self.operation in INTENT_OPERATIONS:
-            advanced["intent"] = {k: v for k, v in common.items() if k not in self.field_names}
-            advanced.pop("receiverPermission", None)
-        else:
-            advanced = {k: v for k, v in body.items() if k not in self.field_names}
         with Vertical():
             with VerticalScroll(id="sender_request_body"):
-                with Vertical(id="sender_request_fields"):
-                    yield Label("Edit request" if self.saved else "New request", classes="title")
-                    yield Label("Name")
-                    yield Input(self.saved["name"] if self.saved else "", id="sender_request_name", select_on_focus=False)
-                    yield Label("Operation")
-                    yield Select([(op, op) for op in OPERATIONS], value=request["operation"], allow_blank=False, id="sender_operation")
-                    with VerticalScroll(id="sender_fields"):
-                        for key in self.field_names:
-                            value = body.get(key) if key == "receiverPermission" else common.get(key)
-                            if key == "flags":
-                                value = hex(value or 0)
-                            preview = self.preview_for(key, value)
-                            if preview is not None:
-                                self.exact_previews[key] = value
-                            with Horizontal(classes="sender_field", id=f"sender_field_{key}"):
-                                yield Label(FIELD_LABELS.get(key, key.capitalize()))
-                                yield ExtraValueInput(preview if preview is not None else (value or ""),
-                                                      id=f"sender_value_{key}", select_on_focus=False,
-                                                      disabled=preview is not None)
-                    yield Label("Additional arguments (JSON)", id="sender_arguments_label")
-                    yield TextArea(json.dumps(advanced, indent=2, ensure_ascii=False), id="sender_arguments", soft_wrap=True)
+                yield Label("Edit request" if self.saved else "New request", classes="title")
+                yield Label("Name")
+                yield Input(self.saved["name"] if self.saved else "", id="sender_request_name", select_on_focus=False)
+                yield Label("Operation")
+                yield Select([(op, op) for op in OPERATIONS], value=self.operation, allow_blank=False, id="sender_operation")
+                with Vertical(id="sender_fields"):
+                    yield from self.build_fields()
             with Horizontal(classes="buttons"):
-                yield ModalButton("Exact values…", id="sender_request_exact")
-                yield Label("", classes="button_spacer")
                 yield ModalButton("Cancel", id="sender_request_cancel")
                 yield ModalButton("Save", id="sender_request_save")
 
-    @staticmethod
-    def preview_for(key, value):
-        if value == "" and key not in REQUIRED_TEXT_FIELDS:
-            return "(empty string)"
-        if value is not None and needs_value_preview(value):
-            return extra_value_preview(value)
-        return None
+    def collect_request(self):
+        check_draft_ready(self)
+        request = {"operation": self.operation}
+        if self.operation in INTENT_OPERATIONS:
+            request["intent"] = {}
+        for field in self.fields:
+            value = field.collect()
+            if value is not MISSING:
+                destination = request["intent"] if self.operation in INTENT_OPERATIONS and field.key != "receiverPermission" else request
+                destination[field.key] = value
+        return request
 
-    def field_value(self, key):
-        if key in self.exact_previews:
-            return self.exact_previews[key]
-        value = self.query_one(f"#sender_value_{key}", Input).value
-        if key == "flags":
-            return int(value, 0)
-        return value if value or key in REQUIRED_TEXT_FIELDS else None
-
-    def apply_exact_values(self, values):
-        if values is None:
-            return
-        for key, value in values.items():
-            field = self.query_one(f"#sender_value_{key}", Input)
-            preview = self.preview_for(key, value)
-            if preview is None:
-                self.exact_previews.pop(key, None)
-                field.value = value or ""
-            else:
-                self.exact_previews[key] = value
-                field.value = preview
-            field.disabled = preview is not None
-
-    def on_mount(self):
-        self.show_fields()
-
-    def show_fields(self):
-        visible = self.common_fields(self.operation)
-        self.query_one("#sender_arguments_label", Label).update(
-            "Extras, categories, selector and ClipData (JSON)" if self.operation in INTENT_OPERATIONS
-            else "Provider arguments (JSON)")
-        for key in self.field_names:
-            self.query_one(f"#sender_field_{key}").display = key in visible
-
-    def on_select_changed(self, event):
+    async def on_select_changed(self, event):
         if event.select.id != "sender_operation":
             return
         event.stop()
-        if not is_select_empty(event.value):
-            if self.operation != event.value:
-                arguments = self.query_one("#sender_arguments", TextArea)
-                self.advanced_drafts[self.operation] = arguments.text
-                default = {"intent": {}} if event.value in INTENT_OPERATIONS else {"values": {}} if event.value in ("insert", "update") else {}
-                arguments.load_text(self.advanced_drafts.get(event.value, json.dumps(default, indent=2)))
+        if is_select_empty(event.value) or self.operation == event.value:
+            return
+        try:
+            self.drafts[self.operation] = self.collect_request()
+        except ValueError as error:
+            with event.select.prevent(Select.Changed):
+                event.select.value = self.operation
+            self.notify(str(error), severity="error")
+            return
+        with changing_draft(self):
             self.operation = event.value
-            self.show_fields()
+            container = self.query_one("#sender_fields", Vertical)
+            await container.remove_children()
+            await container.mount(*self.build_fields())
 
     def on_button_pressed(self, event):
         event.stop()
-        if event.button.id == "sender_request_exact":
-            fields = {key: self.field_value(key) for key in self.common_fields(self.operation) if key != "flags"}
-            focused_id = self.focused.id if self.focused is not None else None
-            initial = next((key for key in fields if focused_id == f"sender_value_{key}"), None)
-            if initial is None:
-                initial = next((key for key in fields if key in self.exact_previews), next(iter(fields)))
-            self.app.push_screen(SenderExactValuesModal(fields, initial), self.apply_exact_values)
-            return
         if event.button.id == "sender_request_cancel":
             self.dismiss(None)
         elif event.button.id == "sender_request_save":
             try:
-                body = json.loads(self.query_one("#sender_arguments", TextArea).text)
-                if not isinstance(body, dict) or "operation" in body:
-                    raise ValueError("Arguments must be an object without an operation field")
-                body["operation"] = self.query_one("#sender_operation", Select).value
-                common = body.setdefault("intent", {}) if self.operation in INTENT_OPERATIONS else body
-                if not isinstance(common, dict):
-                    raise ValueError("Intent arguments must be an object")
-                for key in self.common_fields(self.operation):
-                    destination = body if key == "receiverPermission" else common
-                    if key in destination:
-                        raise ValueError(f"{key} has its own field above; remove it from Additional arguments")
-                    destination[key] = self.field_value(key)
                 saved = self.service.save_request(
-                    self.query_one("#sender_request_name", Input).value, body,
+                    self.query_one("#sender_request_name", Input).value, self.collect_request(),
                     self.saved["id"] if self.saved else None, self.saved["revision"] if self.saved else 0)
             except (ValueError, OSError, sqlite3.Error) as error:
                 self.notify(str(error), severity="error")
