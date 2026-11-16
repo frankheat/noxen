@@ -69,6 +69,7 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertTrue(field.disabled)
                 self.assertNotIn("\n", field.value)
                 self.assertEqual(json.loads(field.value), "one\ntwo\u0000three")
+                await pilot.hover("#sender_field_action")
                 await pilot.click("#sender_field_action .scalar_edit")
                 await pilot.pause()
                 exact = app.screen
@@ -132,12 +133,14 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertIsInstance(modal, SenderRequestModal)
                 modal.query_one("#sender_request_name", Input).value = "An empty action"
                 modal.query_one("#sender_value_package", Input).value = r"sample\npackage"
+                await pilot.hover("#sender_field_action")
                 await pilot.click("#sender_field_action .scalar_edit")
                 await pilot.pause()
                 app.screen.query_one("#sender_text_state", Select).value = "text"
                 app.screen.query_one("#sender_text_value", TextArea).load_text("")
                 await pilot.click("#sender_text_apply")
                 await pilot.pause()
+                await pilot.hover("#sender_field_data")
                 await pilot.click("#sender_field_data .scalar_edit")
                 await pilot.pause()
                 app.screen.query_one("#sender_text_state", Select).value = "text"

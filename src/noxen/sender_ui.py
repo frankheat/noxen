@@ -9,7 +9,7 @@ from rich.text import Text
 from textual import work
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, Label, RichLog, Rule, Select, TabbedContent, TabPane, TextArea
+from textual.widgets import Button, DataTable, Input, Label, RichLog, Rule, Select, TabbedContent, TabPane, TextArea, Tree, Collapsible
 
 from noxen.modals import ModalButton, ColumnSelectModal
 from noxen.monitor_ui import RecordingDialog
@@ -19,7 +19,7 @@ from noxen.exporting import write_sender_export
 from noxen.sender_capture import prepare_intent_request
 from noxen.sender_service import endpoint_for_app, sender_io
 from noxen.textual_compat import is_select_empty
-from noxen.sender_editor import MISSING, ScalarField, OptionalSection, object_fields, object_sections, changing_draft, check_draft_ready
+from noxen.sender_editor import MISSING, ScalarField, OptionalSection, object_fields, object_sections, ValueEditor, EntryRow, SCALARS, LABELS, changing_draft, check_draft_ready
 
 SENDER_COLUMNS = {
     "sender_requests": [("name", "Name"), ("operation", "Operation"), ("revision", "Revision")],
@@ -129,6 +129,14 @@ class SenderRequestModal(ModalScreen):
     SenderRequestModal .buttons Button { min-width: 10; margin-left: 1; }
     SenderRequestModal Collapsible { background: transparent; }
     SenderRequestModal .editor_heading { text-style: bold; margin-top: 1; }
+    /* Sections and nested objects are hidden until navigation opens them, so
+       a newly mounted one never shows before it has been placed. */
+    SenderRequestModal OptionalSection { display: none; }
+    SenderRequestModal OptionalSection.navigation_target,
+    SenderRequestModal OptionalSection.navigation_path { display: block; }
+    SenderRequestModal EntryRow > .entry_body { display: none; }
+    SenderRequestModal EntryRow > .entry_body.navigation_path { display: block; }
+    SenderRequestModal .off_path { display: none; }
     """
 
     def __init__(self, service, saved=None):
@@ -138,6 +146,8 @@ class SenderRequestModal(ModalScreen):
         self.operation = request["operation"]
         self.drafts = {self.operation: copy.deepcopy(request)}
         self.fields = []
+        self._object_target = None
+        self._navigation_signature = None
 
     def build_fields(self):
         request = self.drafts.setdefault(self.operation, empty_request(self.operation))
@@ -175,17 +185,138 @@ class SenderRequestModal(ModalScreen):
 
     def compose(self):
         with Vertical():
-            with VerticalScroll(id="sender_request_body"):
-                yield Label("Edit request" if self.saved else "New request", classes="title")
-                yield Label("Name")
-                yield Input(self.saved["name"] if self.saved else "", id="sender_request_name", select_on_focus=False)
-                yield Label("Operation")
-                yield Select([(op, op) for op in OPERATIONS], value=self.operation, allow_blank=False, id="sender_operation")
-                with Vertical(id="sender_fields"):
-                    yield from self.build_fields()
+            yield Label("Edit request" if self.saved else "New request", classes="title")
+            with Horizontal(id="sender_workspace"):
+                tree = Tree("Request", id="sender_request_tree")
+                tree.auto_expand = False  # A click opens the object; it must not fold the explorer.
+                tree.guide_depth = 3
+                yield tree
+                with VerticalScroll(id="sender_request_body"):
+                    yield Label("Request", id="sender_object_title", classes="title")
+                    with Vertical(id="sender_request_identity"):
+                        yield Label("Name")
+                        yield Input(self.saved["name"] if self.saved else "", id="sender_request_name", select_on_focus=False)
+                        yield Label("Operation")
+                        yield Select([(op, op) for op in OPERATIONS], value=self.operation, allow_blank=False, id="sender_operation")
+                    with Vertical(id="sender_fields"):
+                        yield from self.build_fields()
             with Horizontal(classes="buttons"):
+                yield ModalButton("Browse", id="sender_request_browse")
                 yield ModalButton("Cancel", id="sender_request_cancel")
                 yield ModalButton("Save", id="sender_request_save")
+
+    def on_mount(self):
+        self.refresh_navigation()
+        self.set_interval(0.2, self.refresh_navigation)
+
+    def on_resize(self, event):
+        self.set_class(event.size.width < 90, "narrow_request")
+
+    def navigation_items(self):
+        items = []
+        def visit(widget, parent, label):
+            items.append((widget, parent, label))
+            editor = widget.editor if isinstance(widget, OptionalSection) else widget
+            if editor is None:
+                return
+            for child in editor.members:
+                if isinstance(child, OptionalSection):
+                    visit(child, widget, LABELS.get(child.key, child.key.capitalize()))
+                elif isinstance(child, EntryRow) and child.editor is not None and child.kind not in SCALARS:
+                    key = child.key_field.query_one(Input).value if child.is_map else f"Item {child.key}"
+                    visit(child.editor, widget, f"{key or '(empty key)'} · {child.kind}")
+        for field in self.fields:
+            if isinstance(field, OptionalSection):
+                visit(field, None, LABELS.get(field.key, field.key.capitalize()))
+        return items
+
+    def refresh_navigation(self):
+        if getattr(self, "_changing_draft", False) or any(getattr(w, "_changing_draft", False) for w in self.query()):
+            return
+        items = self.navigation_items()
+        signature = tuple((id(w), id(p), label, getattr(w, "editor", w) is None) for w, p, label in items)
+        if signature == self._navigation_signature:
+            return
+        self._navigation_signature = signature
+        tree = self.query_one("#sender_request_tree", Tree)
+        tree.clear()
+        nodes = {None: tree.root}
+        for widget, parent, label in items:
+            has_children = any(p is widget for _, p, _ in items)
+            unset = isinstance(widget, OptionalSection) and widget.editor is None
+            caption = Text("+ " + label, style="dim") if unset else Text(label)
+            nodes[widget] = nodes[parent].add(caption, data=widget, expand=True, allow_expand=has_children)
+        tree.root.expand()
+        self._navigation_nodes = nodes
+        if self._object_target not in nodes:
+            self._object_target = None
+        tree.move_cursor(nodes[self._object_target])
+        self.focus_request_object(self._object_target, scroll=False)
+
+    def on_tree_node_selected(self, event):
+        if event.control.id == "sender_request_tree":
+            event.stop()
+            self.focus_request_object(event.node.data)
+            self.remove_class("browse_request")
+
+    def focus_request_object(self, target, *, scroll=True):
+        with self.app.batch_update():  # One repaint: no half-updated form in between.
+            self._show_request_object(target, scroll)
+
+    def _show_request_object(self, target, scroll):
+        self._object_target = target
+        node = getattr(self, "_navigation_nodes", {}).get(target)
+        if node is not None:
+            self.query_one("#sender_request_tree", Tree).move_cursor(node)
+        # Everything stays mounted so the draft survives navigation. Only the
+        # chain from the fields down to the target is shown, without the
+        # headings and buttons that belong to the levels above it.
+        # Classes change without a per-widget restyle; one pass follows.
+        fields = self.query_one("#sender_fields")
+        for name in ("off_path", "navigation_path", "navigation_target"):
+            for widget in fields.query("." + name):
+                widget.remove_class(name, update=False)
+        if target is not None:
+            target.add_class("navigation_target", update=False)
+            current = target
+            while current is not fields:
+                parent = current.parent
+                for sibling in parent.children:
+                    own_null = sibling.has_class("set_null") and getattr(parent.parent, "editor", None) is target
+                    if sibling is not current and not own_null:
+                        sibling.add_class("off_path", update=False)
+                if parent is not fields:
+                    parent.add_class("navigation_path", update=False)
+                if isinstance(parent, Collapsible):
+                    parent.collapsed = False
+                current = parent
+        self.app.update_styles(fields)
+        self.query_one("#sender_request_identity").display = target is None
+        labels = {w: (p, label) for w, p, label in self.navigation_items()}
+        path = []
+        current = target
+        while current in labels:
+            current, label = labels[current]
+            path.append(label)
+        title = "Request" if not path else " / ".join(reversed(path))
+        # The title shares a row with the object's own Add / Remove buttons when it has them.
+        previous = getattr(self, "_title_slot", None)
+        if previous is not None and previous[0].is_attached:
+            previous[0].update(previous[1])
+        slot = None
+        if isinstance(target, OptionalSection):
+            slot = target.query_one(".section_header > Label", Label)
+            self._title_slot = (slot, LABELS.get(target.key, target.key.capitalize()))
+        elif isinstance(target, ValueEditor) and target.query(".add_row > .add_title"):
+            slot = target.query_one(".add_row > .add_title", Label)
+            self._title_slot = (slot, "")
+        else:
+            self._title_slot = None
+        heading = self.query_one("#sender_object_title", Label)
+        heading.display = slot is None
+        (slot or heading).update(Text(title))
+        if scroll:
+            self.query_one("#sender_request_body", VerticalScroll).scroll_home(animate=False)
 
     def collect_request(self):
         check_draft_ready(self)
@@ -212,15 +343,20 @@ class SenderRequestModal(ModalScreen):
                 event.select.value = self.operation
             self.notify(str(error), severity="error")
             return
-        with changing_draft(self):
-            self.operation = event.value
-            container = self.query_one("#sender_fields", Vertical)
-            await container.remove_children()
-            await container.mount(*self.build_fields())
+        # One repaint for the whole swap: no empty form, no unplaced sections.
+        with self.app.batch_update():
+            with changing_draft(self):
+                self.operation = event.value
+                container = self.query_one("#sender_fields", Vertical)
+                await container.remove_children()
+                await container.mount(*self.build_fields())
+            self.refresh_navigation()
 
     def on_button_pressed(self, event):
         event.stop()
-        if event.button.id == "sender_request_cancel":
+        if event.button.id == "sender_request_browse":
+            self.toggle_class("browse_request")
+        elif event.button.id == "sender_request_cancel":
             self.dismiss(None)
         elif event.button.id == "sender_request_save":
             try:
@@ -244,13 +380,13 @@ class SenderPane(Vertical):
     SenderPane #sender_request_search_group { width: 1fr; height: 3; }
     SenderPane.compact-toolbar #sender_request_toolbar { layout: vertical; height: 6; }
     SenderPane.compact-toolbar #sender_request_search_group { width: 100%; }
-    SenderPane #sender_device { width: 1fr; }
+    SenderPane #sender_device { width: 1fr; margin-right: 1; }
     SenderPane #sender_package { width: 2fr; }
-    SenderPane #sender_pid { width: 12; }
-    SenderPane #sender_app { width: 2fr; }
+    SenderPane #sender_run_search { margin-right: 1; }
+    SenderPane #sender_app { width: 2fr; margin-right: 1; }
     SenderPane #sender_state { height: auto; margin: 0 1 1 1; }
     SenderPane DataTable { height: 1fr; border: none; background: $background; }
-    SenderPane RichLog { height: 1fr; border: none; background: $background; }
+    SenderPane RichLog { height: 1fr; border: none; background: $background; padding: 0 1; }
     SenderPane .section_separator { height: 1; margin: 0; }
     """
 

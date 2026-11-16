@@ -83,6 +83,41 @@ class EditorTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertNotIn('extras', modal.collect_request()['intent'])
 
+    async def test_explorer_keeps_nested_draft_and_hides_unrelated_fields(self):
+        app = App()
+        async with app.run_test(size=(120, 40)) as pilot:
+            request = {'operation': 'sendBroadcast', 'intent': {'action': 'root', 'extras': {
+                'destination': {'type': 'Intent', 'value': {'action': 'child'}}}}}
+            modal = SenderRequestModal(Mock(), {'request': request, 'name': 'tree', 'id': 1, 'revision': 1})
+            app.push_screen(modal)
+            await pilot.pause()
+            extras = next(f for f in modal.fields if f.key == 'extras')
+            self.assertFalse(extras.display)
+            modal.focus_request_object(extras)
+            self.assertTrue(extras.display)
+            self.assertFalse(modal.query_one('#sender_field_action').display)
+            row = extras.editor.members[0]
+            row.query_one('.open_value', Button).press()
+            await pilot.pause()
+            self.assertIs(modal._object_target, row.editor)
+            # The open object shows none of the headings or buttons of the levels above it.
+            self.assertFalse(extras.query_one('.section_header').display)
+            self.assertFalse(extras.editor.query_one('.column_headings').display)
+            self.assertFalse(row.query_one('.entry_header').display)
+            self.assertTrue(row.query_one('.set_null').display)
+            self.assertFalse(modal.query_one('#sender_request_tree').auto_expand)
+            action = next(f for f in row.editor.members if f.key == 'action')
+            self.assertTrue(action.display)
+            action.query_one(Input).value = 'edited child'
+            modal.focus_request_object(None)
+            self.assertTrue(modal.query_one('#sender_field_action').display)
+            result = modal.collect_request()
+            self.assertEqual(result['intent']['action'], 'root')
+            self.assertEqual(result['intent']['extras']['destination']['value']['action'], 'edited child')
+            await pilot.resize_terminal(60, 24)
+            await pilot.pause()
+            self.assertTrue(modal.has_class('narrow_request'))
+
     async def test_create_categories_selector_and_clipdata_without_json(self):
         app = App()
         async with app.run_test(size=(100, 45)) as pilot:
