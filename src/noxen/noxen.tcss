@@ -1048,3 +1048,6 @@ SenderPane #sender_tabs .request_tab.-selected { border: round $accent; color: $
 SenderTabMenu OptionList > .option-list--option-highlighted { background: $accent 30%; color: $foreground; text-style: bold; }
 SenderPane #sender_new, SenderPane #sender_new:hover, SenderPane #sender_new:focus, SenderPane #sender_new.-active { border: none; }
 SenderPane #sender_new:hover, SenderPane #sender_new:focus { color: $accent; }
+
+/* Sender JSON editor: flat, like the read-only panes beside it. */
+SenderPane JsonArea, SenderPane JsonArea:focus { border: none; padding: 0; background: $background; scrollbar-size: 1 1; }

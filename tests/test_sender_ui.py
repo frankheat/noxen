@@ -224,8 +224,9 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.click("#sender_run_older")
                 await pilot.pause(0.6)
                 self.assertEqual(pane._run_id, min(runs))
-                shown = "\n".join(strip.text for strip in pane.query_one("#sender_request_detail").lines)
-                self.assertIn(f"As sent in run #{min(runs)}", shown)  # The request follows the run on screen.
+                # The request follows the run on screen, read only.
+                self.assertEqual(pane._editor_key, ("run", min(runs)))
+                self.assertTrue(pane.editor.area.read_only)
                 for button in ("#sender_send", "#sender_edit", "#sender_cancel_run"):
                     widget = pane.query_one(button)  # Border and one space each side: no lopsided padding.
                     self.assertEqual(widget.region.width, len(str(widget.label)) + 4)
@@ -233,6 +234,84 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.click("#sender_run_newer")
                 await pilot.pause(0.6)
                 self.assertIsNone(pane._run_id)  # Back on the latest run, which later sends keep following.
+
+    async def test_request_json_is_edited_in_place_with_completion_and_sent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
+            async with app.run_test(size=(130, 40)) as pilot:
+                sent = []
+                endpoint = SimpleNamespace(device_id="emulator", is_ready=lambda: True, close=lambda: None,
+                                           connect=lambda package: {"package": package, "pid": 1, "uid": 10001},
+                                           execute=lambda request, key: (sent.append(request), {
+                                               "state": "returned", "result": {"kind": "void"}})[1])
+                service = app.sender_service
+                await service.connect(endpoint, "test.app", service.token)
+                first = service.save_request("1", {"operation": "sendBroadcast", "intent": {"action": "test.PING"}})
+                service.save_request("2", {"operation": "query", "uri": "content://test/notes"})
+                app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
+                await pilot.pause(0.6)
+                pane = app.query_one(SenderPane)
+                area = pane.editor.area
+                self.assertEqual(area.text, '{\n    "operation": "sendBroadcast",\n    "intent": {\n'
+                                            '        "action": "test.PING"\n    }\n}')
+                self.assertTrue(pane.query_one("#sender_save").disabled)
+                self.assertTrue(area._highlights[1])  # Colours do not depend on a grammar package.
+
+                # A new line, two letters, Enter: the name completes, with the comma the line above lacked.
+                area.focus()
+                area.move_cursor((3, len('        "action": "test.PING"')))
+                await pilot.press("enter", "e", "x")
+                await pilot.pause(0.2)
+                self.assertTrue(area.popup.display)
+                await pilot.press("enter")
+                await pilot.pause(0.2)
+                await pilot.press("S", "t")
+                await pilot.pause(0.2)
+                await pilot.press("enter")
+                await pilot.pause(0.2)
+                await pilot.press("t", "o", "k")
+                await pilot.pause(0.2)
+                self.assertIn('        "action": "test.PING",\n        "extras": {\n'
+                              '            "tok": {"type": "String", "value": ""}\n        }', area.text)
+                self.assertFalse(pane.query_one("#sender_save").disabled)
+
+                # An opening brace closes itself on its own line; folding keeps the request intact.
+                area.move_cursor(area.document.end)
+                await pilot.press("{")
+                self.assertTrue(area.text.endswith("}{\n    \n}"))
+                await pilot.press("ctrl+z")
+                area.move_cursor((4, 0))
+                await pilot.press("f2")
+                await pilot.pause(0.2)
+                self.assertIn('"extras": {⋯₁}', area.text)
+
+                # Unsaved text survives a visit to another request, and Send sends what is on screen.
+                tabs = list(pane.query(RequestTab))
+                await pilot.click(tabs[1])
+                await pilot.pause(0.6)
+                self.assertIn('"query"', area.text)
+                await pilot.click(tabs[0])
+                await pilot.pause(0.6)
+                self.assertIn('"extras": {⋯₁}', area.text)
+                await pilot.click("#sender_send")
+                await pilot.pause(0.6)
+                self.assertEqual(sent[0]["intent"], {"action": "test.PING",
+                                                     "extras": {"tok": {"type": "String", "value": ""}}})
+                self.assertEqual(service.db.sender_request(first["id"])["revision"], 2)
+                self.assertFalse(pane.editor_dirty())
+
+                # Invalid text is not saved; the form editor still opens the saved request.
+                area.focus()
+                area.move_cursor(area.document.end)
+                await pilot.press("x", "ctrl+s")
+                await pilot.pause(0.2)
+                self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
+                self.assertEqual(service.db.sender_request(first["id"])["revision"], 2)
+                await pilot.press("backspace", "ctrl+s")
+                await pilot.pause(0.2)
+                await pilot.click("#sender_edit")
+                await pilot.pause(0.6)
+                self.assertIsInstance(app.screen, SenderRequestModal)
 
     async def test_history_and_monitor_selections_are_sent_to_sender(self):
         with tempfile.TemporaryDirectory() as directory:
