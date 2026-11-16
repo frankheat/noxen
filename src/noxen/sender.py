@@ -225,8 +225,12 @@ def empty_request(operation="sendBroadcast"):
     return {"operation": operation, "uri": "content://"}
 
 
-def render_sender_detail(record):
-    """Match noxen's section headings and aligned label/value details."""
+def render_sender_detail(record, current_revision=None):
+    """Match noxen's section headings and aligned label/value details.
+
+    With `current_revision`, a run is shown result first, beside its request:
+    the request sections return only when the run used another revision.
+    """
     from rich.text import Text
     from rich.pretty import Pretty
     from rich.console import Group
@@ -236,8 +240,6 @@ def render_sender_detail(record):
         instant = capture_datetime(value)
         return format_capture_time(instant, precise=True) if instant is not None else None
 
-    parts = []
-
     def section(title, rows):
         text = Text()
         text.append(f"[{title}]\n", style="bold")
@@ -246,36 +248,45 @@ def render_sender_detail(record):
             text.append(f"  {label:<{width}} : ", style="dim")
             text.append("None" if value is None else str(value), style="none")
             text.append("\n")
-        parts.append(text)
+        return text
 
     request = record["request"]
-    section("REQUEST", [("Name", record["name"]), ("Operation", request["operation"]),
-                         ("Revision", record["revision"])])
-    if "sender" in record:
-        identity = record["sender"]
-        section("SENDER", [("Package", identity["package"]), ("UID", identity["uid"]),
-                            ("PID", identity["pid"]), ("Device", record["device"]),
-                            ("Target SDK", identity.get("targetSdk")), ("System app", identity.get("systemApp")),
-                            ("Packages for UID", ", ".join(identity.get("packagesForUid", [])))])
-        rows = [("State", record["state"]), ("Error", record.get("error")),
-                ("Cancellation requested", record.get("cancellationRequested", False))]
-        activity_returned = request["operation"] == "startActivity" and record["state"] == "returned"
-        if activity_returned:
-            rows[0] = ("State", "Call returned · Activity launch unverified")
-        activity_context = record.get("activityContext", {})
-        if activity_context.get("state") == "background":
-            rows.append(("Sender at dispatch", "Background process · Android may block the launch"))
-        section("RESULT", rows)
-        if "result" in record and not activity_returned:
-            parts.append(Pretty(record["result"], expand_all=True, highlighter=lambda value: value))
-        section("TIMING", [("Created (host)", record["createdAt"]), ("Started (device)", device_time(record.get("startedAt"))),
-                            ("Finished (device)", device_time(record.get("finishedAt"))), ("Duration (ms)", record.get("durationMs"))])
-        if identity.get("permissions"):
-            section("SENDER PERMISSIONS", [("Granted" if p["granted"] else "Not granted", p["name"])
-                                           for p in identity["permissions"]])
-    parts.append(Text("[ARGUMENTS]", style="bold"))
-    parts.append(Pretty({k: v for k, v in request.items() if k != "operation"}, expand_all=True, highlighter=lambda value: value))
-    return Group(*parts)
+    described = [section("REQUEST", [("Name", record["name"]), ("Operation", request["operation"]),
+                                     ("Revision", record["revision"])])]
+    arguments = [Text("[ARGUMENTS]", style="bold"),
+                 Pretty({k: v for k, v in request.items() if k != "operation"}, expand_all=True, highlighter=lambda value: value)]
+    if "sender" not in record:
+        return Group(*described, *arguments)
+    identity = record["sender"]
+    rows = [("Run", f"#{record['id']}")] if current_revision is not None and "id" in record else []
+    rows += [("State", record["state"]), ("Error", record.get("error")),
+             ("Cancellation requested", record.get("cancellationRequested", False))]
+    activity_returned = request["operation"] == "startActivity" and record["state"] == "returned"
+    if activity_returned:
+        rows = [("State", "Call returned · Activity launch unverified") if row[0] == "State" else row for row in rows]
+    if current_revision is not None:
+        # Beside the request only what happened is listed.
+        rows = [row for row in rows if row[0] not in ("Error", "Cancellation requested") or row[1]]
+    if record.get("activityContext", {}).get("state") == "background":
+        rows.append(("Sender at dispatch", "Background process · Android may block the launch"))
+    outcome = [section("RESULT", rows)]
+    if "result" in record and not activity_returned:
+        outcome.append(Pretty(record["result"], expand_all=True, highlighter=lambda value: value))
+    outcome.append(section("TIMING", [("Created (host)", record["createdAt"]), ("Started (device)", device_time(record.get("startedAt"))),
+                                      ("Finished (device)", device_time(record.get("finishedAt"))), ("Duration (ms)", record.get("durationMs"))]))
+    sender = [section("SENDER", [("Package", identity["package"]), ("UID", identity["uid"]),
+                                 ("PID", identity["pid"]), ("Device", record["device"]),
+                                 ("Target SDK", identity.get("targetSdk")), ("System app", identity.get("systemApp")),
+                                 ("Packages for UID", ", ".join(identity.get("packagesForUid", [])))])]
+    if identity.get("permissions"):
+        sender.append(section("SENDER PERMISSIONS", [("Granted" if p["granted"] else "Not granted", p["name"])
+                                                     for p in identity["permissions"]]))
+    if current_revision is None:
+        return Group(*described, sender[0], *outcome, *sender[1:], *arguments)
+    if record["revision"] == current_revision:
+        return Group(*outcome, *sender)
+    note = Text(f"Sent as revision {record['revision']}; the request is now at revision {current_revision}.\n", style="dim")
+    return Group(*outcome, *sender, note, *described, *arguments)
 
 
 def compare_sender_runs(left, right):

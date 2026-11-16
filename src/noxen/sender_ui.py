@@ -7,111 +7,17 @@ from uuid import uuid4
 
 from rich.text import Text
 from textual import work
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, Label, RichLog, Rule, Select, TabbedContent, TabPane, TextArea, Tree, Collapsible
+from textual.widgets import Button, Input, Label, OptionList, RichLog, Rule, Select, Tree, Collapsible
+from textual.widgets.option_list import Option
 
-from noxen.modals import ModalButton, ColumnSelectModal
+from noxen.modals import ModalButton
 from noxen.monitor_ui import RecordingDialog
-from noxen.history_columns import normalize_column_widths
-from noxen.sender import OPERATIONS, INTENT_OPERATIONS, empty_request, render_sender_detail, compare_sender_runs
-from noxen.exporting import write_sender_export
-from noxen.sender_capture import prepare_intent_request
+from noxen.sender import OPERATIONS, INTENT_OPERATIONS, empty_request, render_sender_detail
 from noxen.sender_service import endpoint_for_app, sender_io
 from noxen.textual_compat import is_select_empty
 from noxen.sender_editor import MISSING, ScalarField, OptionalSection, object_fields, object_sections, ValueEditor, EntryRow, SCALARS, LABELS, changing_draft, check_draft_ready
-
-SENDER_COLUMNS = {
-    "sender_requests": [("name", "Name"), ("operation", "Operation"), ("revision", "Revision")],
-    "sender_runs": [("id", "ID"), ("name", "Request"), ("state", "State"), ("sender", "Sender"), ("createdAt", "Time")],
-}
-class SenderCompareModal(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Close")]
-    DEFAULT_CSS = """
-    SenderCompareModal { align: center middle; }
-    SenderCompareModal > Vertical { width: 90%; height: 85%; padding: 1 2; border: solid $foreground-muted; background: $surface; }
-    SenderCompareModal Label { margin-bottom: 1; }
-    SenderCompareModal Horizontal { height: 3; margin-bottom: 1; }
-    SenderCompareModal Input { width: 1fr; }
-    SenderCompareModal Button { width: auto; min-width: 10; margin-left: 1; }
-    SenderCompareModal TextArea { height: 1fr; border: none; }
-    """
-
-    def __init__(self, service, left_id):
-        super().__init__()
-        self.service, self.left_id = service, left_id
-
-    def compose(self):
-        with Vertical():
-            yield Label("Compare Sender runs")
-            with Horizontal():
-                yield Input(str(self.left_id), placeholder="First run ID", type="integer", id="sender_compare_left", select_on_focus=False)
-                yield Input(placeholder="Second run ID", type="integer", id="sender_compare_right", select_on_focus=False)
-                yield ModalButton("Compare", id="sender_compare_go")
-                yield ModalButton("Close", id="sender_compare_close")
-            yield TextArea("", id="sender_compare_text", read_only=True, soft_wrap=False)
-
-    def on_button_pressed(self, event):
-        event.stop()
-        if event.button.id == "sender_compare_close":
-            self.dismiss()
-        else:
-            try:
-                left = int(self.query_one("#sender_compare_left", Input).value)
-                right = int(self.query_one("#sender_compare_right", Input).value)
-            except ValueError:
-                self.notify("Enter two run IDs", severity="error")
-                return
-            self.compare(left, right)
-
-    @work(exclusive=True)
-    async def compare(self, left, right):
-        try:
-            result = await sender_io(lambda: compare_sender_runs(self.service.get_run(left), self.service.get_run(right)))
-            self.query_one("#sender_compare_text", TextArea).load_text(
-                (result["diff"] or "No differences in request, sender identity or result.") +
-                ("\n\nDiff truncated. Export both runs for the complete data." if result["truncated"] else ""))
-        except Exception as error:
-            self.notify(str(error), severity="error")
-
-
-class SenderCaptureModal(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel")]
-    DEFAULT_CSS = """
-    SenderCaptureModal { align: center middle; }
-    SenderCaptureModal > Vertical { width: 85%; max-width: 90; height: auto; padding: 1 2; border: solid $foreground-muted; background: $surface; }
-    SenderCaptureModal Label { margin-bottom: 1; }
-    SenderCaptureModal Select { margin-bottom: 1; }
-    SenderCaptureModal Horizontal { height: 3; align: right middle; }
-    SenderCaptureModal Button { width: auto; min-width: 10; margin-left: 1; }
-    """
-
-    def __init__(self, entries):
-        super().__init__()
-        self.entries = entries
-
-    def compose(self):
-        with Vertical():
-            yield Label("Prepare from captured Intent")
-            yield Select([(label, index) for index, (label, _) in enumerate(self.entries)], value=0, allow_blank=False, id="sender_capture_source")
-            yield Label("Sending operation")
-            yield Select([(operation, operation) for operation in INTENT_OPERATIONS], prompt="Choose operation", id="sender_capture_operation")
-            with Horizontal():
-                yield ModalButton("Cancel", id="sender_capture_cancel")
-                yield ModalButton("Prepare", id="sender_capture_prepare")
-
-    def on_button_pressed(self, event):
-        event.stop()
-        if event.button.id == "sender_capture_cancel":
-            self.dismiss(None)
-            return
-        try:
-            operation = self.query_one("#sender_capture_operation", Select).value
-            label, entry = self.entries[self.query_one("#sender_capture_source", Select).value]
-            request = prepare_intent_request(entry, operation)
-            self.dismiss({"id": None, "revision": 0, "name": label, "request": request})
-        except (ValueError, TypeError) as error:
-            self.notify(str(error), severity="error")
 
 
 class SenderRequestModal(ModalScreen):
@@ -185,7 +91,7 @@ class SenderRequestModal(ModalScreen):
 
     def compose(self):
         with Vertical():
-            yield Label("Edit request" if self.saved else "New request", classes="title")
+            yield Label("Edit request" if self.saved and self.saved["id"] else "New request", classes="title")
             with Horizontal(id="sender_workspace"):
                 tree = Tree("Request", id="sender_request_tree")
                 tree.auto_expand = False  # A click opens the object; it must not fold the explorer.
@@ -369,41 +275,86 @@ class SenderRequestModal(ModalScreen):
             self.dismiss(saved)
 
 
+class SenderTabMenu(ModalScreen):
+    """Context menu of a request tab, opened where the pointer is."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+    DEFAULT_CSS = """
+    SenderTabMenu { align: left top; background: transparent; }
+    SenderTabMenu OptionList { width: 15; height: auto; border: round $foreground-muted; background: $surface; }
+    """
+
+    def __init__(self, x, y):
+        super().__init__()
+        self.position = (x, y)
+
+    def compose(self):
+        yield OptionList(Option("Edit", id="edit"), Option("Duplicate", id="duplicate"), Option("Remove", id="remove"))
+
+    def on_mount(self):
+        menu = self.query_one(OptionList)
+        x, y = self.position
+        menu.styles.offset = (max(0, min(x, self.size.width - 15)), max(0, min(y, self.size.height - 5)))
+        menu.focus()
+
+    def on_option_list_option_selected(self, event):
+        event.stop()
+        self.dismiss(event.option.id)
+
+    def on_click(self, event):
+        if event.widget is self:
+            self.dismiss(None)
+
+
+class RequestTab(ModalButton):
+    """One saved request, labelled with its name."""
+
+    def __init__(self, row):
+        name = row["name"]
+        super().__init__(Text(name if len(name) <= 24 else name[:23] + "…"), classes="request_tab",
+                         tooltip=None if len(name) <= 24 else name)
+        self.request_id = row["id"]
+
+    def on_click(self, event):
+        if event.button == 3:
+            event.stop()
+            self.screen.query_one(SenderPane).open_tab_menu(self.request_id, event.screen_x, event.screen_y)
+
+
 class SenderPane(Vertical):
     DEFAULT_CSS = """
     SenderPane { height: 1fr; }
     SenderPane .sender_controls { height: 3; margin: 0 1; }
-    SenderPane .sender_controls Button { width: auto; min-width: 9; margin-right: 1; border: round $foreground-muted; background: transparent; }
-    SenderPane .sender_controls Input { width: 1fr; }
-    SenderPane #sender_request_toolbar { layout: horizontal; }
-    SenderPane #sender_request_actions { width: auto; height: 3; }
-    SenderPane #sender_request_search_group { width: 1fr; height: 3; }
-    SenderPane.compact-toolbar #sender_request_toolbar { layout: vertical; height: 6; }
-    SenderPane.compact-toolbar #sender_request_search_group { width: 100%; }
+    SenderPane Button { width: auto; min-width: 0; margin-right: 1; border: round $foreground-muted; background: transparent; }
     SenderPane #sender_device { width: 1fr; margin-right: 1; }
-    SenderPane #sender_package { width: 2fr; }
-    SenderPane #sender_run_search { margin-right: 1; }
     SenderPane #sender_app { width: 2fr; margin-right: 1; }
     SenderPane #sender_state { height: auto; margin: 0 1 1 1; }
-    SenderPane DataTable { height: 1fr; border: none; background: $background; }
-    SenderPane RichLog { height: 1fr; border: none; background: $background; padding: 0 1; }
+    SenderPane #sender_tabs { height: auto; max-height: 4; margin: 0 1; scrollbar-size-horizontal: 1; }
+    SenderPane #sender_new { height: 3; min-width: 5; border: none; }
+    SenderPane #sender_tabs .request_tab.-selected { border: round $accent; color: $accent; }
+    SenderPane #sender_split { height: 1fr; }
+    SenderPane .sender_side { width: 1fr; height: 1fr; margin: 0 1; }
+    SenderPane #sender_result_side { border-left: solid $foreground-muted; padding-left: 1; }
+    SenderPane.stacked #sender_result_side { border-left: none; padding-left: 0; }
+    SenderPane .side_header { height: 3; }
+    SenderPane .side_header > Label { width: 1fr; height: 3; margin-left: 1; content-align: left middle; text-style: bold; }
+    SenderPane RichLog { height: 1fr; border: none; background: $background; }
     SenderPane .section_separator { height: 1; margin: 0; }
+    SenderPane.stacked #sender_split { layout: vertical; }
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._requests = []
-        self._runs = []
+        self._selected_id = None
         self._signature = None
+        self._tab_signature = None
         self._devices = None
         self.applications = {}
         self._application_generation = 0
-        self.run_depth = 200
-        self.visible_columns = {table: {key for key, _ in columns} for table, columns in SENDER_COLUMNS.items()}
-        self.widths = {table: {} for table in SENDER_COLUMNS}
-        self.column_revision = 0
-        self.sorts = {"sender_requests": ("name", False), "sender_runs": ("id", True)}
         self._checking_activity_send = False
+        self._run_ids = []      # Runs of the selected request, newest first.
+        self._run_id = None     # None follows the latest run.
 
     @property
     def service(self):
@@ -417,67 +368,45 @@ class SenderPane(Vertical):
             yield ModalButton("Connect", id="sender_connect")
             yield ModalButton("Disconnect", id="sender_disconnect")
         yield Label("Disconnected", id="sender_state", markup=False)
-        with TabbedContent(initial="sender_requests_view", classes="subtabs", id="sender_views"):
-            with TabPane("Requests", id="sender_requests_view"):
-                with Vertical(id="sender_request_toolbar", classes="sender_controls"):
-                    with Horizontal(id="sender_request_actions"):
-                        yield ModalButton("+ New", id="sender_new")
-                        yield ModalButton("From capture", id="sender_from_capture")
-                        yield ModalButton("Edit", id="sender_edit")
-                        yield ModalButton("Duplicate", id="sender_duplicate")
-                        yield ModalButton("Remove", id="sender_remove")
-                        yield ModalButton("Send", id="sender_send")
-                    with Horizontal(id="sender_request_search_group"):
-                        yield Input(placeholder="Search requests", id="sender_search", select_on_focus=False)
-                        yield ModalButton("⊟", id="sender_request_columns", classes="sender_columns_button")
-                yield Rule(classes="section_separator")
-                yield DataTable(id="sender_requests", cursor_type="row")
-                yield Rule(classes="section_separator")
-                yield RichLog(id="sender_request_detail", markup=False, highlight=False, auto_scroll=False)
-                yield Rule(classes="section_separator")
-            with TabPane("Runs", id="sender_runs_view"):
-                with Horizontal(classes="sender_controls"):
-                    yield Input(placeholder="Search runs", id="sender_run_search", select_on_focus=False)
-                    yield ModalButton("Compare", id="sender_compare")
-                    yield ModalButton("Export", id="sender_export")
-                    yield ModalButton("Cancel", id="sender_cancel_run")
-                    yield ModalButton("Retry save", id="sender_retry_save")
-                    yield ModalButton("⊟", id="sender_run_columns", classes="sender_columns_button")
-                yield Rule(classes="section_separator")
-                yield DataTable(id="sender_runs", cursor_type="row")
-                yield Rule(classes="section_separator")
-                yield RichLog(id="sender_run_detail", markup=False, highlight=False, auto_scroll=False)
-                yield Rule(classes="section_separator")
+        with HorizontalScroll(id="sender_tabs"):
+            yield ModalButton("+", id="sender_new")
+        yield Rule(classes="section_separator")
+        with Horizontal(id="sender_split"):
+            with Vertical(classes="sender_side", id="sender_request_side"):
+                with Horizontal(classes="side_header"):
+                    yield ModalButton("Send", id="sender_send")
+                    yield ModalButton("Cancel", id="sender_cancel_run", tooltip="Ask a running query or file read to stop")
+                    yield ModalButton("Edit", id="sender_edit")
+                yield RichLog(id="sender_request_detail", markup=False, highlight=False, auto_scroll=False, wrap=True)
+            with Vertical(classes="sender_side", id="sender_result_side"):
+                with Horizontal(classes="side_header"):
+                    yield ModalButton("‹", id="sender_run_older")
+                    yield ModalButton("›", id="sender_run_newer")
+                    yield Label("Result", id="sender_result_title", markup=False)
+                yield RichLog(id="sender_run_detail", markup=False, highlight=False, auto_scroll=False, wrap=True)
+        yield Rule(classes="section_separator")
 
     def on_resize(self):
-        self.set_class(self.size.width < 90, "compact-toolbar")
+        self.set_class(self.size.width < 100, "stacked")
 
     def on_mount(self):
-        try:
-            saved = json.loads(self.service.db.get_info("sender_columns", "{}"))
-        except (ValueError, TypeError):
-            saved = {}
-        if isinstance(saved, dict):
-            for table, columns in SENDER_COLUMNS.items():
-                prefs = saved.get(table, {})
-                if not isinstance(prefs, dict):
-                    continue
-                known = {key for key, _ in columns}
-                if isinstance(prefs.get("visible"), list):
-                    self.visible_columns[table] = {k for k in prefs["visible"] if isinstance(k, str) and k in known} or known
-                self.widths[table] = normalize_column_widths(prefs.get("widths"), known)
-        for table_id in SENDER_COLUMNS:
-            self.set_table_columns(table_id)
         self.set_interval(0.3, self.refresh_sender)
         self.refresh_sender()
 
-    def selected(self, table_id):
-        table = self.query_one(f"#{table_id}", DataTable)
-        if not table.row_count:
-            return None
-        key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
-        items = self._requests if table_id == "sender_requests" else self._runs
-        return next((row for row in items if str(row["id"]) == key), None)
+    def selected(self):
+        return next((row for row in self._requests if row["id"] == self._selected_id), None)
+
+    def select_request(self, request_id):
+        if request_id != self._selected_id:
+            self._run_id = None
+        self._selected_id = request_id
+        for tab in self.query(RequestTab):
+            tab.set_class(tab.request_id == request_id, "-selected")
+        self.refresh_sender()
+
+    def focus_default(self):
+        tab = next((t for t in self.query(RequestTab) if t.request_id == self._selected_id), None)
+        (tab or self.query_one("#sender_new", Button)).focus()
 
     def refresh_sender(self):
         devices = [(d.name, d.id) for d in self.app._home_devices]
@@ -485,23 +414,22 @@ class SenderPane(Vertical):
             self.query_one("#sender_device", Select).set_options(devices)
             self._devices = devices
         status = self.service.status()
-        who = status["identity"]
         label = status["state"].capitalize()
-        if who:
-            label += f" · {who['package']} · UID {who['uid']} · PID {who['pid']}"
         if status["active_run"]:
             label += f" · Run #{status['active_run']} pending"
         if status["error"]:
             label += f" · {status['error']}"
         self.query_one("#sender_state", Label).update(Text(label))
+        row = self.selected()
         self.query_one("#sender_send", Button).disabled = (
             self._checking_activity_send or status["state"] != "ready" or status["active_run"] is not None
+            or row is None
         )
-        run_table = self.query_one("#sender_runs", DataTable)
-        if run_table.row_count >= self.run_depth and run_table.scroll_y > 0 and run_table.scroll_y >= run_table.max_scroll_y - 3:
-            self.run_depth += 200
-        signature = (self.service.version, self.query_one("#sender_search", Input).value,
-                     self.query_one("#sender_run_search", Input).value, dict(self.sorts), self.run_depth, self.column_revision)
+        self.query_one("#sender_edit", Button).disabled = row is None
+        self.query_one("#sender_cancel_run", Button).disabled = not (
+            row is not None and status["active_run"] is not None and status["active_run"] in self._run_ids[:1]
+            and row["request"]["operation"] in ("query", "openFileDescriptor"))
+        signature = (self.service.version, self._selected_id, self._run_id)
         if signature == self._signature:
             return
         self._signature = signature
@@ -510,100 +438,68 @@ class SenderPane(Vertical):
     @work(exclusive=True, group="sender_rows")
     async def load_rows(self, signature):
         try:
-            requests = await sender_io(self.service.db.sender_requests)
-            runs = await sender_io(self.service.db.sender_run_summaries, signature[2], signature[4], signature[3]["sender_runs"])
+            requests = sorted(await sender_io(self.service.db.sender_requests), key=lambda row: row["number"])
+            if not any(row["id"] == self._selected_id for row in requests):
+                self._selected_id = requests[0]["id"] if requests else None
+            run_ids = [] if self._selected_id is None else await sender_io(
+                self.service.db.sender_run_ids, self._selected_id)
+            run_id = self._run_id if self._run_id in run_ids else run_ids[0] if run_ids else None
+            run = None if run_id is None else await sender_io(self.service.get_run, run_id)
         except Exception as error:
             if self.is_mounted:
                 self.notify(f"Could not read Sender records: {error}", severity="error")
             return
         if self._signature != signature:
             return
-        for row in runs:
-            if row["id"] in self.service.unsaved:
-                row["state"] = self.service.unsaved[row["id"]]["state"]
-        for table_id, rows, search in (("sender_requests", requests, signature[1]), ("sender_runs", runs, signature[2])):
-            selected = self.selected(table_id)
-            table = self.query_one(f"#{table_id}", DataTable)
-            scroll = table.scroll_offset
-            if table_id == "sender_requests":
-                rows = [r for r in rows if search.casefold() in json.dumps(r, ensure_ascii=False).casefold()]
-            key, reverse = self.sorts[table_id]
-            rows.sort(key=lambda r: (r.get("request", {}).get(key, "") if key == "operation" else
-                                    r.get("sender", {}).get("package", "") if key == "sender" else r.get(key, "")), reverse=reverse)
-            table.clear(columns=True)
-            self.set_table_columns(table_id)
-            if table_id == "sender_requests":
-                self._requests = rows
-                for row in rows:
-                    cells = {"name": Text(row["name"]), "operation": row["request"]["operation"], "revision": str(row["revision"])}
-                    table.add_row(*(cells[k] for k, _ in SENDER_COLUMNS[table_id] if k in self.visible_columns[table_id]), key=row["id"])
+        self._requests, self._run_ids = requests, run_ids
+        if self._run_id not in run_ids:
+            self._run_id = None
+        position = run_ids.index(run_id) if run_ids else 0
+        self.query_one("#sender_run_older", Button).disabled = position >= len(run_ids) - 1
+        self.query_one("#sender_run_newer", Button).disabled = position == 0
+        self.query_one("#sender_result_title", Label).update(
+            Text(f"Result · run {len(run_ids) - position} of {len(run_ids)}" if run_ids else "Result"))
+        await self.show_tabs()
+        row = self.selected()
+        request_log = self.query_one("#sender_request_detail", RichLog)
+        result_log = self.query_one("#sender_run_detail", RichLog)
+        request_log.clear()
+        result_log.clear()
+        if row is None:
+            request_log.write(Text("No requests yet. Press + to create one.", style="dim"))
+        else:
+            if run is None:
+                request_log.write(render_sender_detail(row))
+                result_log.write(Text("Not sent yet.", style="dim"))
+            elif self._run_id is None:
+                request_log.write(render_sender_detail(row))
+                result_log.write(render_sender_detail(run, current_revision=row["revision"]))
             else:
-                self._runs = rows
-                for row in rows:
-                    cells = {"id": str(row["id"]), "name": Text(row["name"]), "state": row["state"],
-                             "sender": Text(row["sender"]["package"]), "createdAt": row["createdAt"]}
-                    table.add_row(*(cells[k] for k, _ in SENDER_COLUMNS[table_id] if k in self.visible_columns[table_id]), key=str(row["id"]))
-            if selected:
-                index = next((i for i, row in enumerate(rows) if row["id"] == selected["id"]), 0)
-                table.move_cursor(row=index)
-            table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
-            self.show_detail(table_id)
+                # An earlier run is shown with the request exactly as it was sent.
+                note = f"As sent in run #{run['id']}"
+                if run["revision"] != row["revision"]:
+                    note += f" · the request is now at revision {row['revision']}"
+                request_log.write(Text(note + "\n", style="dim"))
+                request_log.write(render_sender_detail(
+                    {"name": run["name"], "revision": run["revision"], "request": run["request"]}))
+                result_log.write(render_sender_detail(run, current_revision=run["revision"]))
+        # A stale signature means the selection moved while this ran; read again.
+        if (self.service.version, self._selected_id, self._run_id) != signature:
+            self.refresh_sender()
 
-    def set_table_columns(self, table_id):
-        table = self.query_one(f"#{table_id}", DataTable)
-        sort, reverse = self.sorts[table_id]
-        for key, title in SENDER_COLUMNS[table_id]:
-            if key in self.visible_columns[table_id]:
-                label = title + (" ↓" if reverse else " ↑") if key == sort else title
-                table.add_column(label, key=key, width=self.widths[table_id].get(key))
-
-    def change_columns(self, table_id, visible=None, widths=None):
-        preferences = {table: {"visible": sorted(self.visible_columns[table]), "widths": dict(self.widths[table])} for table in SENDER_COLUMNS}
-        if visible is not None:
-            preferences[table_id]["visible"] = sorted(visible)
-        if widths is not None:
-            preferences[table_id]["widths"] = widths
-        try:
-            self.service.db.set_info("sender_columns", json.dumps(preferences))
-        except (OSError, sqlite3.Error) as error:
-            self.notify(f"Could not save column preferences: {error}", severity="error")
-            return
-        self.visible_columns[table_id] = set(preferences[table_id]["visible"])
-        self.widths[table_id] = preferences[table_id]["widths"]
-        self.column_revision += 1
-        self.refresh_sender()
-
-    def show_detail(self, table_id):
-        row = self.selected(table_id)
-        detail = self.query_one("#sender_request_detail" if table_id == "sender_requests" else "#sender_run_detail", RichLog)
-        detail.clear()
-        if row:
-            if table_id == "sender_requests":
-                detail.write(render_sender_detail(row))
-            else:
-                self.show_run_detail(row["id"])
-
-    @work(exclusive=True, group="sender_detail")
-    async def show_run_detail(self, run_id):
-        try:
-            row = await sender_io(self.service.get_run, run_id)
-        except Exception as error:
-            self.notify(str(error), severity="error")
-            return
-        selected = self.selected("sender_runs")
-        if selected is not None and selected["id"] == run_id:
-            self.query_one("#sender_run_detail", RichLog).write(render_sender_detail(row))
-
-    def on_data_table_row_highlighted(self, event):
-        event.stop()
-        self.show_detail(event.data_table.id)
-
-    def on_data_table_header_selected(self, event):
-        event.stop()
-        table_id, key = event.data_table.id, event.column_key.value
-        previous, reverse = self.sorts[table_id]
-        self.sorts[table_id] = (key, not reverse if previous == key else False)
-        self.refresh_sender()
+    async def show_tabs(self):
+        tabs = self.query_one("#sender_tabs", HorizontalScroll)
+        signature = tuple((row["id"], row["name"]) for row in self._requests)
+        if signature != self._tab_signature:
+            self._tab_signature = signature
+            with self.app.batch_update():
+                await tabs.remove_children(RequestTab)
+                if self._requests:
+                    await tabs.mount(*(RequestTab(row) for row in self._requests), before="#sender_new")
+        for tab in tabs.query(RequestTab):
+            tab.set_class(tab.request_id == self._selected_id, "-selected")
+            if tab.request_id == self._selected_id:
+                tab.scroll_visible(animate=False)
 
     def on_select_changed(self, event):
         event.stop()
@@ -614,21 +510,13 @@ class SenderPane(Vertical):
             if not is_select_empty(event.value):
                 self.load_applications(event.value, self._application_generation)
 
-    def active_table(self):
-        return "sender_runs" if self.query_one("#sender_views", TabbedContent).active == "sender_runs_view" else "sender_requests"
-
-    def on_tabbed_content_tab_activated(self, event):
-        if event.tabbed_content.id == "sender_views":
-            event.stop()
-            self.app.refresh_bindings()
-            if self.app._active_tab == "tab_sender":
-                self.query_one(f"#{self.active_table()}", DataTable).focus()
-
     def adjust_detail(self, delta):
-        table = self.query_one(f"#{self.active_table()}", DataTable)
-        detail = self.query_one("#sender_run_detail" if table.id == "sender_runs" else "#sender_request_detail", RichLog)
-        available = table.size.height + detail.size.height
-        table.styles.height = max(3, min(available - 3, table.size.height - delta))
+        """Alt+Left / Alt+Right move the divider between request and result."""
+        left = self.query_one("#sender_request_side")
+        total = self.query_one("#sender_split").size.width
+        if self.has_class("stacked") or total < 60:
+            return
+        left.styles.width = max(24, min(total - 28, left.size.width + delta * 4))
 
     @work(group="sender_apps")
     async def load_applications(self, device_id, generation):
@@ -659,7 +547,18 @@ class SenderPane(Vertical):
             self.notify(str(error), severity="error")
         self.refresh_sender()
 
+    def next_name(self):
+        """New requests are named with the next free number; the name is the tab label."""
+        return str(max([int(row["name"]) for row in self._requests if row["name"].isdecimal()], default=0) + 1)
+
+    def browse_runs(self, step):
+        if self._run_ids:
+            current = self._run_ids.index(self._run_id) if self._run_id in self._run_ids else 0
+            target = max(0, min(len(self._run_ids) - 1, current + step))
+            self._run_id = None if target == 0 else self._run_ids[target]
+
     def dispatch_request(self, row, token):
+        self._run_id = None  # Show the run that is about to start.
         run = self.service.execute(row["id"], row["revision"], token, uuid4().hex)
         self.notify(f"Sender run #{run['id']} started")
 
@@ -684,11 +583,39 @@ class SenderPane(Vertical):
             if self.is_mounted:
                 self.refresh_sender()
 
+    def edit_request(self, draft):
+        def saved(result):
+            if result:
+                self.select_request(result["id"])
+            self.refresh_sender()
+        self.app.push_screen(SenderRequestModal(self.service, draft), saved)
+
+    def open_tab_menu(self, request_id, x, y):
+        self.select_request(request_id)
+        def chosen(action):
+            row = self.service.db.sender_request(request_id) if action else None
+            if row is None:
+                return
+            try:
+                if action == "edit":
+                    self.edit_request(row)
+                elif action == "duplicate":
+                    name = self.next_name() if row["name"].isdecimal() else (row["name"] + " copy")[:200]
+                    self.select_request(self.service.save_request(name, row["request"])["id"])
+                elif action == "remove":
+                    self.service.remove_request(row["id"], row["revision"])
+                self.refresh_sender()
+            except Exception as error:
+                self.notify(str(error), severity="error")
+        self.app.push_screen(SenderTabMenu(x, y), chosen)
+
     async def on_button_pressed(self, event):
         event.stop()
         button = event.button.id
         try:
-            if button == "sender_connect":
+            if isinstance(event.button, RequestTab):
+                self.select_request(event.button.request_id)
+            elif button == "sender_connect":
                 device = self.query_one("#sender_device", Select).value
                 if is_select_empty(device):
                     raise ValueError("Select a device")
@@ -703,59 +630,26 @@ class SenderPane(Vertical):
                     self.load_applications(device, self._application_generation)
             elif button == "sender_disconnect":
                 await self.service.disconnect(self.service.token)
-            elif button == "sender_cancel_run":
-                run = self.selected("sender_runs")
-                if run:
-                    await self.service.cancel(run["id"], self.service.token)
-            elif button in ("sender_export", "sender_compare"):
-                run = self.selected("sender_runs")
-                if run:
-                    if button == "sender_compare":
-                        self.app.push_screen(SenderCompareModal(self.service, run["id"]))
-                    else:
-                        result = await sender_io(lambda: write_sender_export(self.service.get_run(run["id"])))
-                        self.notify(f"Exported {result.filename}")
-            elif button == "sender_retry_save":
-                self.service.retry_save()
-            elif button in ("sender_request_columns", "sender_run_columns"):
-                table = "sender_requests" if button == "sender_request_columns" else "sender_runs"
-                self.app.push_screen(ColumnSelectModal(self.visible_columns[table],
-                    lambda visible: self.change_columns(table, visible=visible), SENDER_COLUMNS[table], self.widths[table],
-                    lambda widths: self.change_columns(table, widths=widths),
-                    resizable_keys={key for key, _ in SENDER_COLUMNS[table]}, select_width_on_focus=False))
             elif button == "sender_new":
-                self.app.push_screen(SenderRequestModal(self.service), lambda _: self.refresh_sender())
-            elif button == "sender_from_capture":
-                import copy
-                entries = []
-                for label, entry in (("History", self.app._history_selected_entry),
-                                     ("Intercept", self.app._current_intercepted_entry)):
-                    if entry:
-                        entries.append((f"{label} #{entry.get('id', '')}", copy.deepcopy(entry)))
-                if not entries:
-                    raise ValueError("Select an Intent in History or hold one in Intercept first")
-                def prepared(draft):
-                    if draft:
-                        self.app.push_screen(SenderRequestModal(self.service, draft), lambda _: self.refresh_sender())
-                self.app.push_screen(SenderCaptureModal(entries), prepared)
-            else:
-                row = self.selected("sender_requests")
-                if row is None:
+                self.edit_request({"id": None, "revision": 0, "name": self.next_name(), "request": empty_request()})
+            elif button == "sender_edit":
+                if self.selected() is not None:
+                    self.edit_request(self.selected())
+            elif button == "sender_cancel_run":
+                status = self.service.status()
+                if status["active_run"] is not None:
+                    await self.service.cancel(status["active_run"], self.service.token)
+            elif button in ("sender_run_older", "sender_run_newer"):
+                self.browse_runs(1 if button == "sender_run_older" else -1)
+            elif button == "sender_send":
+                row = self.selected()
+                if row is None or self._checking_activity_send:
                     return
-                if button == "sender_edit":
-                    self.app.push_screen(SenderRequestModal(self.service, row), lambda _: self.refresh_sender())
-                elif button == "sender_duplicate":
-                    self.service.save_request(row["name"] + " copy", row["request"])
-                elif button == "sender_remove":
-                    self.service.remove_request(row["id"], row["revision"])
-                elif button == "sender_send":
-                    if self._checking_activity_send:
-                        return
-                    if row["request"]["operation"] == "startActivity":
-                        self._checking_activity_send = True
-                        self.send_activity(row, self.service.token)
-                    else:
-                        self.dispatch_request(row, self.service.token)
+                if row["request"]["operation"] == "startActivity":
+                    self._checking_activity_send = True
+                    self.send_activity(row, self.service.token)
+                else:
+                    self.dispatch_request(row, self.service.token)
             self.refresh_sender()
         except Exception as error:
             self.notify(str(error), severity="error")

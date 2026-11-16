@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from textual.widgets import TabbedContent, Input, Select, TextArea, DataTable, Label
 
 from noxen.app import NoxenApp
-from noxen.sender_ui import SenderPane, SenderRequestModal
+from noxen.sender_ui import RequestTab, SenderPane, SenderRequestModal, SenderTabMenu
 from noxen.mcp_service import OperationError
 from noxen.monitor_ui import RecordingDialog
 from tests.ui_test_case import IsolatedAppTestCase
@@ -28,7 +28,7 @@ class SenderUITests(IsolatedAppTestCase):
                 service.save_request("Open Activity", {"operation": "startActivity", "intent": {"flags": 0x10000000}})
                 app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
                 app.query_one(SenderPane).refresh_sender()
-                await pilot.pause()
+                await pilot.pause(0.5)  # The selected request is read in a worker before Send is enabled.
                 await pilot.click("#sender_send")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, RecordingDialog)
@@ -162,7 +162,11 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertNotIn("component", rows[0]["request"]["intent"])
                 app.mcp_service.enabled = True
                 app.mcp_service.allow_control = True
-                await pilot.click("#sender_edit")
+                await pilot.pause(0.5)
+                await pilot.click(app.query_one(RequestTab), button=3)
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SenderTabMenu)
+                await pilot.press("enter")  # Edit is the first entry of the tab menu.
                 await pilot.pause()
                 await app.mcp_service.invoke("save_sender_request", name="MCP change", request=rows[0]["request"],
                     request_id=rows[0]["id"], revision=1, expected_connection=app.mcp_service.connection_token())
@@ -172,6 +176,60 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual(app.db.sender_requests()[0]["name"], "MCP change")
                 await pilot.click("#sender_request_cancel")
                 self.assertEqual(app.query_one("#main_tabs", TabbedContent).active, "tab_sender")
+
+    async def test_new_requests_are_numbered_and_their_runs_can_be_browsed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
+            async with app.run_test(size=(130, 40)) as pilot:
+                sent = []
+                def execute(request, key):
+                    sent.append(key)
+                    return {"state": "returned", "result": {"kind": "int", "value": len(sent)}}
+                endpoint = SimpleNamespace(device_id="emulator", is_ready=lambda: True, close=lambda: None,
+                                           connect=lambda package: {"package": package, "pid": 1, "uid": 10001},
+                                           execute=execute)
+                service = app.sender_service
+                await service.connect(endpoint, "test.app", service.token)
+                app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
+                await pilot.pause()
+                pane = app.query_one(SenderPane)
+                for expected in ("1", "2"):
+                    await pilot.click("#sender_new")
+                    await pilot.pause()
+                    self.assertEqual(app.screen.query_one("#sender_request_name", Input).value, expected)
+                    await pilot.click("#sender_request_save")
+                    await pilot.pause(0.5)
+                self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "2"])
+                self.assertEqual(pane.selected()["name"], "2")
+                # The name is the tab label: renaming the request renames its tab.
+                await pilot.click("#sender_edit")
+                await pilot.pause()
+                app.screen.query_one("#sender_request_name", Input).value = "login"
+                await pilot.click("#sender_request_save")
+                await pilot.pause(0.5)
+                self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "login"])
+                self.assertEqual(pane.next_name(), "2")
+
+                title = pane.query_one("#sender_result_title", Label)
+                self.assertTrue(pane.query_one("#sender_cancel_run").disabled)
+                for _ in range(2):
+                    await pilot.click("#sender_send")
+                    await pilot.pause(0.6)
+                runs = [run["id"] for run in service.db.sender_runs()]
+                self.assertEqual(str(title.renderable if hasattr(title, "renderable") else title.content), "Result · run 2 of 2")
+                self.assertTrue(pane.query_one("#sender_run_newer").disabled)
+                await pilot.click("#sender_run_older")
+                await pilot.pause(0.6)
+                self.assertEqual(pane._run_id, min(runs))
+                shown = "\n".join(strip.text for strip in pane.query_one("#sender_request_detail").lines)
+                self.assertIn(f"As sent in run #{min(runs)}", shown)  # The request follows the run on screen.
+                for button in ("#sender_send", "#sender_edit", "#sender_cancel_run"):
+                    widget = pane.query_one(button)  # Border and one space each side: no lopsided padding.
+                    self.assertEqual(widget.region.width, len(str(widget.label)) + 4)
+                self.assertTrue(pane.query_one("#sender_run_older").disabled)
+                await pilot.click("#sender_run_newer")
+                await pilot.pause(0.6)
+                self.assertIsNone(pane._run_id)  # Back on the latest run, which later sends keep following.
 
     async def test_provider_editor_switches_arguments_and_keeps_operation_fields_separate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -200,18 +258,42 @@ class SenderUITests(IsolatedAppTestCase):
                     app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
                     await pilot.pause()
                     pane = app.query_one(SenderPane)
-                    for identifier in ("sender_connect", "sender_disconnect", "sender_send", "sender_search"):
+                    for identifier in ("sender_connect", "sender_disconnect", "sender_send", "sender_new"):
                         self.assertLessEqual(pane.query_one(f"#{identifier}").region.right, pane.region.right)
-                    app.sender_service.save_request("B", {"operation": "sendBroadcast", "intent": {}})
+                    first = app.sender_service.save_request("B", {"operation": "sendBroadcast", "intent": {}})
                     app.sender_service.save_request("A", {"operation": "sendBroadcast", "intent": {}})
                     pane.refresh_sender()
+                    await pilot.pause(0.5)
+                    # Tabs follow creation order and are labelled with the request names.
+                    self.assertEqual([row["name"] for row in pane._requests], ["B", "A"])
+                    tabs = list(pane.query(RequestTab))
+                    self.assertEqual([str(tab.label) for tab in tabs], ["B", "A"])
+                    self.assertEqual(pane.next_name(), "1")
+                    self.assertEqual(pane.selected()["name"], "B")
+                    await pilot.click(tabs[1])
+                    await pilot.pause(0.5)
+                    self.assertEqual(pane.selected()["name"], "A")
+                    self.assertTrue(tabs[1].has_class("-selected"))
+                    # Request and result share the row below the tabs.
+                    request, result = pane.query_one("#sender_request_detail"), pane.query_one("#sender_run_detail")
+                    self.assertEqual(request.region.y, result.region.y)
+                    self.assertLess(request.region.right, result.region.x)
+                    await pilot.click(tabs[0], button=3)
                     await pilot.pause()
-                    self.assertEqual([row["name"] for row in pane._requests], ["A", "B"])
-                    app.query_one("#sender_search", Input).value = "B"
-                    pane.refresh_sender()
-                    await pilot.pause()
+                    await pilot.press("down", "down", "enter")  # Remove
+                    await pilot.pause(0.5)
+                    self.assertEqual([row["id"] for row in app.db.sender_requests()], [pane.selected()["id"]])
+                    self.assertNotEqual(pane.selected()["id"], first["id"])
+                    self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["A"])
                     self.assertEqual(app.query_one("#main_tabs", TabbedContent).active, "tab_sender")
-                    app.query_one("#sender_views", TabbedContent).active = "sender_runs_view"
-                    await pilot.pause()
                     self.assertEqual(app._active_tab, "tab_sender")
-                    self.assertTrue(app.check_action("resize_panel_up", ()))
+                    # The divider between request and result moves sideways.
+                    self.assertFalse(app.check_action("resize_panel_up", ()))
+                    side = pane.query_one("#sender_request_side")
+                    width = side.region.width
+                    await pilot.press("alt+right")
+                    await pilot.pause()
+                    self.assertGreater(side.region.width, width)
+                    await pilot.press("alt+left", "alt+left")
+                    await pilot.pause()
+                    self.assertLess(side.region.width, width)

@@ -344,9 +344,17 @@ class ProjectDB:
 
     def sender_requests(self):
         with self._lock:
-            return [dict(id=row[0], revision=row[1], name=row[2], request=json.loads(row[3]))
+            # `number` is the creation sequence that orders the Sender request tabs; edits keep it.
+            return [dict(id=row[0], revision=row[1], name=row[2], request=json.loads(row[3]), number=row[4])
                     for row in self._require_connection().execute(
-                        "SELECT id, revision, name, payload FROM sender_requests ORDER BY name, id")]
+                        "SELECT id, revision, name, payload, rowid FROM sender_requests ORDER BY name, id")]
+
+    def sender_run_ids(self, request_id, limit=1000):
+        """Runs of one request, newest first."""
+        with self._lock:
+            return [row[0] for row in self._require_connection().execute(
+                "SELECT id FROM sender_runs WHERE json_extract(payload, '$.request_id')=? ORDER BY id DESC LIMIT ?",
+                (request_id, limit))]
 
     def sender_request(self, request_id):
         with self._lock:

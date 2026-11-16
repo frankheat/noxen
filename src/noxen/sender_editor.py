@@ -100,7 +100,7 @@ class SenderTextModal(ModalScreen):
     SenderTextModal TextArea { height: 1fr; min-height: 3; }
     SenderTextModal .text_hint { width: 1fr; height: auto; color: $foreground-muted; }
     SenderTextModal .buttons { height: 3; align: right middle; margin-top: 1; }
-    SenderTextModal Button { width: auto; min-width: 10; margin-left: 1; }
+    SenderTextModal Button { width: auto; min-width: 0; margin-left: 1; }
     """
 
     def __init__(self, title, value, *, nullable=False, optional=False):
@@ -248,7 +248,7 @@ class ValueEditor(Vertical):
     ValueEditor .entries { height: auto; }
     ValueEditor .add_row { height: 3; align: right middle; }
     ValueEditor .add_row > .add_title { width: 1fr; height: 3; content-align: left middle; text-style: bold; }
-    ValueEditor Button { width: auto; min-width: 8; }
+    ValueEditor Button { width: auto; min-width: 0; }
     ValueEditor .entry { height: auto; margin-bottom: 1; }
     ValueEditor .entry_header { height: 3; align: left middle; }
     ValueEditor .entry_header > ScalarField { width: 2fr; }
@@ -454,7 +454,7 @@ class OptionalSection(Vertical):
     OptionalSection { height: auto; border-top: solid $foreground-muted; margin-top: 1; }
     OptionalSection > .section_header { height: 3; align: left middle; }
     OptionalSection > .section_header > Label { width: 1fr; height: 3; content-align: left middle; text-style: bold; }
-    OptionalSection > .section_header > Button { width: auto; min-width: 10; margin-left: 1; }
+    OptionalSection > .section_header > Button { width: auto; min-width: 0; margin-left: 1; }
     OptionalSection > .section_body { height: auto; }
     OptionalSection Collapsible { background: transparent; padding: 0; border: none; }
     """

@@ -324,6 +324,8 @@ class NoxenApp(App):
         Binding("ctrl+l", "clear_log", "Clear", priority=True),
         Binding("alt+up", "resize_panel_up", "▲", show=True),
         Binding("alt+down", "resize_panel_down", "▼", show=True),
+        Binding("alt+left", "sender_divider(-1)", "◀", show=True),
+        Binding("alt+right", "sender_divider(1)", "▶", show=True),
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
         Binding("ctrl+r", "info_refresh", "Refresh", show=True, priority=True),
         Binding("ctrl+f", "forward_current", "Forward", show=True, priority=True),
@@ -2753,8 +2755,7 @@ class NoxenApp(App):
             if self._history_table_height is None:
                 self.call_after_refresh(self._init_panel_heights)
         elif pane_id == "tab_sender":
-            sender = self.query_one(SenderPane)
-            sender.query_one(f"#{sender.active_table()}", DataTable).focus()
+            self.query_one(SenderPane).focus_default()
         elif pane_id == "tab_info" and self.check_action("resize_panel_up", ()):
             self.call_after_refresh(self._clamp_info_component_detail_to_available_space)
         elif pane_id == "tab_log":
@@ -2879,9 +2880,11 @@ class NoxenApp(App):
             return self._active_tab in ("tab_log", "tab_history") or self._monitor_events_active()
         if action == "toggle_command_bar":
             return self._active_tab in ("tab_history", "tab_intercept")
+        if action == "sender_divider":
+            return self._active_tab == "tab_sender" and not self.screen.is_modal
         if action in ("resize_panel_up", "resize_panel_down"):
             if self._active_tab == "tab_sender":
-                return not self.screen.is_modal
+                return False
             if self._active_tab == "tab_intercept":
                 return True if self._intercept_command_bar_visible else None
             if self._active_tab == "tab_info":
@@ -3014,6 +3017,9 @@ class NoxenApp(App):
             return self._history_command_bar_visible
         return False
 
+    def action_sender_divider(self, direction):
+        self.query_one(SenderPane).adjust_detail(direction)
+
     def action_resize_panel_up(self):
         if self._active_tab == "tab_intercept":
             if not self._intercept_command_bar_visible:
@@ -3028,8 +3034,6 @@ class NoxenApp(App):
             self._adjust_info_component_detail(1)
         elif self._monitor_events_active():
             self.query_one(MonitorPane).adjust_event_detail(1)
-        elif self._active_tab == "tab_sender" and not self.screen.is_modal:
-            self.query_one(SenderPane).adjust_detail(1)
 
     def action_resize_panel_down(self):
         if self._active_tab == "tab_intercept":
@@ -3045,8 +3049,6 @@ class NoxenApp(App):
             self._adjust_info_component_detail(-1)
         elif self._monitor_events_active():
             self.query_one(MonitorPane).adjust_event_detail(-1)
-        elif self._active_tab == "tab_sender" and not self.screen.is_modal:
-            self.query_one(SenderPane).adjust_detail(-1)
 
     def action_toggle_command_bar(self):
         if self._active_tab == "tab_intercept":
