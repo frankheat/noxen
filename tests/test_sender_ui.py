@@ -300,15 +300,40 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual(service.db.sender_request(first["id"])["revision"], 2)
                 self.assertFalse(pane.editor_dirty())
 
+                # A request changed elsewhere is a conflict, not an overwrite; Revert loads the new revision.
+                area.focus()
+                area.move_cursor(area.document.end)
+                await pilot.press("space")
+                service.save_request("1", {"operation": "sendBroadcast", "intent": {"action": "from.elsewhere"}},
+                                     first["id"], 2)
+                pane.refresh_sender()
+                await pilot.pause(0.6)
+                self.assertNotIn("from.elsewhere", area.text)
+                await pilot.press("ctrl+s")
+                await pilot.pause(0.2)
+                self.assertEqual(service.db.sender_request(first["id"])["request"]["intent"]["action"], "from.elsewhere")
+                self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
+                await pilot.click("#sender_revert")
+                await pilot.pause(0.6)
+                self.assertIn("from.elsewhere", area.text)
+                self.assertFalse(pane.editor_dirty())
+                # While the editor still shows another request, saving or sending does nothing.
+                pane._selected_id = service.db.sender_requests()[1]["id"] if service.db.sender_requests()[1]["id"] != first["id"] \
+                    else service.db.sender_requests()[0]["id"]
+                pane._requests = service.db.sender_requests()
+                self.assertIsNone(pane.save_editor())
+                pane.select_request(first["id"])
+                await pilot.pause(0.6)
+
                 # Invalid text is not saved; the form editor still opens the saved request.
                 area.focus()
                 area.move_cursor(area.document.end)
                 await pilot.press("x", "ctrl+s")
                 await pilot.pause(0.2)
                 self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
-                self.assertEqual(service.db.sender_request(first["id"])["revision"], 2)
-                await pilot.press("backspace", "ctrl+s")
-                await pilot.pause(0.2)
+                self.assertEqual(service.db.sender_request(first["id"])["revision"], 3)
+                await pilot.click("#sender_revert")  # The cursor moved to the error, so undo by reverting.
+                await pilot.pause(0.6)
                 await pilot.click("#sender_edit")
                 await pilot.pause(0.6)
                 self.assertIsInstance(app.screen, SenderRequestModal)

@@ -280,7 +280,7 @@ def toggle_fold(text, offset, folds):
     markers = list(FOLD.finditer(text, line_start, line_end))
     if markers:
         marker = min(markers, key=lambda match: abs(match.start() - offset))
-        number = int(marker.group(2).translate(str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")))
+        number = _number(marker.group(2))
         hidden = folds.pop(number, None)
         if hidden is None:
             return None
@@ -292,18 +292,26 @@ def toggle_fold(text, offset, folds):
     if not opening and not around:
         return None
     start, end = min(opening, key=lambda pair: pair[0]) if opening else max(around, key=lambda pair: pair[0])
-    number = max(folds, default=0) + 1
+    # Never reuse a number that is still written somewhere, e.g. in text pasted from another request.
+    written = [_number(match.group(2)) for match in FOLD.finditer(text)]
+    number = max([*folds, *written], default=0) + 1
     folds[number] = text[start:end]
     closer = "}" if text[start] == "{" else "]"
     marker = f"{text[start]}⋯{str(number).translate(SUBSCRIPT)}{closer}"
     return text[:start] + marker + text[end:], start
 
 
-def expand(text, folds):
+def _number(subscript):
+    return int(subscript.translate(str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")))
+
+
+def expand(text, folds, _open=()):
     """The full text behind every fold marker, nested ones included."""
     def restore(match):
-        number = int(match.group(2).translate(str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")))
-        return expand(folds[number], folds) if number in folds else match.group()
+        number = _number(match.group(2))
+        if number not in folds or number in _open:  # Unknown, or a marker inside its own content.
+            return match.group()
+        return expand(folds[number], folds, (*_open, number))
     return FOLD.sub(restore, text)
 
 

@@ -1,6 +1,21 @@
 """Convert complete, supported captures into editable Sender arguments."""
 
+from functools import wraps
+
 from noxen.sender import SenderError
+
+
+def refuses_malformed(function):
+    """Captures come from the device and from saved projects: a wrong shape is refused like a missing field."""
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except SenderError:
+            raise
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            raise SenderError("This capture is malformed; create the request in Sender") from None
+    return guarded
 
 
 def _complete(node, path):
@@ -120,6 +135,7 @@ def _intent(info, path, nested=False):
     return result
 
 
+@refuses_malformed
 def prepare_intent_request(entry, operation):
     """Operation is always explicit, especially for receiving hooks."""
     from noxen.sender import INTENT_OPERATIONS
@@ -141,6 +157,7 @@ def prepare_intent_request(entry, operation):
     return request
 
 
+@refuses_malformed
 def prepare_component_request(package, component):
     kind = component.get("type")
     if kind == "provider":
@@ -171,7 +188,8 @@ CAPTURE_OPERATIONS = {
 
 def capture_operation(entry):
     """The sending operation implied by the hook that captured `entry`, or None when it is a choice."""
-    return CAPTURE_OPERATIONS.get((entry or {}).get("method"))
+    method = entry.get("method") if isinstance(entry, dict) else None
+    return CAPTURE_OPERATIONS.get(method) if isinstance(method, str) else None
 
 
 _RESOLVER = "android.content.ContentResolver"
@@ -185,6 +203,7 @@ _READS = ("openFile", "openAssetFile", "openTypedAssetFile", "openFileDescriptor
           "openTypedAssetFileDescriptor")
 
 
+@refuses_malformed
 def prepare_monitor_request(event):
     """Rebuild a provider call recorded by Monitor. Anything not captured in full is refused."""
     clazz, method = event.get("class"), event.get("method")

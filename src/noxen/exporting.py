@@ -27,13 +27,6 @@ def write_history_export(entries: list[dict], now: datetime | None = None) -> Ex
     return ExportResult(filename, len(entries))
 
 
-def write_sender_export(run: dict, now: datetime | None = None) -> ExportResult:
-    filename = timestamped_filename(f"sender_run_{run['id']}", "json", now)
-    with open(filename, "x", encoding="utf-8") as stream:
-        json.dump(run, stream, indent=2, ensure_ascii=False, allow_nan=False)
-    return ExportResult(filename, 1)
-
-
 def filter_rule_lines(ignore_list: list[dict], focus_list: list[dict]) -> list[str]:
     lines = []
     for rule in ignore_list:

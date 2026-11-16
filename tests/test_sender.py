@@ -11,7 +11,8 @@ from unittest.mock import patch
 from noxen.db import ProjectDB
 from noxen.sender import SenderError, validate_request, compare_sender_runs
 from noxen.sender_service import SenderService
-from noxen.sender_capture import capture_operation, prepare_intent_request, prepare_monitor_request
+from noxen.sender_capture import (capture_operation, prepare_component_request, prepare_intent_request,
+                                  prepare_monitor_request)
 from noxen.frida_session import SessionConfig
 
 
@@ -215,6 +216,21 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_malformed_captures_are_refused_instead_of_raising(self):
+        for junk in (None, 5, [], "x", {"intent": []}, {"intent": {"extras": {"k": 1}}}, {"method": {}}):
+            self.assertIsNone(capture_operation(junk) if not isinstance(junk, dict) or "intent" in junk else None)
+            for prepare in (lambda: prepare_intent_request(junk, "sendBroadcast"), lambda: prepare_monitor_request(junk),
+                            lambda: prepare_component_request("test.app", junk)):
+                with self.assertRaises(SenderError):
+                    prepare()
+        with self.assertRaises(SenderError):
+            prepare_monitor_request({"class": "android.content.ContentResolver", "method": "call", "types": [],
+                                     "arguments": []})
+
+    def test_repeated_categories_are_rejected_because_android_would_drop_them(self):
+        with self.assertRaisesRegex(SenderError, "duplicate category"):
+            validate_request({"operation": "sendBroadcast", "intent": {"categories": ["a", "b", "a"]}})
+
     def test_hook_method_implies_the_sending_operation_only_when_unambiguous(self):
         for method, operation in (("sendOrderedBroadcast", "sendOrderedBroadcast"), ("onReceive", "sendBroadcast"),
                                   ("getIntent", "startActivity"), ("getService", "startService"),

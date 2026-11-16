@@ -126,6 +126,9 @@ def validate_intent(intent, path="intent", depth=0):
     categories = intent.get("categories", [])
     if not isinstance(categories, list) or not all(isinstance(v, str) for v in categories):
         raise SenderError(f"{path}.categories: expected list of strings")
+    if len(set(categories)) != len(categories):
+        # Android keeps categories in a set: a repeated one would be dropped on the device.
+        raise SenderError(f"{path}.categories: duplicate category")
     if intent.get("extras") is not None:
         typed_values(intent["extras"], f"{path}.extras", depth)
     if intent.get("selector") is not None:
@@ -228,8 +231,9 @@ def empty_request(operation="sendBroadcast"):
 def render_sender_detail(record, current_revision=None):
     """Match noxen's section headings and aligned label/value details.
 
-    With `current_revision`, a run is shown result first, beside its request:
-    the request sections return only when the run used another revision.
+    A request shows its arguments. A run is shown result first, beside its
+    request; the request sections return only when the run used a revision
+    other than `current_revision`.
     """
     from rich.text import Text
     from rich.pretty import Pretty
@@ -258,15 +262,16 @@ def render_sender_detail(record, current_revision=None):
     if "sender" not in record:
         return Group(*described, *arguments)
     identity = record["sender"]
-    rows = [("Run", f"#{record['id']}")] if current_revision is not None and "id" in record else []
-    rows += [("State", record["state"]), ("Error", record.get("error")),
-             ("Cancellation requested", record.get("cancellationRequested", False))]
+    rows = [("Run", f"#{record['id']}")] if "id" in record else []
+    rows.append(("State", record["state"]))
+    # Only what happened is listed.
+    if record.get("error"):
+        rows.append(("Error", record["error"]))
+    if record.get("cancellationRequested"):
+        rows.append(("Cancellation requested", True))
     activity_returned = request["operation"] == "startActivity" and record["state"] == "returned"
     if activity_returned:
         rows = [("State", "Call returned · Activity launch unverified") if row[0] == "State" else row for row in rows]
-    if current_revision is not None:
-        # Beside the request only what happened is listed.
-        rows = [row for row in rows if row[0] not in ("Error", "Cancellation requested") or row[1]]
     if record.get("activityContext", {}).get("state") == "background":
         rows.append(("Sender at dispatch", "Background process · Android may block the launch"))
     outcome = [section("RESULT", rows)]
@@ -281,9 +286,7 @@ def render_sender_detail(record, current_revision=None):
     if identity.get("permissions"):
         sender.append(section("SENDER PERMISSIONS", [("Granted" if p["granted"] else "Not granted", p["name"])
                                                      for p in identity["permissions"]]))
-    if current_revision is None:
-        return Group(*described, sender[0], *outcome, *sender[1:], *arguments)
-    if record["revision"] == current_revision:
+    if current_revision is None or record["revision"] == current_revision:
         return Group(*outcome, *sender)
     note = Text(f"Sent as revision {record['revision']}; the request is now at revision {current_revision}.\n", style="dim")
     return Group(*outcome, *sender, note, *described, *arguments)

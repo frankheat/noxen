@@ -1,7 +1,6 @@
 """Sender requests and execution records. UI and MCP share SenderService."""
 
 import copy
-import json
 import re
 import sqlite3
 from uuid import uuid4
@@ -37,7 +36,6 @@ class SenderRequestModal(ModalScreen):
     SenderRequestModal Button { width: auto; min-width: 8; border: round $foreground-muted; background: transparent; }
     SenderRequestModal .buttons Button { min-width: 10; margin-left: 1; }
     SenderRequestModal Collapsible { background: transparent; }
-    SenderRequestModal .editor_heading { text-style: bold; margin-top: 1; }
     /* Sections and nested objects are hidden until navigation opens them, so
        a newly mounted one never shows before it has been placed. */
     SenderRequestModal OptionalSection { display: none; }
@@ -389,6 +387,7 @@ class SenderPane(Vertical):
                     yield ModalButton("Cancel", id="sender_cancel_run", tooltip="Ask a running query or file read to stop")
                     yield ModalButton("Edit", id="sender_edit")
                     yield ModalButton("Save", id="sender_save")
+                    yield ModalButton("Revert", id="sender_revert")
                 yield JsonRequestEditor(id="sender_request_detail")
             with Vertical(classes="sender_side", id="sender_result_side"):
                 with Horizontal(classes="side_header"):
@@ -418,7 +417,9 @@ class SenderPane(Vertical):
 
     def show_editor_state(self):
         row, area = self.selected(), self.editor.area
-        self.query_one("#sender_save", Button).disabled = not self.editor_dirty()
+        dirty = self.editor_dirty()
+        self.query_one("#sender_save", Button).disabled = not dirty
+        self.query_one("#sender_revert", Button).disabled = not dirty
         if row is None or area.read_only:
             return
         self.editor.say("Modified · Ctrl+S save" if self.editor_dirty() else
@@ -434,14 +435,15 @@ class SenderPane(Vertical):
 
     def save_editor(self):
         """Save the JSON on screen as a new revision. Returns the saved request, or None if it is not valid."""
-        row, area = self.selected(), self.editor.area
-        if row is None or area.read_only:
-            return row
-        if not self.editor_dirty():
+        row, area, key = self.selected(), self.editor.area, self._editor_key
+        if row is None or key is None or key[0] not in (row["id"], "run"):
+            return None  # The editor has not caught up with the selected tab yet: nothing here belongs to it.
+        if area.read_only or not self.editor_dirty():
             return row
         try:
+            # Based on the revision the text was loaded from, so a change made elsewhere is a conflict.
             saved = self.service.save_request(row["name"], sender_json.parse(area.text, area.folds),
-                                              row["id"], row["revision"])
+                                              row["id"], key[1])
         except (ValueError, OSError, sqlite3.Error) as error:
             self.editor.say(str(error), error=True)
             if (line := re.match(r"Line (\d+), column (\d+)", str(error))) and not area.folds:
@@ -454,7 +456,15 @@ class SenderPane(Vertical):
                           for r in self._requests]
         self.editor.say(f"Saved · revision {saved['revision']}")
         self.query_one("#sender_save", Button).disabled = True
+        self.query_one("#sender_revert", Button).disabled = True
         return self.selected()
+
+    def revert_editor(self):
+        """Drop the unsaved JSON and show the saved request again."""
+        if self._editor_key is not None:
+            self._drafts.pop(self._editor_key[0], None)
+        self._editor_key, self._editor_baseline, self._signature = None, self.editor.area.full_text(), None
+        self.refresh_sender()
 
     def show_request_json(self, row, run):
         """Put the right text in the editor without discarding what the user is typing."""
@@ -479,25 +489,25 @@ class SenderPane(Vertical):
             key = (row["id"], row["revision"])
             same_request = self._editor_key is not None and self._editor_key[0] == row["id"]
             if key != self._editor_key and same_request and self.editor_dirty():
-                self.editor.say(f"Changed elsewhere (revision {row['revision']}); saving will report the conflict",
-                                error=True)
+                self.editor.say(f"Changed elsewhere (revision {row['revision']}): Revert to load it, "
+                                "or copy your text first", error=True)
                 return
             if key != self._editor_key:
                 self.stash_draft()
                 saved_text = sender_json.format_request(row["request"])
-                text, folds = self._drafts.pop(row["id"], (saved_text, {}))
-                self._editor_key, self._editor_baseline = key, saved_text
+                # A draft keeps the revision it was written against, so a later change still conflicts.
+                text, folds, revision, baseline = self._drafts.pop(row["id"], (saved_text, {}, row["revision"], saved_text))
+                self._editor_key, self._editor_baseline = (row["id"], revision), baseline
                 area.read_only = False
                 area.load(text, folds)
-            self.show_editor_state()
-        self.query_one("#sender_save", Button).disabled = not self.editor_dirty()
+        self.show_editor_state()
 
     def stash_draft(self):
         """Keep unsaved text of the request leaving the editor, so switching tabs loses nothing."""
         key = self._editor_key
         if key is not None and key[0] != "run" and self.editor_dirty():
             area = self.editor.area
-            self._drafts[key[0]] = (area.text, dict(area.folds))
+            self._drafts[key[0]] = (area.text, dict(area.folds), key[1], self._editor_baseline)
 
     def select_request(self, request_id):
         if request_id != self._selected_id:
@@ -643,7 +653,7 @@ class SenderPane(Vertical):
     def next_name(self):
         """New requests are named with the next free number; the name is the tab label."""
         names = [row["name"] for row in self.service.db.sender_requests()]  # Not the last refresh: it may be stale.
-        return str(max([int(name) for name in names if name.isdecimal()], default=0) + 1)
+        return str(max([int(name) for name in names if name.isdecimal() and len(name) <= 9], default=0) + 1)
 
     def receive_request(self, request):
         """Add a request prepared in another tab. One that fails validation opens in the editor instead."""
@@ -703,13 +713,21 @@ class SenderPane(Vertical):
             if row is None:
                 return
             try:
+                unsaved = request_id in self._drafts or (
+                    self._editor_key is not None and self._editor_key[0] == request_id and self.editor_dirty())
                 if action == "edit":
+                    if unsaved:  # The form edits the saved request; it must not fork from the text on screen.
+                        self.notify("Save or revert the JSON changes to this request first", severity="warning")
+                        return
                     self.edit_request(row)
                 elif action == "duplicate":
                     name = self.next_name() if row["name"].isdecimal() else (row["name"] + " copy")[:200]
                     self.select_request(self.service.save_request(name, row["request"])["id"])
                 elif action == "remove":
                     self.service.remove_request(row["id"], row["revision"])
+                    self._drafts.pop(request_id, None)
+                    if self._editor_key is not None and self._editor_key[0] == request_id:
+                        self._editor_key, self._editor_baseline = None, self.editor.area.full_text()
                 self.refresh_sender()
             except Exception as error:
                 self.notify(str(error), severity="error")
@@ -740,6 +758,8 @@ class SenderPane(Vertical):
                 self.edit_request({"id": None, "revision": 0, "name": self.next_name(), "request": empty_request()})
             elif button == "sender_save":
                 self.save_editor()
+            elif button == "sender_revert":
+                self.revert_editor()
             elif button == "sender_edit":
                 # The form edits the saved request, so what is typed here is saved first.
                 row = self.save_editor()

@@ -143,13 +143,13 @@ class SenderService:
             self._save_result(run)
             self.active_run = None
         self.token = uuid4().hex
-        self.session = None
+        self.session, self.identity = None, None
         self.state = "disconnected"
 
     async def disconnect(self, token):
         self.require_token(token)
         self.token = uuid4().hex
-        old, self.session = self.session, None
+        old, self.session, self.identity = self.session, None, None
         self.state = "disconnected"
         if self.active_run is not None:
             run = self.get_run(self.active_run)

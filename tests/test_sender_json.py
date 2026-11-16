@@ -66,6 +66,14 @@ class SenderJsonTests(unittest.TestCase):
         self.assertIsNone(toggle_fold('{"a": 1}', 3, {}))  # Nothing spans several lines.
         self.assertIsNone(toggle_fold(text, 0, {}))        # The request itself stays open.
 
+    def test_a_marker_pasted_from_elsewhere_cannot_make_a_fold_contain_itself(self):
+        text = '{\n    "a": {\n        "b": {⋯₁}\n    }\n}'
+        folds = {}
+        folded, cursor = toggle_fold(text, text.index('"a"'), folds)
+        self.assertEqual(list(folds), [2])  # 1 is still written in the text, so it is not reused.
+        self.assertEqual(expand(folded, folds), text)
+        self.assertEqual(expand("{⋯₁}", {1: "[{⋯₁}]"}), "[{⋯₁}]")  # Even a corrupt table cannot loop.
+
     def test_parse_forgives_trailing_commas_and_reports_the_line(self):
         self.assertEqual(parse('{"a": [1, 2,], "b": {"c": "x,}",},}'), {"a": [1, 2], "b": {"c": "x,}"}})
         with self.assertRaisesRegex(ValueError, "Line 2, column"):
