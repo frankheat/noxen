@@ -351,6 +351,7 @@ SenderRequestModal #sender_request_name:focus,
 MCPPane Button,
 SenderPane .sender_controls Button,
 SenderRequestModal .buttons Button,
+SenderExactValuesModal Button,
 SenderCaptureModal Button,
 SenderCompareModal Button,
 #log_crashes,
@@ -375,6 +376,9 @@ SenderPane .sender_controls Button.-active,
 SenderRequestModal .buttons Button:hover,
 SenderRequestModal .buttons Button:focus,
 SenderRequestModal .buttons Button.-active,
+SenderExactValuesModal Button:hover,
+SenderExactValuesModal Button:focus,
+SenderExactValuesModal Button.-active,
 SenderCaptureModal Button:hover,
 SenderCaptureModal Button:focus,
 SenderCaptureModal Button.-active,
@@ -704,11 +708,13 @@ Switch.-on > .switch--slider {
 }
 SenderPane Select > SelectCurrent,
 SenderRequestModal Select > SelectCurrent,
+SenderExactValuesModal Select > SelectCurrent,
 SenderCaptureModal Select > SelectCurrent {
     border: round $foreground-muted;
     background: $background;
 }
-SenderRequestModal TextArea {
+SenderRequestModal TextArea,
+SenderExactValuesModal TextArea {
     border: round $foreground-muted;
     background: $background;
 }
