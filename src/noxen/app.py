@@ -73,8 +73,10 @@ from noxen.history_columns import normalize_history_column_widths
 from noxen.history_table import HistoryTable
 from noxen.monitor_ui import MonitorPane, RecordingDialog
 from noxen.sender_service import SenderService
-from noxen.sender_ui import SenderPane, SenderRequestModal
-from noxen.sender_capture import prepare_component_request
+from noxen.sender import INTENT_OPERATIONS
+from noxen.sender_ui import SenderPane, SenderRequestModal, SenderTabMenu
+from noxen.sender_capture import (capture_operation, prepare_component_request, prepare_intent_request,
+                                  prepare_monitor_request)
 from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
@@ -328,6 +330,7 @@ class NoxenApp(App):
         Binding("alt+right", "sender_divider(1)", "▶", show=True),
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
         Binding("ctrl+r", "info_refresh", "Refresh", show=True, priority=True),
+        Binding("ctrl+r", "send_to_sender", "To Sender", show=True, priority=True),
         Binding("ctrl+f", "forward_current", "Forward", show=True, priority=True),
         Binding("ctrl+f", "apply_edit", "Apply & Forward", show=True, priority=True),
         Binding("ctrl+d", "drop_current", "Drop", show=True, priority=True),
@@ -1285,6 +1288,9 @@ class NoxenApp(App):
                         pass
             self.push_screen(StackModal(self.show_stack, self.stack_depth, _on_intercept_stack_confirm))
             return
+        elif event.button.id == "btn_history_sender":
+            self.action_send_to_sender()
+            return
         elif event.button.id == "btn_history_stack":
             def _on_stack_confirm(show: bool, depth: int):
                 self._history_show_stack = show
@@ -1573,6 +1579,7 @@ class NoxenApp(App):
                 with Horizontal(id="history_header"):
                     yield ModalButton("Filters", id="btn_history_filters")
                     yield ModalButton("Stack", id="btn_history_stack")
+                    yield ModalButton("To Sender", id="btn_history_sender")
                     yield Label("", id="filter_bar_spacer")
                     yield Input(id="history_search", placeholder="Search", select_on_focus=False)
                     yield ModalButton("⊟", id="btn_columns")
@@ -1691,6 +1698,7 @@ class NoxenApp(App):
             "btn_intercept_stack",
             "btn_history_filters",
             "btn_history_stack",
+            "btn_history_sender",
             "btn_columns",
         ):
             self.query_one(f"#{btn_id}", Button).active_effect_duration = 0
@@ -2876,6 +2884,8 @@ class NoxenApp(App):
             return intercept_blocked and self._edit_mode and not self._edit_forward_pending
         if action == "info_refresh":
             return self._active_tab == "tab_info"
+        if action == "send_to_sender":
+            return (self._active_tab == "tab_history" and not self.screen.is_modal) or self._monitor_events_active()
         if action == "clear_log":
             return self._active_tab in ("tab_log", "tab_history") or self._monitor_events_active()
         if action == "toggle_command_bar":
@@ -3016,6 +3026,35 @@ class NoxenApp(App):
         if fid in ("history_command_input", "history_cmd_output"):
             return self._history_command_bar_visible
         return False
+
+    def action_send_to_sender(self):
+        """Copy the selected History Intent or Monitor provider call into a new Sender request."""
+        sender = self.query_one(SenderPane)
+        try:
+            if self._active_tab == "tab_monitor":
+                event = self.query_one(MonitorPane).selected_event()
+                if event is None:
+                    raise ValueError("Select a Monitor event first")
+                sender.receive_request(prepare_monitor_request(event))
+                return
+            entry = copy.deepcopy(self._history_selected_entry)
+            if entry is None:
+                raise ValueError("Select an Intent in History first")
+            operation = capture_operation(entry)
+            if operation is not None:
+                sender.receive_request(prepare_intent_request(entry, operation))
+                return
+            # The hook does not say how this Intent is delivered: the operation is a choice.
+            def chosen(operation):
+                if operation:
+                    try:
+                        sender.receive_request(prepare_intent_request(entry, operation))
+                    except ValueError as error:
+                        self.notify(str(error), severity="error")
+            button = self.query_one("#btn_history_sender").region
+            self.push_screen(SenderTabMenu(button.x, button.bottom, [(op, op) for op in INTENT_OPERATIONS]), chosen)
+        except ValueError as error:
+            self.notify(str(error), severity="error")
 
     def action_sender_divider(self, direction):
         self.query_one(SenderPane).adjust_detail(direction)

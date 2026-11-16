@@ -153,3 +153,105 @@ def prepare_component_request(package, component):
         raise SenderError("This component cannot be prepared as a Sender request")
     return {"operation": operation, "intent": {"component": package + "/" + component["name"],
             "flags": 0x10000000 if operation == "startActivity" else 0}}
+
+
+# Hooked methods whose captured Intent maps to one sending operation. Receiving
+# hooks map to the call that would deliver such an Intent.
+CAPTURE_OPERATIONS = {
+    "startActivity": "startActivity", "startActivityForResult": "startActivity",
+    "getIntent": "startActivity", "onNewIntent": "startActivity", "onCreate": "startActivity",
+    "getActivity": "startActivity",
+    "sendBroadcast": "sendBroadcast", "onReceive": "sendBroadcast", "getBroadcast": "sendBroadcast",
+    "sendOrderedBroadcast": "sendOrderedBroadcast",
+    "startService": "startService", "onStartCommand": "startService", "onHandleIntent": "startService",
+    "getService": "startService",
+    "startForegroundService": "startForegroundService",
+}
+
+
+def capture_operation(entry):
+    """The sending operation implied by the hook that captured `entry`, or None when it is a choice."""
+    return CAPTURE_OPERATIONS.get((entry or {}).get("method"))
+
+
+_RESOLVER = "android.content.ContentResolver"
+_TRANSPORT = "android.content.ContentProvider$Transport"
+_URI = "android.net.Uri"
+_STRING = "java.lang.String"
+_STRINGS = "[Ljava.lang.String;"
+_BUNDLE = "android.os.Bundle"
+_VALUES = "android.content.ContentValues"
+_READS = ("openFile", "openAssetFile", "openTypedAssetFile", "openFileDescriptor", "openInputStream",
+          "openTypedAssetFileDescriptor")
+
+
+def prepare_monitor_request(event):
+    """Rebuild a provider call recorded by Monitor. Anything not captured in full is refused."""
+    clazz, method = event.get("class"), event.get("method")
+    types, values = list(event.get("types") or []), event.get("arguments")
+    if clazz not in (_RESOLVER, _TRANSPORT):
+        raise SenderError("Only content provider calls can be sent to Sender from Monitor")
+    if not isinstance(values, list) or len(values) != len(types):
+        raise SenderError("This event was recorded without its arguments")
+    if clazz == _TRANSPORT and types[:1] == ["android.content.AttributionSource"]:
+        types, values = types[1:], values[1:]
+
+    def text(value, what, nullable=True):
+        if not isinstance(value, dict) or value.get("opaque") or value.get("captureError") or value.get("truncated") \
+                or "value" not in value or not (isinstance(value["value"], str) or (nullable and value["value"] is None)):
+            raise SenderError(f"{what} was not captured completely; create this request in Sender")
+        return value["value"]
+
+    def strings(value, what):
+        if isinstance(value, dict) and "items" not in value and value.get("value", 0) is None:
+            return None
+        items = value.get("items") if isinstance(value, dict) else None
+        if not isinstance(items, list) or value.get("count") != len(items):
+            raise SenderError(f"{what} was not captured completely; create this request in Sender")
+        return [text(item, what) for item in items]
+
+    def absent(value, what):
+        if not isinstance(value, dict) or value.get("opaque") or value.get("value", 0) is not None:
+            raise SenderError(f"{what} is not captured by Monitor; create this request in Sender")
+
+    def selection(request, start):
+        """Either (selection, selectionArgs[, sortOrder]) or one query-arguments Bundle."""
+        if types[start:start + 1] == [_BUNDLE]:
+            bundle = values[start]
+            query = bundle.get("queryArguments") if isinstance(bundle, dict) else None
+            if isinstance(query, dict):
+                request["selection"] = text(query.get("selection"), "Selection")
+                request["selectionArgs"] = strings(query.get("selectionArgs"), "Selection arguments")
+                return query
+            absent(bundle, "This Bundle")
+            return {}
+        request["selection"] = text(values[start], "Selection")
+        request["selectionArgs"] = strings(values[start + 1], "Selection arguments")
+        return None
+
+    if method == "call":
+        first = text(values[0], "Authority", nullable=False)
+        request = {"operation": "call", "uri": first if types[0] == _URI else "content://" + first,
+                   "method": text(values[1], "Method", nullable=False), "arg": text(values[2], "Argument")}
+        absent(values[3], "Bundle extras")
+        return request
+    if not types or types[0] != _URI:
+        raise SenderError("This provider call has no content URI")
+    uri = text(values[0], "URI", nullable=False)
+    if method == "query":
+        request = {"operation": "query", "uri": uri, "projection": strings(values[1], "Projection")}
+        query = selection(request, 2)
+        if query is None:
+            request["sortOrder"] = text(values[4], "Sort order")
+        elif query:
+            request["sortOrder"] = text(query.get("sortOrder"), "Sort order")
+        return request
+    if method == "delete":
+        request = {"operation": "delete", "uri": uri}
+        selection(request, 1)
+        return request
+    if method in ("insert", "update") and _VALUES in types:
+        raise SenderError("ContentValues are not captured by Monitor; create this request in Sender")
+    if method in _READS:
+        return {"operation": "openFileDescriptor", "uri": uri}
+    raise SenderError(f"{method} cannot be sent from Sender")

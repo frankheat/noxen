@@ -260,6 +260,7 @@ TabPane {
     border: round $foreground-muted;
 }
 #history_header #btn_history_filters,
+#history_header #btn_history_sender,
 #history_header #btn_history_stack {
     height: 3;
     border: round $foreground-muted;
@@ -268,6 +269,8 @@ TabPane {
 }
 #history_header #btn_history_filters:focus,
 #history_header #btn_history_stack:focus,
+#history_header #btn_history_sender:focus,
+#history_header #btn_history_sender:hover,
 #history_header #btn_history_filters:hover,
 #history_header #btn_history_stack:hover {
     border: round $accent;

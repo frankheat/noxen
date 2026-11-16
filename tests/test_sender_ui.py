@@ -234,6 +234,72 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.pause(0.6)
                 self.assertIsNone(pane._run_id)  # Back on the latest run, which later sends keep following.
 
+    async def test_history_and_monitor_selections_are_sent_to_sender(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
+            async with app.run_test(size=(130, 40)) as pilot:
+                tabs = app.query_one("#main_tabs", TabbedContent)
+                pane = app.query_one(SenderPane)
+                intent = {"component": "test.app/.Receiver", "action": "test.PING", "data": None, "mimeType": None,
+                          "package": None, "flags": 16, "categories": [], "selector": None, "clipData": None,
+                          "extras": {}, "extrasMeta": {"omitted": 0}}
+                tabs.active = "tab_history"
+                await pilot.pause()
+                self.assertTrue(app.check_action("send_to_sender", ()))
+                await pilot.click("#btn_history_sender")  # Nothing selected: nothing is created.
+                await pilot.pause()
+                self.assertEqual(app.db.sender_requests(), [])
+
+                app._history_selected_entry = {"id": 7, "method": "sendOrderedBroadcast", "intent": intent}
+                await pilot.press("ctrl+r")
+                await pilot.pause()
+                saved = app.db.sender_requests()
+                self.assertEqual([(row["name"], row["request"]["operation"]) for row in saved],
+                                 [("1", "sendOrderedBroadcast")])
+                self.assertEqual(saved[0]["request"]["intent"]["action"], "test.PING")
+                self.assertEqual(tabs.active, "tab_history")  # Like a repeater: the source tab stays open.
+
+                # A receiving hook that does not imply an operation asks for one.
+                app._history_selected_entry = {"id": 8, "method": "setResult", "intent": intent}
+                await pilot.click("#btn_history_sender")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SenderTabMenu)
+                await pilot.press("down", "enter")  # sendBroadcast
+                await pilot.pause()
+                self.assertEqual(app.db.sender_request(pane._selected_id)["request"]["operation"], "sendBroadcast")
+
+                # startActivity without NEW_TASK cannot be saved as captured: it opens for review instead.
+                app._history_selected_entry = {"id": 9, "method": "startActivity", "intent": intent}
+                await pilot.press("ctrl+r")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SenderRequestModal)
+                self.assertEqual(len(app.db.sender_requests()), 2)
+                await pilot.pause(0.5)  # Let the editor finish mounting before closing it.
+                await pilot.press("escape")
+                await pilot.pause(0.3)
+                self.assertNotIsInstance(app.screen, SenderRequestModal)
+
+                await pilot.click("#--content-tab-tab_monitor")
+                await pilot.pause(0.3)
+                self.assertEqual(app._active_tab, "tab_monitor")
+                monitor = app.query_one("#monitor_pane")
+                await pilot.click("#monitor_to_sender")  # No event selected: nothing is created.
+                await pilot.pause()
+                self.assertEqual(len(app.db.sender_requests()), 2)
+                events = {"k": {"class": "android.content.ContentResolver", "method": "openInputStream",
+                                "types": ["android.net.Uri"],
+                                "arguments": [{"type": "android.net.Uri", "value": "content://test/file"}]},
+                          "log": {"class": "android.util.Log", "method": "d", "types": [], "arguments": []}}
+                # Monitor reloads its events on a timer, so each selection is acted on at once.
+                monitor.display_events, monitor.selected = events, "log"
+                app.action_send_to_sender()
+                self.assertEqual(len(app.db.sender_requests()), 2)  # Not a provider call.
+                monitor.display_events, monitor.selected = events, "k"
+                app.action_send_to_sender()
+                newest = app.db.sender_request(pane._selected_id)
+                self.assertEqual((newest["name"], newest["request"]["operation"], newest["request"]["uri"]),
+                                 ("3", "openFileDescriptor", "content://test/file"))
+
     async def test_provider_editor_switches_arguments_and_keeps_operation_fields_separate(self):
         with tempfile.TemporaryDirectory() as directory:
             app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))

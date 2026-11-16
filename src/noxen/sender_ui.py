@@ -14,7 +14,7 @@ from textual.widgets.option_list import Option
 
 from noxen.modals import ModalButton
 from noxen.monitor_ui import RecordingDialog
-from noxen.sender import OPERATIONS, INTENT_OPERATIONS, empty_request, render_sender_detail
+from noxen.sender import OPERATIONS, INTENT_OPERATIONS, SenderError, empty_request, render_sender_detail
 from noxen.sender_service import endpoint_for_app, sender_io
 from noxen.textual_compat import is_select_empty
 from noxen.sender_editor import MISSING, ScalarField, OptionalSection, object_fields, object_sections, ValueEditor, EntryRow, SCALARS, LABELS, changing_draft, check_draft_ready
@@ -137,6 +137,8 @@ class SenderRequestModal(ModalScreen):
         return items
 
     def refresh_navigation(self):
+        if not self.query("#sender_request_tree"):
+            return  # The timer can fire once more while the editor is closing.
         if getattr(self, "_changing_draft", False) or any(getattr(w, "_changing_draft", False) for w in self.query()):
             return
         items = self.navigation_items()
@@ -276,25 +278,28 @@ class SenderRequestModal(ModalScreen):
 
 
 class SenderTabMenu(ModalScreen):
-    """Context menu of a request tab, opened where the pointer is."""
+    """A short menu opened at a screen position: the request tab actions by default."""
 
     BINDINGS = [("escape", "dismiss", "Close")]
     DEFAULT_CSS = """
     SenderTabMenu { align: left top; background: transparent; }
-    SenderTabMenu OptionList { width: 15; height: auto; border: round $foreground-muted; background: $surface; }
+    SenderTabMenu OptionList { width: auto; height: auto; border: round $foreground-muted; background: $surface; }
     """
 
-    def __init__(self, x, y):
+    def __init__(self, x, y, options=(("Edit", "edit"), ("Duplicate", "duplicate"), ("Remove", "remove"))):
         super().__init__()
-        self.position = (x, y)
+        self.position, self.options = (x, y), options
 
     def compose(self):
-        yield OptionList(Option("Edit", id="edit"), Option("Duplicate", id="duplicate"), Option("Remove", id="remove"))
+        yield OptionList(*(Option(label, id=key) for label, key in self.options))
 
     def on_mount(self):
         menu = self.query_one(OptionList)
         x, y = self.position
-        menu.styles.offset = (max(0, min(x, self.size.width - 15)), max(0, min(y, self.size.height - 5)))
+        width = max(len(label) for label, _ in self.options) + 6
+        menu.styles.width = width
+        menu.styles.offset = (max(0, min(x, self.size.width - width)),
+                              max(0, min(y, self.size.height - len(self.options) - 2)))
         menu.focus()
 
     def on_option_list_option_selected(self, event):
@@ -500,7 +505,8 @@ class SenderPane(Vertical):
         for tab in tabs.query(RequestTab):
             tab.set_class(tab.request_id == self._selected_id, "-selected")
             if tab.request_id == self._selected_id:
-                tab.scroll_visible(animate=False)
+                # After layout: a tab mounted in this pass has no position yet.
+                self.call_after_refresh(tab.scroll_visible, animate=False)
 
     def on_select_changed(self, event):
         event.stop()
@@ -550,7 +556,20 @@ class SenderPane(Vertical):
 
     def next_name(self):
         """New requests are named with the next free number; the name is the tab label."""
-        return str(max([int(row["name"]) for row in self._requests if row["name"].isdecimal()], default=0) + 1)
+        names = [row["name"] for row in self.service.db.sender_requests()]  # Not the last refresh: it may be stale.
+        return str(max([int(name) for name in names if name.isdecimal()], default=0) + 1)
+
+    def receive_request(self, request):
+        """Add a request prepared in another tab. One that fails validation opens in the editor instead."""
+        name = self.next_name()
+        try:
+            saved = self.service.save_request(name, request)
+        except SenderError as error:
+            self.notify(f"{error}. Review the request before saving it.", severity="warning")
+            self.edit_request({"id": None, "revision": 0, "name": name, "request": request})
+            return
+        self.select_request(saved["id"])
+        self.notify(f"Sent to Sender as request {name}")
 
     def browse_runs(self, step):
         if self._run_ids:

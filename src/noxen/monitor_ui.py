@@ -383,6 +383,7 @@ class MonitorPane(Vertical):
             with TabPane("Events", id="monitor_events_view"):
                 with Horizontal(classes="monitor_controls"):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
+                    yield ModalButton("To Sender", id="monitor_to_sender")
                     yield ModalButton("⊟", id="monitor_columns")
                 yield Label("", id="monitor_status", markup=False)
                 yield Rule(classes="section_separator")
@@ -1154,6 +1155,9 @@ class MonitorPane(Vertical):
     def event_key(event):
         return f"{event['_recording']}:{event['session']}:{event['id']}"
 
+    def selected_event(self):
+        return self.display_events.get(self.selected)
+
     def show_event(self, key):
         if key == self.selected:
             return
@@ -1234,6 +1238,9 @@ class MonitorPane(Vertical):
         action = event.button.id.removeprefix("monitor_")
         if action == "columns":
             self.show_event_columns()
+            return
+        if action == "to_sender":
+            self.app.action_send_to_sender()
             return
         p = self.profile()
         if action == "hook_details":

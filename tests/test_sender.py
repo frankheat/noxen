@@ -11,7 +11,7 @@ from unittest.mock import patch
 from noxen.db import ProjectDB
 from noxen.sender import SenderError, validate_request, compare_sender_runs
 from noxen.sender_service import SenderService
-from noxen.sender_capture import prepare_intent_request
+from noxen.sender_capture import capture_operation, prepare_intent_request, prepare_monitor_request
 from noxen.frida_session import SessionConfig
 
 
@@ -215,6 +215,60 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_hook_method_implies_the_sending_operation_only_when_unambiguous(self):
+        for method, operation in (("sendOrderedBroadcast", "sendOrderedBroadcast"), ("onReceive", "sendBroadcast"),
+                                  ("getIntent", "startActivity"), ("getService", "startService"),
+                                  ("bindService", None), ("setResult", None), ("custom", None)):
+            self.assertEqual(capture_operation({"method": method}), operation, method)
+
+    def test_monitor_provider_calls_become_requests_only_when_fully_captured(self):
+        uri = {"type": "android.net.Uri", "value": "content://test/notes"}
+        text = lambda value: {"type": "java.lang.String", "value": value}
+        strings = lambda *items: {"type": "[Ljava.lang.String;", "count": len(items),
+                                  "items": [{"type": "java.lang.String", "value": item} for item in items]}
+        U, S, A, B, V = ("android.net.Uri", "java.lang.String", "[Ljava.lang.String;", "android.os.Bundle",
+                         "android.content.ContentValues")
+        resolver, transport = "android.content.ContentResolver", "android.content.ContentProvider$Transport"
+        source = "android.content.AttributionSource"
+        def event(clazz, method, types, *arguments):
+            return {"class": clazz, "method": method, "types": types, "arguments": list(arguments)}
+
+        legacy = event(resolver, "query", [U, A, S, A, S], uri, strings("_id", "title"), text("a = ?"),
+                       strings("1"), text(None))
+        self.assertEqual(validate_request(prepare_monitor_request(legacy)), {
+            "operation": "query", "uri": "content://test/notes", "projection": ["_id", "title"],
+            "selection": "a = ?", "selectionArgs": ["1"], "sortOrder": None, "maxRows": 100, "maxBytes": 262144})
+        inbound = event(transport, "query", [source, U, A, B, "android.os.ICancellationSignal"],
+                        {"type": source, "value": "caller.app"}, uri, {"type": A, "value": None},
+                        {"type": B, "queryArguments": {"selection": text("x"), "selectionArgs": {"type": A, "value": None},
+                                                      "sortOrder": text("title")}}, {"type": "x", "opaque": True})
+        self.assertEqual(prepare_monitor_request(inbound), {
+            "operation": "query", "uri": "content://test/notes", "projection": None,
+            "selection": "x", "selectionArgs": None, "sortOrder": "title"})
+        call = event(transport, "call", [source, S, S, S, B], {"type": source, "value": "caller.app"},
+                     text("test"), text("ping"), text(None), {"type": B, "value": None})
+        self.assertEqual(validate_request(prepare_monitor_request(call)),
+                         {"operation": "call", "uri": "content://test", "method": "ping", "arg": None})
+        self.assertEqual(prepare_monitor_request(event(resolver, "openInputStream", [U], uri)),
+                         {"operation": "openFileDescriptor", "uri": "content://test/notes"})
+        self.assertEqual(prepare_monitor_request(event(resolver, "delete", [U, S, A], uri, text(None), {"type": A, "value": None})),
+                         {"operation": "delete", "uri": "content://test/notes", "selection": None, "selectionArgs": None})
+
+        partial = strings("_id")
+        partial["count"] = 40  # Only the first values were captured.
+        for refused in (
+            event(resolver, "query", [U, A, S, A, S], uri, partial, text(None), strings(), text(None)),
+            event(resolver, "query", [U, A, S, A, S], dict(uri, truncated=True), strings(), text(None), strings(), text(None)),
+            event(resolver, "insert", [U, V], uri, {"type": V, "opaque": True}),
+            event(transport, "call", [source, S, S, S, B], {"type": source, "value": "c"}, text("test"), text("m"),
+                  text(None), {"type": B, "opaque": True}),
+            event(resolver, "openOutputStream", [U], uri),
+            event("android.util.Log", "d", [S, S], text("tag"), text("message")),
+            {"class": resolver, "method": "query", "types": [U]},
+        ):
+            with self.assertRaises(SenderError, msg=refused):
+                prepare_monitor_request(refused)
+
     def test_missing_extras_bundle_stays_distinct_from_an_empty_bundle(self):
         entry = self.capture()
         self.assertEqual(prepare_intent_request(entry, "sendBroadcast")["intent"]["extras"], {})
