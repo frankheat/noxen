@@ -420,6 +420,7 @@ class SenderPane(Vertical):
         if status["error"]:
             label += f" · {status['error']}"
         self.query_one("#sender_state", Label).update(Text(label))
+        self.query_one("#sender_disconnect", Button).disabled = status["state"] == "disconnected"
         row = self.selected()
         self.query_one("#sender_send", Button).disabled = (
             self._checking_activity_send or status["state"] != "ready" or status["active_run"] is not None

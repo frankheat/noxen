@@ -189,10 +189,13 @@ class SenderUITests(IsolatedAppTestCase):
                                            connect=lambda package: {"package": package, "pid": 1, "uid": 10001},
                                            execute=execute)
                 service = app.sender_service
-                await service.connect(endpoint, "test.app", service.token)
                 app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
                 await pilot.pause()
                 pane = app.query_one(SenderPane)
+                self.assertTrue(pane.query_one("#sender_disconnect").disabled)  # Nothing to disconnect yet.
+                await service.connect(endpoint, "test.app", service.token)
+                pane.refresh_sender()
+                self.assertFalse(pane.query_one("#sender_disconnect").disabled)
                 for expected in ("1", "2"):
                     await pilot.click("#sender_new")
                     await pilot.pause()
