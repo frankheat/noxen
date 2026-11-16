@@ -62,6 +62,7 @@ class FridaSession:
         begin_capture_session: callable = None,
         release_cb: callable = None,
         crash_cb: callable = None,
+        validate_target: callable = None,
     ):
         self._config = config
         self.filter_manager = filter_manager
@@ -78,6 +79,7 @@ class FridaSession:
         self.begin_capture_session = begin_capture_session
         self.release_cb = release_cb
         self.crash_cb = crash_cb
+        self.validate_target = validate_target
         self.api_level_cb = None
         self.hook_warning_cb = None
         self.connected_cb = None
@@ -199,6 +201,8 @@ class FridaSession:
                 )
                 return
 
+            if self.validate_target:
+                self.validate_target(device_id, getattr(session, "pid", None))
             if not self._keep_if_current(generation, session=session):
                 close_local()
                 return
@@ -563,6 +567,8 @@ class FridaSession:
             payload = message["payload"]
             if isinstance(payload, dict):
                 event_name = payload.get("noxenEvent")
+                if event_name == "sender_started":
+                    return  # SenderSession has its own listener on this script.
                 if event_name in ("monitor_batch", "monitor_status"):
                     if self.monitor_cb:
                         if event_name == "monitor_batch":

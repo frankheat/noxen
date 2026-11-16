@@ -380,7 +380,7 @@ class MCPServiceTests(MCPAppTestCase):
 
     @with_app
     async def test_list_processes_uses_discovered_device_and_filters_by_name(self):
-        emulator = SimpleNamespace(id="emulator")
+        emulator = SimpleNamespace(id="emulator", name="Emulator", type="usb")
         process = SimpleNamespace(pid=123, name="Example App")
         device = SimpleNamespace(enumerate_processes=lambda: [
             SimpleNamespace(pid=5, name="system_server"), process,
@@ -401,7 +401,7 @@ class MCPServiceTests(MCPAppTestCase):
             SimpleNamespace(pid=23, identifier="dev.example.running", name="Example Running"),
             SimpleNamespace(pid=0, identifier="dev.example.idle", name="Example Idle"),
         ])
-        self.app._home_devices = [SimpleNamespace(id="emulator")]
+        self.app._home_devices = [SimpleNamespace(id="emulator", name="Emulator", type="usb")]
         with patch("frida.get_device", return_value=device) as resolve:
             result = await self.service.list_applications(
                 "emulator", self.service.connection_token(), query="EXAMPLE", limit=1,
@@ -748,9 +748,22 @@ class MCPTransportTests(MCPAppTestCase):
                                          "set_filters", "list_applications", "get_stack_settings", "set_stack_settings",
                                          "save_monitor_profile", "remove_monitor_profile"} <= names)
                         self.assertTrue({"refresh_devices", "resolve_interception", "set_intercept"} <= names)
+                        self.assertTrue({"get_sender", "connect_sender", "save_sender_request",
+                                         "execute_sender_request", "get_sender_run", "wait_for_sender_run",
+                                         "prepare_sender_request", "compare_sender_runs"} <= names)
                         status = await client.call_tool("get_status")
                         self.assertFalse(status.isError)
                         self.assertEqual(status.structuredContent["instance"], self.service.instance)
+                        sender = await client.call_tool("get_sender")
+                        self.assertEqual(sender.structuredContent["state"], "disconnected")
+                        saved = await client.call_tool("save_sender_request", {
+                            "name": "Transport test", "request": {"operation": "sendBroadcast", "intent": {}},
+                            "expected_connection": status.structuredContent["connection_token"],
+                        })
+                        self.assertFalse(saved.isError)
+                        request = await client.call_tool("get_sender_request", {"request_id": saved.structuredContent["id"]})
+                        self.assertEqual(request.structuredContent["request"]["operation"], "sendBroadcast")
+                        self.assertEqual(self.app.query_one("#main_tabs", TabbedContent).active, "tab_home")
                         self.capture("real-protocol")
                         result = await client.call_tool("list_history", {"query": "real-protocol"})
                         self.assertEqual(result.structuredContent["events"][0]["action"], "real-protocol")

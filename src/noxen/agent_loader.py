@@ -9,6 +9,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 SOURCE_ROOT = PACKAGE_ROOT.parents[1]
 RUNTIME_ROOT = PACKAGE_ROOT / "runtime"
 
+
+def load_sender_script():
+    for path in (SOURCE_ROOT / "agent" / "sender_bundle.js", RUNTIME_ROOT / "agent" / "sender_bundle.js"):
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    raise FileNotFoundError("Sender agent bundle is missing; rebuild or reinstall noxen")
+
 SOURCE_DEFAULT_HOOKS_FILE = SOURCE_ROOT / "config" / "hooks.json"
 SOURCE_BUNDLE_SCRIPT_FILE = SOURCE_ROOT / "agent" / "script_bundle.js"
 SOURCE_SCRIPT_FILE_DEFAULT = SOURCE_ROOT / "agent" / "script.js"

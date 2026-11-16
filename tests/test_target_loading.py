@@ -93,9 +93,9 @@ class TargetLoadingTests(IsolatedAppTestCase):
             return new_apps()
 
         devices = Devices([
-            SimpleNamespace(id="A", enumerate_applications=old_apps,
+            SimpleNamespace(id="A", name="Device A", type="usb", enumerate_applications=old_apps,
                             enumerate_processes=lambda: [SimpleNamespace(name="Process", pid=123)]),
-            SimpleNamespace(id="B", enumerate_applications=new_apps),
+            SimpleNamespace(id="B", name="Device B", type="usb", enumerate_applications=new_apps),
         ])
         name = f"{change}-{old_fails}-{new_fails}"
         app = NoxenApp(SimpleNamespace(project=None, skip_device_scan=True,
@@ -162,7 +162,7 @@ class TargetLoadingTests(IsolatedAppTestCase):
         app._populate_target_apps = lambda: None
         try:
             async with app.run_test(size=(110, 36)) as pilot:
-                app._home_devices = Devices([SimpleNamespace(id="A")])
+                app._home_devices = Devices([SimpleNamespace(id="A", name="Device A", type="usb")])
                 device = app.query_one("#home_device", Select)
                 device.set_options([("A", "A")])
                 device.value = "A"
@@ -189,7 +189,7 @@ class TargetLoadingTests(IsolatedAppTestCase):
         session = SimpleNamespace(cleanup=lambda: cleaned.append(True))
         try:
             async with app.run_test(size=(110, 36)) as pilot:
-                app._home_devices = Devices([SimpleNamespace(id="A")])
+                app._home_devices = Devices([SimpleNamespace(id="A", name="Device A", type="usb")])
                 device = app.query_one("#home_device", Select)
                 device.set_options([("A", "A")])
                 device.value = "A"

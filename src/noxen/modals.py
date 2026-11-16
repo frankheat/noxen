@@ -134,6 +134,7 @@ class CrashesModal(ModalScreen):
         fields = (
             ("Crash", f"#{crash_id}"), ("Time", crash["timestamp"]),
             ("Device", crash["device"]), ("Target", crash["target"]),
+            ("Role", crash.get("role", "observer")),
             ("Process", f"{crash['process']} (PID {crash['pid']})"),
             ("Session", crash["captureSessionNumber"]), ("Reason", crash["reason"]),
             ("Summary", crash["summary"]),

@@ -290,6 +290,17 @@ class ProjectDB:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sender_requests (
+                id TEXT PRIMARY KEY,
+                revision INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sender_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_key TEXT NOT NULL UNIQUE,
+                payload TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS monitor_recordings (
                 id TEXT PRIMARY KEY,
                 started TEXT NOT NULL,
@@ -330,6 +341,89 @@ class ProjectDB:
     def save_crash(self, crash: dict) -> int:
         with self._lock, self._require_connection() as conn:
             return conn.execute("INSERT INTO crashes (payload) VALUES (?)", (json.dumps(crash),)).lastrowid
+
+    def sender_requests(self):
+        with self._lock:
+            return [dict(id=row[0], revision=row[1], name=row[2], request=json.loads(row[3]))
+                    for row in self._require_connection().execute(
+                        "SELECT id, revision, name, payload FROM sender_requests ORDER BY name, id")]
+
+    def sender_request(self, request_id):
+        with self._lock:
+            row = self._require_connection().execute(
+                "SELECT id, revision, name, payload FROM sender_requests WHERE id=?", (request_id,)
+            ).fetchone()
+        return dict(id=row[0], revision=row[1], name=row[2], request=json.loads(row[3])) if row else None
+
+    def save_sender_request(self, request_id, revision, name, request):
+        with self._lock, self._require_connection() as conn:
+            if revision == 0:
+                conn.execute("INSERT INTO sender_requests VALUES (?, 1, ?, ?)",
+                             (request_id, name, json.dumps(request, ensure_ascii=False)))
+            elif conn.execute(
+                "UPDATE sender_requests SET revision=revision+1, name=?, payload=? WHERE id=? AND revision=?",
+                (name, json.dumps(request, ensure_ascii=False), request_id, revision),
+            ).rowcount != 1:
+                raise ValueError("Request changed; reload it before saving")
+        return revision + 1
+
+    def remove_sender_request(self, request_id, revision):
+        with self._lock, self._require_connection() as conn:
+            if conn.execute("DELETE FROM sender_requests WHERE id=? AND revision=?",
+                            (request_id, revision)).rowcount != 1:
+                raise ValueError("Request changed; reload it before removing")
+
+    def create_sender_run(self, execution_key, payload):
+        with self._lock, self._require_connection() as conn:
+            return conn.execute("INSERT INTO sender_runs (execution_key, payload) VALUES (?, ?)",
+                                (execution_key, json.dumps(payload, ensure_ascii=False))).lastrowid
+
+    def save_sender_run(self, run_id, payload):
+        with self._lock, self._require_connection() as conn:
+            if conn.execute("UPDATE sender_runs SET payload=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), run_id)).rowcount != 1:
+                raise ValueError("Unknown Sender run")
+
+    def sender_run(self, *, run_id=None, execution_key=None):
+        with self._lock:
+            row = self._require_connection().execute(
+                "SELECT id, execution_key, payload FROM sender_runs WHERE id=? OR execution_key=?",
+                (run_id, execution_key),
+            ).fetchone()
+            return dict(json.loads(row[2]), id=row[0], execution_key=row[1]) if row else None
+
+    def sender_runs(self, before=None, limit=100):
+        with self._lock:
+            return [dict(json.loads(row[2]), id=row[0], execution_key=row[1])
+                    for row in self._require_connection().execute(
+                        "SELECT id, execution_key, payload FROM sender_runs WHERE ? IS NULL OR id<? ORDER BY id DESC LIMIT ?",
+                        (before, before, limit))]
+
+    def sender_run_summaries(self, query="", limit=200, sort=("id", True), before=None):
+        expressions = {"id": "id", "name": "json_extract(payload, '$.name')",
+                       "state": "json_extract(payload, '$.state')",
+                       "sender": "json_extract(payload, '$.sender.package')",
+                       "createdAt": "json_extract(payload, '$.createdAt')"}
+        column, reverse = sort
+        expression = expressions[column]
+        direction = "DESC" if reverse else "ASC"
+        # JSON extracts keep the table lightweight; only a selected run loads
+        # its potentially large arguments and result.
+        with self._lock:
+            rows = self._require_connection().execute(f"""
+                SELECT id, json_extract(payload, '$.name'), json_extract(payload, '$.state'),
+                       json_extract(payload, '$.sender.package'), json_extract(payload, '$.createdAt')
+                FROM sender_runs WHERE (? IS NULL OR id < ?)
+                    AND (? = '' OR instr(lower(payload), lower(?)) > 0)
+                ORDER BY {expression} {direction}, id DESC LIMIT ?
+            """, (before, before, query, query, limit)).fetchall()
+        return [dict(id=row[0], name=row[1], state=row[2], sender={"package": row[3]}, createdAt=row[4])
+                for row in rows]
+
+    def interrupt_sender_runs(self):
+        with self._lock, self._require_connection() as conn:
+            conn.execute("""UPDATE sender_runs SET payload = json_set(payload,
+                '$.state', 'unknown', '$.error', 'Controller closed before a result was recorded')
+                WHERE json_extract(payload, '$.state') IN ('preparing', 'running')""")
 
     def list_crashes(self, limit: int = -1, before_id: int | None = None) -> list[dict]:
         with self._lock:

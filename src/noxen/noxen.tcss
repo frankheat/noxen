@@ -275,7 +275,8 @@ TabPane {
     color: $accent;
 }
 #history_header #btn_columns,
-#monitor_pane #monitor_columns {
+#monitor_pane #monitor_columns,
+SenderPane .sender_controls .sender_columns_button {
     margin: 0;
     padding: 0 1;
     width: auto;
@@ -286,7 +287,8 @@ TabPane {
     color: $foreground;
     text-style: bold;
 }
-#monitor_pane #monitor_columns { margin-left: 1; }
+#monitor_pane #monitor_columns,
+SenderPane .sender_controls .sender_columns_button { margin-left: 1; }
 #history_header #btn_columns:hover,
 #history_header #btn_columns:focus,
 #monitor_pane #monitor_columns:hover,
@@ -332,6 +334,8 @@ Input:light > .input--suggestion {
     color: $foreground-muted;
 }
 #monitor_search,
+SenderPane .sender_controls Input,
+SenderRequestModal #sender_request_name,
 #mcp_port,
 #monitor_dialog Input {
     height: 3;
@@ -340,10 +344,17 @@ Input:light > .input--suggestion {
 }
 #monitor_search { background: transparent; }
 #monitor_search:focus,
+SenderPane .sender_controls Input:focus,
+SenderRequestModal #sender_request_name:focus,
 #mcp_port:focus,
 #monitor_dialog Input:focus { border: round $accent; }
 MCPPane Button,
+SenderPane .sender_controls Button,
+SenderRequestModal .buttons Button,
+SenderCaptureModal Button,
+SenderCompareModal Button,
 #log_crashes,
+#info_prepare_sender,
 #crash_actions Button,
 #monitor_pane .monitor_controls Button,
 #monitor_dialog Button,
@@ -358,9 +369,24 @@ MCPPane Button,
     background-tint: transparent;
 }
 MCPPane Button:hover,
+SenderPane .sender_controls Button:hover,
+SenderPane .sender_controls Button:focus,
+SenderPane .sender_controls Button.-active,
+SenderRequestModal .buttons Button:hover,
+SenderRequestModal .buttons Button:focus,
+SenderRequestModal .buttons Button.-active,
+SenderCaptureModal Button:hover,
+SenderCaptureModal Button:focus,
+SenderCaptureModal Button.-active,
+SenderCompareModal Button:hover,
+SenderCompareModal Button:focus,
+SenderCompareModal Button.-active,
 MCPPane Button:focus,
 MCPPane Button.-active,
 #log_crashes:hover,
+#info_prepare_sender:hover,
+#info_prepare_sender:focus,
+#info_prepare_sender.-active,
 #log_crashes:focus,
 #log_crashes.-active,
 #crash_actions Button:hover,
@@ -382,6 +408,8 @@ MCPPane Button.-active,
     color: $accent;
 }
 MCPPane Button:disabled,
+SenderPane .sender_controls Button:disabled,
+SenderRequestModal .buttons Button:disabled,
 #monitor_pane .monitor_controls Button:disabled,
 #monitor_dialog Button:disabled {
     border: round $foreground-muted;
@@ -673,6 +701,20 @@ Switch.-on > .switch--slider {
 }
 #home_form Select:focus > SelectCurrent {
     border: tall $foreground-muted;
+}
+SenderPane Select > SelectCurrent,
+SenderRequestModal Select > SelectCurrent,
+SenderCaptureModal Select > SelectCurrent {
+    border: round $foreground-muted;
+    background: $background;
+}
+SenderRequestModal TextArea {
+    border: round $foreground-muted;
+    background: $background;
+}
+#info_prepare_sender {
+    width: auto;
+    min-width: 9;
 }
 #home_btn {
     width: auto;

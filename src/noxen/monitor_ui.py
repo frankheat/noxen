@@ -170,7 +170,10 @@ class RecordingDialog(ModalScreen):
     RecordingDialog { align: center middle; }
     #recording_dialog { width: 85%; max-width: 72; height: auto; padding: 1 2;
         background: $surface; border: solid $foreground-muted; }
-    #recording_message { height: auto; margin: 1 0; }
+    #recording_message {
+        width: 100%; height: auto; margin: 1 0;
+        text-wrap: wrap; text-overflow: fold;
+    }
     #recording_dialog Horizontal { height: 3; align: right middle; }
     #recording_dialog Button { width: auto; min-width: 10; margin-left: 1; }
     """

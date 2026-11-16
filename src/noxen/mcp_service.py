@@ -27,6 +27,9 @@ from noxen.intent_mods import (
 from noxen.monitor import missing_default_hooks, signature, validate_hook, validate_profiles
 from noxen.monitor_ui import MonitorPane
 from noxen.rendering import capture_order_label, entry_to_filter_context
+from noxen.sender import SenderError, compare_sender_runs
+from noxen.sender_capture import prepare_intent_request, prepare_component_request
+from noxen.sender_service import endpoint_for_app
 
 
 class OperationError(ValueError):
@@ -127,16 +130,136 @@ class MCPService:
             "restore_monitor_defaults": self.restore_monitor_defaults,
             "retry_monitor_hooks": self.retry_monitor_hooks,
             "connect": self.connect, "disconnect": self.disconnect,
+            "get_sender": self.get_sender,
+            "check_sender_activity_context": self.check_sender_activity_context,
+            "prepare_sender_request": self.prepare_sender_request,
+            "prepare_sender_component": self.prepare_sender_component,
+            "connect_sender": self.connect_sender,
+            "disconnect_sender": self.disconnect_sender,
+            "retry_sender_recording": self.retry_sender_recording,
+            "list_sender_requests": self.list_sender_requests,
+            "get_sender_request": self.get_sender_request,
+            "save_sender_request": self.save_sender_request,
+            "remove_sender_request": self.remove_sender_request,
+            "execute_sender_request": self.execute_sender_request,
+            "get_sender_run": self.get_sender_run,
+            "list_sender_runs": self.list_sender_runs,
+            "wait_for_sender_run": self.wait_for_sender_run,
+            "cancel_sender_run": self.cancel_sender_run,
+            "compare_sender_runs": self.compare_sender_runs,
         }
         context_token = self._request_access.set(_access_open)
         try:
             result = await operations[operation](**arguments)
+        except SenderError as error:
+            raise OperationError(f"sender_error: {error}") from None
+        except (sqlite3.Error, OSError) as error:
+            if "sender" not in operation:
+                raise
+            raise OperationError(f"sender_storage_error: {error}") from None
         finally:
             self._request_access.reset(context_token)
         result = json_value(result)
         if len(json.dumps(result, ensure_ascii=True, allow_nan=False)) > MAX_RESULT_BYTES:
             raise OperationError("result_too_large: use a smaller page or a narrower query")
         return result
+
+    async def get_sender(self):
+        return self.app.sender_service.status()
+
+    async def check_sender_activity_context(self, expected_sender):
+        return await self.app.sender_service.activity_context(expected_sender)
+
+    async def prepare_sender_request(self, event_id, epoch, operation):
+        snapshot = await self.intent(event_id, epoch)
+        return {"request": prepare_intent_request(snapshot["intent"], operation),
+                "source": {"history_id": event_id}, "saved": False,
+                "note": "Review and save before executing. No flags are added automatically."}
+
+    async def prepare_sender_component(self, component_name, expected_connection):
+        if expected_connection != self.connection_token():
+            raise OperationError("state_changed: read get_status again")
+        info = self.app._app_info or {}
+        component = next((c for c in info.get("components", []) if c.get("name") == component_name), None)
+        if component is None:
+            raise OperationError("not_found: component is not present in the current Info app snapshot")
+        return {"request": prepare_component_request(info.get("identity", {}).get("package"), component),
+                "saved": False, "source": {"component": component_name}}
+
+    async def connect_sender(self, device_id, package, pid, expected_sender, expected_connection):
+        self.require_control(expected_connection)
+        endpoint = endpoint_for_app(self.app, device_id, pid)
+        result = await self.app.sender_service.connect(endpoint, package, expected_sender)
+        try:
+            self.require_control(expected_connection)
+        except OperationError:
+            if self.app.sender_service.token == result["token"]:
+                await self.app.sender_service.disconnect(result["token"])
+            raise
+        return result
+
+    async def disconnect_sender(self, expected_sender, expected_connection):
+        self.require_control(expected_connection)
+        return await self.app.sender_service.disconnect(expected_sender)
+
+    async def retry_sender_recording(self, expected_connection):
+        self.require_control(expected_connection)
+        self.app.sender_service.retry_save()
+        return self.app.sender_service.status()
+
+    async def list_sender_requests(self):
+        return {"requests": [{"id": r["id"], "name": r["name"], "revision": r["revision"],
+                               "operation": r["request"]["operation"]} for r in self.app.db.sender_requests()]}
+
+    async def get_sender_request(self, request_id):
+        return self.app.sender_service.get_request(request_id)
+
+    async def save_sender_request(self, name, request, expected_connection, request_id=None, revision=0):
+        self.require_control(expected_connection)
+        return self.app.sender_service.save_request(name, request, request_id, revision)
+
+    async def remove_sender_request(self, request_id, revision, expected_connection):
+        self.require_control(expected_connection)
+        self.app.sender_service.remove_request(request_id, revision)
+        return {"removed": request_id}
+
+    async def execute_sender_request(self, request_id, revision, expected_sender, execution_key, expected_connection):
+        self.require_control(expected_connection)
+        return self.app.sender_service.execute(request_id, revision, expected_sender, execution_key)
+
+    async def get_sender_run(self, run_id, section="all"):
+        run = self.app.sender_service.get_run(run_id)
+        if section == "all":
+            return run
+        keys = {"request": ("name", "request_id", "revision", "request"),
+                "sender": ("device", "sender"),
+                "result": ("state", "error", "result", "createdAt", "startedAt", "finishedAt", "receivedAt",
+                           "durationMs", "cancellationRequested", "senderCrashId", "activityContext")}
+        if section not in keys:
+            raise SenderError("Unknown run section")
+        return {"id": run["id"], **{key: run[key] for key in keys[section] if key in run}}
+
+    async def list_sender_runs(self, before_id=None, limit=25):
+        if not 1 <= limit <= 100:
+            raise OperationError("invalid_limit: use a limit between 1 and 100")
+        runs = await asyncio.to_thread(self.app.db.sender_run_summaries, "", limit, ("id", True), before_id)
+        for run in runs:
+            if run["id"] in self.app.sender_service.unsaved:
+                run["state"] = self.app.sender_service.unsaved[run["id"]]["state"]
+                run["saved"] = False
+        return {"runs": runs,
+                "next_before_id": runs[-1]["id"] if len(runs) == limit else None}
+
+    async def wait_for_sender_run(self, run_id, timeout=30):
+        return await self.app.sender_service.wait(run_id, timeout)
+
+    async def cancel_sender_run(self, run_id, expected_sender, expected_connection):
+        self.require_control(expected_connection)
+        return await self.app.sender_service.cancel(run_id, expected_sender)
+
+    async def compare_sender_runs(self, left_id, right_id):
+        return await asyncio.to_thread(compare_sender_runs, self.app.sender_service.get_run(left_id),
+                                       self.app.sender_service.get_run(right_id))
 
     async def status(self):
         app = self.app

@@ -1525,7 +1525,16 @@ function createHook(targetWrapper, className, methodName, overloadArgs) {
   };
 }
 
+let sender = null;
+function getSender() {
+  if (sender === null) sender = require('./sender.js').createSender(inspectIntent);
+  return sender;
+}
 rpc.exports = {
+  senderIdentity: function () { return getSender().identity(); },
+  senderActivityContext: function () { return getSender().checkActivityContext(); },
+  senderExecute: function (request, jobId) { return getSender().execute(request, jobId); },
+  senderCancel: function (jobId) { return getSender().cancel(jobId); },
   setCaptureOrderStart: function (previous, sessionNumber) {
     if (captureSessionNumber || captureSequence !== 0 || !Number.isSafeInteger(previous) ||
         previous < 0 || previous >= Number.MAX_SAFE_INTEGER ||

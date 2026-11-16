@@ -98,7 +98,7 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
             async with app.run_test(size=(120, 40)) as pilot:
                 tabs = app.query_one("#main_tabs", TabbedContent)
                 tabs.active = "tab_mcp"
-                app._home_devices = [SimpleNamespace(id="device-1")]
+                app._home_devices = [SimpleNamespace(id="device-1", name="Test device", type="usb")]
                 app.mcp_service.enabled = app.mcp_service.allow_control = True
                 with patch.object(app, "_init_session", side_effect=init_session):
                     result = await app.mcp_service.invoke(
@@ -175,7 +175,7 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                 async with app.run_test(size=(120, 40)) as pilot:
                     app.notify = lambda *_args, **_kwargs: None
                     app._populate_target_apps = lambda: None
-                    app._home_devices = [SimpleNamespace(id="device-1")]
+                    app._home_devices = [SimpleNamespace(id="device-1", name="Test device", type="usb")]
                     app.frida_session = current_session
 
                     device = app.query_one("#home_device", Select)
@@ -210,7 +210,7 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
             async with app.run_test(size=(120, 40)) as pilot:
                 app.notify = lambda message, **kwargs: notices.append((message, kwargs))
                 app._populate_target_apps = lambda: None
-                app._home_devices = [SimpleNamespace(id="device-1")]
+                app._home_devices = [SimpleNamespace(id="device-1", name="Test device", type="usb")]
                 device = app.query_one("#home_device", Select)
                 device.set_options([("Android", "device-1")])
                 device.value = "device-1"
@@ -258,7 +258,7 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                 async with app.run_test(size=(120, 40)) as pilot:
                     app.notify = lambda message, **kwargs: notices.append((message, kwargs))
                     app._populate_target_apps = lambda: None
-                    app._home_devices = [SimpleNamespace(id="device-1")]
+                    app._home_devices = [SimpleNamespace(id="device-1", name="Test device", type="usb")]
 
                     device = app.query_one("#home_device", Select)
                     device.set_options([("Android", "device-1")])
@@ -338,7 +338,7 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                 async with app.run_test(size=(120, 40)) as pilot:
                     app._populate_target_apps = lambda: None
                     app._fetch_app_info_worker = lambda: None
-                    app._home_devices = [SimpleNamespace(id="device-1")]
+                    app._home_devices = [SimpleNamespace(id="device-1", name="Test device", type="usb")]
 
                     device = app.query_one("#home_device", Select)
                     device.set_options([("Android", "device-1")])

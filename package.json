@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/test_agent_*.cjs",
-    "build": "npm run build:app && npm run build:system-server && npm run sync:runtime",
+    "build": "npm run build:app && npm run build:system-server && npm run build:sender && npm run sync:runtime",
+    "build:sender": "frida-compile agent/sender_entry.js -o agent/sender_bundle.js -T none --bundle-format iife",
     "build:app": "frida-compile agent/script.js -o agent/script_bundle.js -T none --bundle-format iife",
     "build:system-server": "frida-compile agent/system_server.js -o agent/system_server_bundle.js -T none --bundle-format iife",
     "sync:runtime": "node scripts/sync-runtime-assets.js"

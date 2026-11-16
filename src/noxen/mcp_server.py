@@ -102,6 +102,129 @@ def create_http_app(invoke, token, port):
     write = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True)
 
     @server.tool(annotations=read)
+    async def get_sender() -> dict[str, Any]:
+        """Read the separate Sender identity and token. UID is the actual caller; it may have privileges absent in an ordinary app."""
+        return await invoke("get_sender")
+
+    @server.tool(annotations=read)
+    async def check_sender_activity_context(expected_sender: str) -> dict[str, Any]:
+        """Sample the Sender process before startActivity. Background means Android may block the launch.
+
+        This is a process-importance signal, not a verdict about window visibility or launch permission.
+        Sending remains explicit through execute_sender_request.
+        """
+        return await invoke("check_sender_activity_context", expected_sender=expected_sender)
+
+    @server.tool(annotations=read)
+    async def prepare_sender_request(event_id: int, epoch: str, operation: str) -> dict[str, Any]:
+        """Prepare supported captured Intent fields from History without saving or sending.
+
+        Choose the sending operation explicitly, including for receiving hooks. Incomplete,
+        opaque or ambiguous captures are rejected rather than silently dropping values.
+        NEW_TASK is not inserted; review flags before a startActivity request is saved.
+        """
+        return await invoke("prepare_sender_request", event_id=event_id, epoch=epoch, operation=operation)
+
+    @server.tool(annotations=read)
+    async def prepare_sender_component(component_name: str, expected_connection: str) -> dict[str, Any]:
+        """Prepare an unsent draft from Info app. Activity drafts include NEW_TASK; provider drafts contain only the authority, no inferred path or SQL."""
+        return await invoke("prepare_sender_component", component_name=component_name, expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def connect_sender(device_id: str, package: str, pid: int, expected_sender: str,
+                             expected_connection: str) -> dict[str, Any]:
+        """Attach a running application as Sender. Read get_sender and get_status first. Does not launch or restart the app."""
+        return await invoke("connect_sender", device_id=device_id, package=package, pid=pid,
+                            expected_sender=expected_sender, expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def disconnect_sender(expected_sender: str, expected_connection: str) -> dict[str, Any]:
+        """Detach Sender without disconnecting the observer. An in-flight operation may still complete."""
+        return await invoke("disconnect_sender", expected_sender=expected_sender, expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def retry_sender_recording(expected_connection: str) -> dict[str, Any]:
+        """Retry saving in-memory Sender results after a storage error. Does not execute requests again."""
+        return await invoke("retry_sender_recording", expected_connection=expected_connection)
+
+    @server.tool(annotations=read)
+    async def list_sender_requests() -> dict[str, Any]:
+        """Read saved Sender requests and their revisions."""
+        return await invoke("list_sender_requests")
+
+    @server.tool(annotations=read)
+    async def get_sender_request(request_id: str) -> dict[str, Any]:
+        """Read the full arguments and revision of a saved Sender request."""
+        return await invoke("get_sender_request", request_id=request_id)
+
+    @server.tool(annotations=write)
+    async def save_sender_request(name: str, request: dict[str, Any], expected_connection: str,
+                                  request_id: str | None = None, revision: int = 0) -> dict[str, Any]:
+        """Create or update a saved request; never sends it. Existing requests require their revision.
+
+        Operations: startActivity, sendBroadcast, sendOrderedBroadcast, startService, startForegroundService,
+        stopService, query, getType, insert, update, delete, call, openFileDescriptor (read-only).
+        Intent operations use an intent object with
+        component/package/action/data/mimeType/flags/categories/extras/selector/clipData.
+        Extras and provider values are keyed {type, value} objects. Types: String, boolean,
+        byte, short, int, long (decimal string), float, double, char, Bundle, Intent, Uri;
+        arrays of String, boolean, byte, short, int, long, float, double, char, Intent are supported.
+        ContentValues accepts scalar types except char, plus byte[].
+        startActivity requires explicit NEW_TASK (268435456). Provider requests require a content URI.
+        Query accepts projection, selection, selectionArgs, sortOrder, maxRows (1..1000), maxBytes (1..262144).
+        Query defaults to 100 rows / 256 KiB. Null and empty strings are distinct.
+        """
+        return await invoke("save_sender_request", name=name, request=request, expected_connection=expected_connection,
+                            request_id=request_id, revision=revision)
+
+    @server.tool(annotations=write)
+    async def remove_sender_request(request_id: str, revision: int, expected_connection: str) -> dict[str, Any]:
+        """Remove the saved request at this revision; preserves all previous runs."""
+        return await invoke("remove_sender_request", request_id=request_id, revision=revision, expected_connection=expected_connection)
+
+    @server.tool(annotations=write)
+    async def execute_sender_request(request_id: str, revision: int, expected_sender: str,
+                                     execution_key: str, expected_connection: str) -> dict[str, Any]:
+        """Send once from the selected app. Reuse execution_key on retries to retrieve the same run.
+
+        Returns a pending run immediately; use wait_for_sender_run for the result. Returned means
+        the Android call returned, not that a broadcast was delivered or an Activity appeared.
+        Intercept can hold this operation. Do not automatically forward a user's held Intent.
+        """
+        return await invoke("execute_sender_request", request_id=request_id, revision=revision,
+                            expected_sender=expected_sender, execution_key=execution_key, expected_connection=expected_connection)
+
+    @server.tool(annotations=read)
+    async def get_sender_run(run_id: int, section: Literal["all", "request", "result", "sender"] = "all") -> dict[str, Any]:
+        """Read/export a run as JSON. For a result_too_large error, retrieve request, result and sender separately.
+
+        Includes actual results and timing; no server-side file is created. Section result includes
+        state, error and timestamps. Section request includes the immutable arguments and revision.
+        """
+        return await invoke("get_sender_run", run_id=run_id, section=section)
+
+    @server.tool(annotations=read)
+    async def compare_sender_runs(left_id: int, right_id: int) -> dict[str, Any]:
+        """Compare requests, callers and direct results. Excludes timestamps; differences do not establish vulnerability or causality."""
+        return await invoke("compare_sender_runs", left_id=left_id, right_id=right_id)
+
+    @server.tool(annotations=read)
+    async def list_sender_runs(before_id: int | None = None, limit: int = 25) -> dict[str, Any]:
+        """Page saved Sender runs, newest first. Nearby captures do not prove causality."""
+        return await invoke("list_sender_runs", before_id=before_id, limit=limit)
+
+    @server.tool(annotations=read)
+    async def wait_for_sender_run(run_id: int, timeout: float = 30) -> dict[str, Any]:
+        """Wait up to 30 seconds without cancelling or retrying the Android operation."""
+        return await invoke("wait_for_sender_run", run_id=run_id, timeout=timeout)
+
+    @server.tool(annotations=write)
+    async def cancel_sender_run(run_id: int, expected_sender: str, expected_connection: str) -> dict[str, Any]:
+        """Request cooperative cancellation of a query or file read. Does not imply rollback or confirmed cancellation."""
+        return await invoke("cancel_sender_run", run_id=run_id, expected_sender=expected_sender,
+                            expected_connection=expected_connection)
+
+    @server.tool(annotations=read)
     async def get_status() -> dict[str, Any]:
         """Read connection state, agent readiness, Input ANR bypass status, control permission and event epochs."""
         return await invoke("get_status")

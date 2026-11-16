@@ -72,6 +72,9 @@ from noxen.frida_session import FridaSession, SessionConfig
 from noxen.history_columns import normalize_history_column_widths
 from noxen.history_table import HistoryTable
 from noxen.monitor_ui import MonitorPane, RecordingDialog
+from noxen.sender_service import SenderService
+from noxen.sender_ui import SenderPane, SenderRequestModal
+from noxen.sender_capture import prepare_component_request
 from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
@@ -398,6 +401,7 @@ class NoxenApp(App):
         self.system_server_session: SystemServerSession | None = None
         self.frida_session = None
         self.db, self._all_intents = self._init_project(cli_args)
+        self.sender_service = SenderService(self.db)
         self._history_search_index = {
             id(entry): history_search_text(entry) for entry in self._all_intents
         }
@@ -466,6 +470,7 @@ class NoxenApp(App):
             hold_start_cb=self._on_hold_start,
             hold_end_cb=self._on_hold_end,
             device_resolver=getattr(self._home_devices, "get_device", None),
+            validate_target=self.sender_service.validate_observer_target,
             begin_capture_session=self.db.begin_capture_session,
             release_cb=self._on_intent_released,
             crash_cb=self._record_crash,
@@ -477,6 +482,7 @@ class NoxenApp(App):
 
     def _start_validated_connection(self, device_id: str, config: SessionConfig, *, open_intercept=True):
         """Start the same session from Home or MCP after source validation."""
+        self.sender_service.validate_observer_config(device_id, config)
         if self.frida_session:
             self.frida_session.cleanup()
             self.frida_session = None
@@ -1147,6 +1153,18 @@ class NoxenApp(App):
         return True
 
     def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "info_prepare_sender":
+            try:
+                info = self._app_info or {}
+                component = next((c for c in info.get("components", []) if c.get("name") == self._info_selected_component), None)
+                if component is None:
+                    raise ValueError("Select a component first")
+                request = prepare_component_request(info.get("identity", {}).get("package"), component)
+                self.push_screen(SenderRequestModal(self.sender_service,
+                    {"id": None, "revision": 0, "name": component["name"], "request": request}))
+            except ValueError as error:
+                self.notify(str(error), severity="error")
+            return
         if event.button.id == "log_crashes":
             self.push_screen(CrashesModal(self.db))
             return
@@ -1563,6 +1581,8 @@ class NoxenApp(App):
                 yield Rule(classes="section_separator")
             with TabPane(" Monitor ", id="tab_monitor"):
                 yield MonitorPane(id="monitor_pane")
+            with TabPane(" Sender ", id="tab_sender"):
+                yield SenderPane(id="sender_pane")
             with TabPane(" Info app ", id="tab_info"):
                 with TabbedContent(initial="info_view_overview", id="info_views", classes="subtabs empty"):
                     with TabPane("Overview", id="info_view_overview"):
@@ -1590,6 +1610,7 @@ class NoxenApp(App):
                             with Horizontal(id="info_exposed_group", classes="switch-control"):
                                 yield Switch(value=False, id="info_comp_exposed")
                                 yield Label("Exposed only", classes="switch-control-label")
+                            yield ModalButton("Prepare", id="info_prepare_sender", tooltip="Prepare a Sender request; does not send it")
                         yield Rule(classes="section_separator")
                         yield DataTable(id="info_comp_table", cursor_type="row")
                         yield Rule(classes="section_separator")
@@ -1774,7 +1795,7 @@ class NoxenApp(App):
 
         self._save_home_paths(hooks_path_raw, script_path_raw)
         script_path = script_path_raw or None
-        self._start_validated_connection(device_id, SessionConfig(
+        config = SessionConfig(
             spawn_package=target if mode == "f" else None,
             attach_name=target if mode == "n" else None,
             attach_pid=attach_pid,
@@ -1782,7 +1803,12 @@ class NoxenApp(App):
             validated_hooks=validated_hooks,
             extra_script=script_path,
             extra_script_source=extra_source,
-        ))
+        )
+        try:
+            self._start_validated_connection(device_id, config)
+        except ValueError as error:
+            self.query_one("#home_error", Label).update(Text(str(error)))
+            self.notify(str(error), severity="error")
 
     def on_select_changed(self, event: Select.Changed):
         if event.select.id in ("home_device", "home_mode"):
@@ -2726,6 +2752,9 @@ class NoxenApp(App):
             self._focus_history_main_panel()
             if self._history_table_height is None:
                 self.call_after_refresh(self._init_panel_heights)
+        elif pane_id == "tab_sender":
+            sender = self.query_one(SenderPane)
+            sender.query_one(f"#{sender.active_table()}", DataTable).focus()
         elif pane_id == "tab_info" and self.check_action("resize_panel_up", ()):
             self.call_after_refresh(self._clamp_info_component_detail_to_available_space)
         elif pane_id == "tab_log":
@@ -2754,6 +2783,16 @@ class NoxenApp(App):
                 ))
                 if exit_anyway:
                     break
+            await self.sender_service.disconnect(self.sender_service.token)
+            self.sender_service.retry_save()
+            while self.sender_service.unsaved:
+                exit_anyway = await self.push_screen_wait(RecordingDialog(
+                    f"Sender results could not be saved.\n\n{self.sender_service.error}",
+                    "Exit anyway", "Retry",
+                ))
+                if exit_anyway:
+                    break
+                self.sender_service.retry_save()
             self.exit()
 
     def set_intercept_state(self, is_intercepted):
@@ -2841,6 +2880,8 @@ class NoxenApp(App):
         if action == "toggle_command_bar":
             return self._active_tab in ("tab_history", "tab_intercept")
         if action in ("resize_panel_up", "resize_panel_down"):
+            if self._active_tab == "tab_sender":
+                return not self.screen.is_modal
             if self._active_tab == "tab_intercept":
                 return True if self._intercept_command_bar_visible else None
             if self._active_tab == "tab_info":
@@ -2987,6 +3028,8 @@ class NoxenApp(App):
             self._adjust_info_component_detail(1)
         elif self._monitor_events_active():
             self.query_one(MonitorPane).adjust_event_detail(1)
+        elif self._active_tab == "tab_sender" and not self.screen.is_modal:
+            self.query_one(SenderPane).adjust_detail(1)
 
     def action_resize_panel_down(self):
         if self._active_tab == "tab_intercept":
@@ -3002,6 +3045,8 @@ class NoxenApp(App):
             self._adjust_info_component_detail(-1)
         elif self._monitor_events_active():
             self.query_one(MonitorPane).adjust_event_detail(-1)
+        elif self._active_tab == "tab_sender" and not self.screen.is_modal:
+            self.query_one(SenderPane).adjust_detail(-1)
 
     def action_toggle_command_bar(self):
         if self._active_tab == "tab_intercept":
@@ -3540,8 +3585,9 @@ class NoxenApp(App):
         except Exception:
             pass
 
-    def on_unmount(self):
+    async def on_unmount(self):
         self.mcp_service.enabled = False
+        await self.sender_service.disconnect(self.sender_service.token)
         if self.frida_session:
             self.frida_session.connection_failed_cb = None
             self.frida_session.disconnected_cb = None
