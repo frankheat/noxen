@@ -1,3 +1,4 @@
+import copy
 import sqlite3
 import tempfile
 from unittest.mock import patch
@@ -310,12 +311,39 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.press("f4")
                 await pilot.pause()
                 self.assertEqual(str(app.query_one("#btn_history_view").label), "Details")
-                self.assertIn('"operation": "sendOrderedBroadcast"', shown())
+                self.assertIn('"hook": "sendOrderedBroadcast()"', shown())  # Shown for reading only...
+                self.assertIn('"operation": "sendOrderedBroadcast"', shown())  # The hooked call itself.
+                self.assertNotIn("hook", saved[0]["request"])  # ...To Sender converts it away.
                 self.assertIn('"action": "test.PING"', shown())
                 self.assertNotIn("[HOOK]", shown())
                 await pilot.click("#btn_history_view")
                 await pilot.pause()
                 self.assertIn("[HOOK]", shown())
+
+                # A capture with gaps is offered without them, and only if the user accepts.
+                gapped = copy.deepcopy(intent)
+                gapped["extras"] = {"obj": {"structuredVersion": 1, "structured": {"kind": "object", "type": "test.Custom"}},
+                                    "n": {"structuredVersion": 1, "structured": {
+                                        "kind": "scalar", "type": "java.lang.Integer", "value": "3"}}}
+                app._history_selected_entry = {"id": 10, "method": "sendBroadcast", "intent": gapped}
+                before = len(app.db.sender_requests())
+                await pilot.press("ctrl+r")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, RecordingDialog)
+                self.assertIn("test.Custom", str(app.screen.query_one("#recording_message", Label).render()))
+                await pilot.click("#recording_cancel")
+                await pilot.pause()
+                self.assertEqual(len(app.db.sender_requests()), before)
+                await pilot.press("ctrl+r")
+                await pilot.pause()
+                await pilot.click("#recording_confirm")
+                await pilot.pause(0.4)
+                self.assertEqual(app.db.sender_request(pane._selected_id)["request"]["intent"]["extras"],
+                                 {"n": {"type": "int", "value": 3}})
+                for row in app.db.sender_requests()[before:]:  # Keep the numbering below as it was.
+                    app.sender_service.remove_request(row["id"], row["revision"])
+                pane.refresh_sender()
+                await pilot.pause(0.4)
 
                 # A receiving hook that does not imply an operation asks for one.
                 app._history_selected_entry = {"id": 8, "method": "setResult", "intent": intent}

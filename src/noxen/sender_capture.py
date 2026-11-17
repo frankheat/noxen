@@ -31,31 +31,37 @@ def _fail(notes, message):
         notes.append(message)
 
 
+def _at_limit(value):
+    """Older captures did not flag every truncated string: one at the capture limit may be a prefix."""
+    if isinstance(value, str):
+        return len(value.encode("utf-16-le", errors="surrogatepass")) // 2 >= 2048
+    if isinstance(value, list):
+        return any(_at_limit(item) for item in value if not isinstance(item, dict))
+    return False
+
+
 def _complete(node, path, notes=None):
+    """True when `node` was captured in full. Otherwise the gap is refused, or noted when `notes` is given."""
     if not isinstance(node, dict):
         _fail(notes, f"{path}: no structured capture is available")
         return False
     if any(value for key, value in node.items()
            if key in INCOMPLETE or key.endswith("Truncated") or key == "truncated"):
         _fail(notes, f"{path}: capture is incomplete; create or repair this value explicitly")
-    # Older captures did not flag every truncated ClipData/category string.
-    # Refuse ambiguous values at the capture boundary instead of replaying a prefix.
-    def boundary(value):
-        if isinstance(value, str):
-            return len(value.encode("utf-16-le", errors="surrogatepass")) // 2 >= 2048
-        if isinstance(value, list):
-            return any(boundary(item) for item in value if not isinstance(item, dict))
         return False
-    if any(boundary(value) for value in node.values()):
+    if any(_at_limit(value) for value in node.values()):
         _fail(notes, f"{path}: a value reaches the capture length limit; enter it explicitly")
+        return False
     return True
 
 
 def _bundle(node, path, notes=None):
     if node is None:
         return {}
-    if not _complete(node, path, notes):
+    if not isinstance(node, dict):
+        _fail(notes, f"{path}: no structured capture is available")
         return {}
+    _complete(node, path, notes)  # Without `notes` an incomplete Bundle is refused here.
     items = node.get("items")
     if node.get("kind") != "bundle" or not isinstance(items, list) or node.get("count") != len(items):
         _fail(notes, f"{path}: Bundle is incomplete")
@@ -72,6 +78,7 @@ def _bundle(node, path, notes=None):
 
 
 def _value(node, path, notes=None):
+    """One typed value, or SKIP when it was not captured in full (only possible with `notes`)."""
     if not _complete(node, path, notes):
         return SKIP
     kind = node.get("kind")
@@ -113,12 +120,21 @@ def _value(node, path, notes=None):
 
 
 def _intent(info, path, nested=False, notes=None):
-    if not _complete(info, path, notes):
+    if not isinstance(info, dict):
+        _fail(notes, f"{path}: no structured capture is available")
         return {}
+    # A partial Intent keeps what was captured and leaves out the fields the agent reported as cut or unread.
+    dropped = set()
+    if not _complete(info, path, notes):
+        dropped = {*(info.get("truncatedFields") or ()), *(info.get("unreadableFields") or ())}
+        if info.get("categoriesReadError"):
+            dropped.add("categories")
     result = {}
     for key in ("component", "action", "data", "mimeType", "package", "flags", "categories", "selector", "clipData"):
         if key not in info:
             _fail(notes, f"{path}.{key}: field was not captured")
+            continue
+        if key in dropped or (key not in ("selector", "clipData") and _at_limit(info[key])):
             continue
         if key == "selector":
             result[key] = None if info[key] is None else _intent(info[key], f"{path}.selector", nested=True, notes=notes)
@@ -127,8 +143,10 @@ def _intent(info, path, nested=False, notes=None):
             if clip is None:
                 result[key] = None
                 continue
-            if not _complete(clip, f"{path}.clipData", notes):
+            if not isinstance(clip, dict):
+                _fail(notes, f"{path}.clipData: no structured capture is available")
                 continue
+            _complete(clip, f"{path}.clipData", notes)
             if clip.get("kind") != "clipdata" or clip.get("count") != len(clip.get("items", [])):
                 _fail(notes, f"{path}.clipData: incomplete capture")
             items = []
@@ -140,7 +158,12 @@ def _intent(info, path, nested=False, notes=None):
                 items.append({"text": item.get("text"), "htmlText": item.get("html"), "uri": item.get("uri"),
                               "intent": None if item.get("intent") is None else
                               _intent(item["intent"], path + ".clipData.intent", nested=True, notes=notes)})
-            result[key] = {"label": clip.get("label"), "mimeTypes": clip.get("mimeTypes"), "items": items}
+            mime_types = [value for value in clip.get("mimeTypes") or [] if not _at_limit(value)]
+            if items and mime_types:
+                result[key] = {"label": None if _at_limit(clip.get("label")) else clip.get("label"),
+                               "mimeTypes": mime_types, "items": items}
+            else:
+                _fail(notes, f"{path}.clipData: nothing usable was captured")
         else:
             result[key] = info[key]
     if "flags" in result:
@@ -179,14 +202,18 @@ def _receiver_permission(entry, request, notes=None):
 
 
 @refuses_malformed
-def prepare_intent_request(entry, operation):
-    """Operation is always explicit, especially for receiving hooks."""
+def prepare_intent_request(entry, operation, notes=None):
+    """Operation is always explicit, especially for receiving hooks.
+
+    A capture with gaps is refused. With a `notes` list it is rebuilt without
+    them instead, and each value left out is described in `notes`.
+    """
     from noxen.sender import INTENT_OPERATIONS
     if operation not in INTENT_OPERATIONS:
         raise SenderError("Choose an Intent sending operation")
-    request = {"operation": operation, "intent": _intent(entry.get("intent"), "intent")}
+    request = {"operation": operation, "intent": _intent(entry.get("intent"), "intent", notes=notes)}
     if operation in ("sendBroadcast", "sendOrderedBroadcast"):
-        _receiver_permission(entry, request)
+        _receiver_permission(entry, request, notes)
     # Do not add NEW_TASK or change any captured field. The editor can repair a
     # request that is unsuitable for an Application-context Activity launch.
     return request
@@ -222,16 +249,20 @@ CAPTURE_OPERATIONS = {
 
 
 def capture_as_request(entry):
-    """The captured Intent in Sender's request format, for reading and copying.
+    """The captured Intent in Sender's request format, for reading.
 
-    Nothing is refused: whatever could not be rebuilt is listed under
-    `notCaptured`. Sender rejects that field, so such a request cannot be
-    saved or sent before it has been reviewed and the list removed.
+    `hook` names the hooked call and is for reading only: To Sender converts
+    the capture itself with prepare_intent_request, never this view. Nothing is
+    refused: what could not be rebuilt is left out and listed under
+    `notCaptured`. The operation is shown only when the hook was that call: for
+    a receiving hook such as getIntent, how the Intent was sent is not known.
     """
+    from noxen.sender import INTENT_OPERATIONS
     notes = []
     request = {}
     try:
-        operation = capture_operation(entry)
+        method = entry.get("method") if isinstance(entry, dict) else None
+        operation = method if method in INTENT_OPERATIONS else None
         if operation is not None:
             request["operation"] = operation
         request["intent"] = _intent(entry.get("intent") if isinstance(entry, dict) else None, "intent", notes=notes)
@@ -241,7 +272,22 @@ def capture_as_request(entry):
         notes.append("This capture is malformed and could not be read in full")
     if notes:
         request = {"notCaptured": notes, **request}
+    hook = _hook_label(entry)
+    if hook:
+        request = {"hook": hook, **request}
     return request
+
+
+def _hook_label(entry):
+    """`Class.method()` of the hook that captured `entry`, for reading only."""
+    if not isinstance(entry, dict):
+        return None
+    clazz, method = entry.get("class"), entry.get("method")
+    clazz = clazz if isinstance(clazz, str) and clazz else None
+    method = method if isinstance(method, str) and method else None
+    if method is None:
+        return clazz
+    return f"{clazz}.{method}()" if clazz else f"{method}()"
 
 
 def capture_operation(entry):

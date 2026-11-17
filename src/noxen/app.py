@@ -3067,19 +3067,43 @@ class NoxenApp(App):
                 raise ValueError("Select an Intent in History first")
             operation = capture_operation(entry)
             if operation is not None:
-                sender.receive_request(prepare_intent_request(entry, operation))
+                self._send_capture_to_sender(entry, operation)
                 return
             # The hook does not say how this Intent is delivered: the operation is a choice.
             def chosen(operation):
                 if operation:
-                    try:
-                        sender.receive_request(prepare_intent_request(entry, operation))
-                    except ValueError as error:
-                        self.notify(str(error), severity="error")
+                    self._send_capture_to_sender(entry, operation)
             button = self.query_one("#btn_history_sender").region
             self.push_screen(SenderTabMenu(button.x, button.bottom, [(op, op) for op in INTENT_OPERATIONS]), chosen)
         except ValueError as error:
             self.notify(str(error), severity="error")
+
+    def _send_capture_to_sender(self, entry, operation):
+        """A complete capture goes to Sender as it is; one with gaps only if the user accepts losing them."""
+        sender = self.query_one(SenderPane)
+        try:
+            sender.receive_request(prepare_intent_request(entry, operation))
+            return
+        except ValueError as error:
+            refusal = error
+        notes = []
+        try:
+            partial = prepare_intent_request(entry, operation, notes=notes)
+        except ValueError:
+            notes = []
+        if not notes:
+            self.notify(str(refusal), severity="error")
+            return
+        shown = "\n".join(f"• {note}" for note in notes[:6])
+        if len(notes) > 6:
+            shown += f"\n• and {len(notes) - 6} more"
+        def answered(confirmed):
+            if confirmed:
+                sender.receive_request(partial)
+        self.push_screen(RecordingDialog(
+            f"Some values of this Intent were not captured in full:\n\n{shown}\n\n"
+            "Send it to Sender without them? Review the request before sending it.",
+            "Send without them"), answered)
 
     def action_sender_divider(self, direction):
         self.query_one(SenderPane).adjust_detail(direction)

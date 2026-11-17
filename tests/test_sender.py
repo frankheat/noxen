@@ -218,15 +218,24 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 class CaptureTests(unittest.TestCase):
     def test_capture_is_shown_as_a_request_and_lists_what_could_not_be_rebuilt(self):
         entry = self.capture()
+        entry["class"] = "android.app.ContextImpl"
         entry["method"] = "sendOrderedBroadcast"
         entry["attackSurface"] = {"broadcastPermission": {"name": "test.PERM", "level": "normal"}}
-        # A complete capture is exactly what To Sender would create, receiver permission included.
+        # The view names the hook first; the rest is exactly what To Sender would create.
         shown = capture_as_request(entry)
-        self.assertEqual(shown, prepare_intent_request(entry, "sendOrderedBroadcast"))
+        self.assertEqual(list(shown)[0], "hook")
+        self.assertEqual(shown["hook"], "android.app.ContextImpl.sendOrderedBroadcast()")
+        sent = prepare_intent_request(entry, "sendOrderedBroadcast")
+        self.assertNotIn("hook", sent)  # Converted for Sender, which does not take `hook`.
+        self.assertEqual({key: value for key, value in shown.items() if key != "hook"}, sent)
         self.assertEqual(shown["receiverPermission"], "test.PERM")
-        validate_request(shown)
-        # A hook that implies no operation leaves it for the reader to choose.
-        self.assertNotIn("operation", capture_as_request(dict(entry, method="setResult")))
+        validate_request(sent)
+        # Only the hooked call itself is an operation: a receiving hook does not say how it was sent.
+        for method in ("setResult", "getIntent", "onReceive", "getActivity"):
+            received = capture_as_request(dict(entry, method=method))
+            self.assertNotIn("operation", received)
+            self.assertEqual(received["hook"], f"android.app.ContextImpl.{method}()")
+        self.assertNotIn("hook", capture_as_request(self.capture()))  # No hook recorded, none shown.
 
         entry["intent"]["extras"] = {
             "ok": {"structuredVersion": 1, "structured": {"kind": "scalar", "type": "java.lang.Integer", "value": "7"}},
@@ -235,15 +244,27 @@ class CaptureTests(unittest.TestCase):
                                                           "value": "abc", "truncated": True}},
         }
         shown = capture_as_request(entry)
-        self.assertEqual(shown["intent"]["extras"], {"ok": {"type": "int", "value": 7},
-                                                     "cut": {"type": "String", "value": "abc"}})
-        self.assertEqual(list(shown)[0], "notCaptured")
+        self.assertEqual(shown["intent"]["extras"], {"ok": {"type": "int", "value": 7}})  # Gaps are left out.
+        self.assertEqual(list(shown)[:2], ["hook", "notCaptured"])
         self.assertTrue(any("opaque" in note and "test.Custom" in note for note in shown["notCaptured"]))
         self.assertTrue(any("cut" in note for note in shown["notCaptured"]))
         with self.assertRaisesRegex(SenderError, "notCaptured"):  # It cannot be saved before being reviewed.
             validate_request(shown)
         with self.assertRaises(SenderError):
             prepare_intent_request(entry, "sendOrderedBroadcast")
+        # Accepting the gaps gives the same request without them, which Sender takes as it is.
+        notes = []
+        partial = prepare_intent_request(entry, "sendOrderedBroadcast", notes=notes)
+        self.assertEqual(notes, shown["notCaptured"])
+        self.assertEqual(partial, {key: value for key, value in shown.items() if key not in ("hook", "notCaptured")})
+        validate_request(partial)
+        # Fields the agent reported as cut or unreadable are left out, not replayed as a prefix.
+        cut = self.capture()
+        cut["intent"].update(action="a" * 2048, truncatedFields=["action"], unreadableFields=["component"])
+        notes = []
+        self.assertEqual(sorted(prepare_intent_request(cut, "sendBroadcast", notes=notes)["intent"]),
+                         ["categories", "clipData", "data", "extras", "flags", "mimeType", "package", "selector"])
+        self.assertTrue(notes)
         for junk in (None, 5, {"intent": []}, {"intent": {"extras": {"k": 1}}}):
             self.assertIn("notCaptured", capture_as_request(junk))
 
