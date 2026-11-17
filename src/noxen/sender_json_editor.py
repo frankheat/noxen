@@ -20,6 +20,14 @@ PALETTES = {
 }
 
 
+def json_text(text, dark=True):
+    """Read-only JSON in the editor's colours, for panels that only show it."""
+    result = Text(text)
+    for kind, start, end, _ in sender_json.tokens(text):
+        result.stylize(PALETTES[dark][kind], start, end)
+    return result
+
+
 class CompletionList(OptionList):
     """Suggestions under the cursor. The editor keeps the focus and drives the highlight."""
 

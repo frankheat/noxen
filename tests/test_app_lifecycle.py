@@ -111,6 +111,7 @@ class AppLifecycleTests(unittest.TestCase):
             _staged_mods=[],
             show_stack=False,
             stack_depth=0,
+            _entry_renderable=lambda entry, **_kwargs: entry["id"],
             query_one=lambda *_args, **_kwargs: (_ for _ in ()).throw(Exception("no UI")),
         )
 

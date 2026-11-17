@@ -75,8 +75,10 @@ from noxen.monitor_ui import MonitorPane, RecordingDialog
 from noxen.sender_service import SenderService
 from noxen.sender import INTENT_OPERATIONS
 from noxen.sender_ui import SenderPane, SenderTabMenu
-from noxen.sender_capture import (capture_operation, prepare_component_request, prepare_intent_request,
-                                  prepare_monitor_request)
+from noxen.sender_capture import (capture_as_request, capture_operation, prepare_component_request,
+                                  prepare_intent_request, prepare_monitor_request)
+from noxen.sender_json import format_request
+from noxen.sender_json_editor import json_text
 from noxen.intent_mods import (
     EXTRA_TYPE_OPTIONS,
     EXTRA_VALUE_PLACEHOLDERS,
@@ -331,6 +333,7 @@ class NoxenApp(App):
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
         Binding("ctrl+r", "info_refresh", "Refresh", show=True, priority=True),
         Binding("ctrl+r", "send_to_sender", "To Sender", show=True, priority=True),
+        Binding("f4", "toggle_detail_view", "JSON / Details", show=True, priority=True),
         Binding("ctrl+f", "forward_current", "Forward", show=True, priority=True),
         Binding("ctrl+f", "apply_edit", "Apply & Forward", show=True, priority=True),
         Binding("ctrl+d", "drop_current", "Drop", show=True, priority=True),
@@ -368,6 +371,7 @@ class NoxenApp(App):
         self._history_show_stack = False
         self._history_stack_depth: int = self._settings["stack_depth"]
         self._history_selected_entry: dict | None = None
+        self._detail_json = False  # History and Intercept show captures as details or as JSON.
         self._intercept_mode = self._settings["intercept"]
         self._current_intercept_id: int | None = None
         self._current_decision_id: str | None = None
@@ -535,6 +539,20 @@ class NoxenApp(App):
     def _render_markup(self, markup: str) -> Text:
         return app_markup_renderable(self, markup)
 
+    def _entry_renderable(self, entry, show_stack=False, stack_depth=15):
+        """A captured Intent as noxen's detail layout, or as JSON in Sender's request format."""
+        if self._detail_json:
+            return json_text(format_request(capture_as_request(entry)), "light" not in str(self.theme))
+        return self._render_markup(render_intent_detail(entry, show_stack=show_stack, stack_depth=stack_depth))
+
+    def action_toggle_detail_view(self):
+        self._detail_json = not self._detail_json
+        for button in ("#btn_history_view", "#btn_intercept_view"):
+            self.query_one(button, Button).label = "Details" if self._detail_json else "JSON"
+            self.query_one(button, Button).refresh(layout=True)
+        self._refresh_history_detail()
+        self._refresh_intercept_display()
+
     def _refresh_theme_content(self) -> None:
         """Rebuild color-bearing content after switching between paired palettes."""
         try:
@@ -551,11 +569,11 @@ class NoxenApp(App):
             try:
                 detail = self.query_one("#history_detail", RichLog)
                 detail.clear()
-                detail.write(self._render_markup(render_intent_detail(
+                detail.write(self._entry_renderable(
                     self._history_selected_entry,
                     show_stack=self._history_show_stack,
                     stack_depth=self._history_stack_depth,
-                )))
+                ))
             except Exception:
                 pass
         if self._current_intercepted_entry:
@@ -1278,17 +1296,20 @@ class NoxenApp(App):
                     try:
                         intercept_output = self.query_one("#intercept_output", RichLog)
                         intercept_output.clear()
-                        intercept_output.write(self._render_markup(render_intent_detail(
+                        intercept_output.write(self._entry_renderable(
                             self._current_intercepted_entry,
                             show_stack=show,
                             stack_depth=depth,
-                        )))
+                        ))
                     except Exception:
                         pass
             self.push_screen(StackModal(self.show_stack, self.stack_depth, _on_intercept_stack_confirm))
             return
         elif event.button.id == "btn_history_sender":
             self.action_send_to_sender()
+            return
+        elif event.button.id in ("btn_history_view", "btn_intercept_view"):
+            self.action_toggle_detail_view()
             return
         elif event.button.id == "btn_history_stack":
             def _on_stack_confirm(show: bool, depth: int):
@@ -1496,6 +1517,7 @@ class NoxenApp(App):
                     Label("", id="intercept_header_spacer"),
                     ModalButton("Filters", id="btn_intercept_filters"),
                     ModalButton("Stack", id="btn_intercept_stack"),
+                    ModalButton("JSON", id="btn_intercept_view"),
                     id="intercept_header",
                 )
                 yield Rule(classes="section_separator")
@@ -1579,6 +1601,7 @@ class NoxenApp(App):
                     yield ModalButton("Filters", id="btn_history_filters")
                     yield ModalButton("Stack", id="btn_history_stack")
                     yield ModalButton("To Sender", id="btn_history_sender")
+                    yield ModalButton("JSON", id="btn_history_view")
                     yield Label("", id="filter_bar_spacer")
                     yield Input(id="history_search", placeholder="Search", select_on_focus=False)
                     yield ModalButton("⊟", id="btn_columns")
@@ -1698,6 +1721,8 @@ class NoxenApp(App):
             "btn_history_filters",
             "btn_history_stack",
             "btn_history_sender",
+            "btn_history_view",
+            "btn_intercept_view",
             "btn_columns",
         ):
             self.query_one(f"#{btn_id}", Button).active_effect_duration = 0
@@ -2653,9 +2678,7 @@ class NoxenApp(App):
         self._current_decision_id = decision_id
         self._current_intercepted_entry = entry
         self._staged_mods.clear()
-        rendered = app_markup_renderable(self,
-            render_intent_detail(entry, show_stack=self.show_stack, stack_depth=self.stack_depth)
-        )
+        rendered = self._entry_renderable(entry, show_stack=self.show_stack, stack_depth=self.stack_depth)
 
         def _do():
             try:
@@ -2704,11 +2727,11 @@ class NoxenApp(App):
             detail = self.query_one("#history_detail", RichLog)
             detail.clear()
             if entry is not None:
-                detail.write(self._render_markup(render_intent_detail(
+                detail.write(self._entry_renderable(
                     entry,
                     show_stack=self._history_show_stack,
                     stack_depth=self._history_stack_depth,
-                )))
+                ))
                 detail.scroll_home(animate=False)
         except Exception:
             pass
@@ -2884,6 +2907,8 @@ class NoxenApp(App):
             return intercept_blocked and self._edit_mode and not self._edit_forward_pending
         if action == "info_refresh":
             return self._active_tab == "tab_info"
+        if action == "toggle_detail_view":
+            return self._active_tab in ("tab_history", "tab_intercept") and not self.screen.is_modal
         if action == "send_to_sender":
             return (self._active_tab == "tab_history" and not self.screen.is_modal) or self._monitor_events_active()
         if action == "clear_log":
@@ -3511,11 +3536,11 @@ class NoxenApp(App):
         try:
             detail = self.query_one("#history_detail", RichLog)
             detail.clear()
-            detail.write(self._render_markup(render_intent_detail(
+            detail.write(self._entry_renderable(
                 self._history_selected_entry,
                 show_stack=self._history_show_stack,
                 stack_depth=self._history_stack_depth,
-            )))
+            ))
             detail.scroll_home(animate=False)
         except Exception:
             pass
@@ -3526,11 +3551,11 @@ class NoxenApp(App):
         try:
             intercept_output = self.query_one("#intercept_output", RichLog)
             intercept_output.clear()
-            intercept_output.write(self._render_markup(render_intent_detail(
+            intercept_output.write(self._entry_renderable(
                 self._current_intercepted_entry,
                 show_stack=self.show_stack,
                 stack_depth=self.stack_depth,
-            )))
+            ))
         except Exception:
             pass
 

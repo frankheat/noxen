@@ -18,13 +18,26 @@ def refuses_malformed(function):
     return guarded
 
 
-def _complete(node, path):
+INCOMPLETE = ("error", "errors", "omitted", "descriptionError", "mimeTypesOmitted", "truncatedFields",
+              "unreadableFields", "categoriesReadError")
+SKIP = object()  # A value that could not be rebuilt at all and is left out.
+
+
+def _fail(notes, message):
+    """Strict conversion refuses; the JSON view keeps going and lists what is missing."""
+    if notes is None:
+        raise SenderError(message)
+    if message not in notes:
+        notes.append(message)
+
+
+def _complete(node, path, notes=None):
     if not isinstance(node, dict):
-        raise SenderError(f"{path}: no structured capture is available")
-    if any(value for key, value in node.items() if key in (
-            "error", "errors", "omitted", "descriptionError", "mimeTypesOmitted", "truncatedFields",
-            "unreadableFields", "categoriesReadError") or key.endswith("Truncated") or key == "truncated"):
-        raise SenderError(f"{path}: capture is incomplete; create or repair this value explicitly")
+        _fail(notes, f"{path}: no structured capture is available")
+        return False
+    if any(value for key, value in node.items()
+           if key in INCOMPLETE or key.endswith("Truncated") or key == "truncated"):
+        _fail(notes, f"{path}: capture is incomplete; create or repair this value explicitly")
     # Older captures did not flag every truncated ClipData/category string.
     # Refuse ambiguous values at the capture boundary instead of replaying a prefix.
     def boundary(value):
@@ -34,33 +47,40 @@ def _complete(node, path):
             return any(boundary(item) for item in value if not isinstance(item, dict))
         return False
     if any(boundary(value) for value in node.values()):
-        raise SenderError(f"{path}: a value reaches the capture length limit; enter it explicitly")
+        _fail(notes, f"{path}: a value reaches the capture length limit; enter it explicitly")
+    return True
 
 
-def _bundle(node, path):
+def _bundle(node, path, notes=None):
     if node is None:
         return {}
-    _complete(node, path)
+    if not _complete(node, path, notes):
+        return {}
     items = node.get("items")
     if node.get("kind") != "bundle" or not isinstance(items, list) or node.get("count") != len(items):
-        raise SenderError(f"{path}: Bundle is incomplete")
+        _fail(notes, f"{path}: Bundle is incomplete")
+        items = items if isinstance(items, list) else []
     result = {}
     for item in items:
         if item.get("keyTruncated") or item["key"] in result:
-            raise SenderError(f"{path}: a key was truncated or duplicated")
-        result[item["key"]] = _value(item["value"], f"{path}.{item['key']}")
+            _fail(notes, f"{path}: a key was truncated or duplicated")
+            continue
+        value = _value(item["value"], f"{path}.{item['key']}", notes)
+        if value is not SKIP:
+            result[item["key"]] = value
     return result
 
 
-def _value(node, path):
-    _complete(node, path)
+def _value(node, path, notes=None):
+    if not _complete(node, path, notes):
+        return SKIP
     kind = node.get("kind")
     if kind == "null":
         return {"type": "String", "value": None}
     if kind == "intent":
-        return {"type": "Intent", "value": _intent(node, path, nested=True)}
+        return {"type": "Intent", "value": _intent(node, path, nested=True, notes=notes)}
     if kind == "bundle" and node.get("type") == "android.os.Bundle":
-        return {"type": "Bundle", "value": _bundle(node, path)}
+        return {"type": "Bundle", "value": _bundle(node, path, notes)}
     java_type = node.get("type", "")
     if kind == "scalar" and (java_type == "android.net.Uri" or java_type.startswith("android.net.Uri$")):
         return {"type": "Uri", "value": node["value"]}
@@ -72,7 +92,8 @@ def _value(node, path):
         value = node["value"]
         if target == "boolean":
             if value not in ("true", "false"):
-                raise SenderError(f"{path}: invalid captured boolean")
+                _fail(notes, f"{path}: invalid captured boolean")
+                return SKIP
             value = value == "true"
         elif target in ("byte", "short", "int"):
             value = int(value)
@@ -84,55 +105,77 @@ def _value(node, path):
                   "[B": "byte", "[S": "short", "[F": "float", "[D": "double", "[C": "char",
                   "[Landroid.content.Intent;": "Intent"}.get(node.get("type"))
         if target and node.get("count") == len(node.get("items", [])):
-            items = [_value(item, f"{path}[{index}]") for index, item in enumerate(node["items"])]
-            if all(item["type"] == target or item["value"] is None for item in items):
+            items = [_value(item, f"{path}[{index}]", notes) for index, item in enumerate(node["items"])]
+            if all(item is not SKIP and (item["type"] == target or item["value"] is None) for item in items):
                 return {"type": target + "[]", "value": [item["value"] for item in items]}
-    raise SenderError(f"{path}: cannot reconstruct {node.get('type') or kind}; replace or remove it explicitly")
+    _fail(notes, f"{path}: cannot reconstruct {node.get('type') or kind}; replace or remove it explicitly")
+    return SKIP
 
 
-def _intent(info, path, nested=False):
-    _complete(info, path)
+def _intent(info, path, nested=False, notes=None):
+    if not _complete(info, path, notes):
+        return {}
     result = {}
     for key in ("component", "action", "data", "mimeType", "package", "flags", "categories", "selector", "clipData"):
         if key not in info:
-            raise SenderError(f"{path}.{key}: field was not captured")
+            _fail(notes, f"{path}.{key}: field was not captured")
+            continue
         if key == "selector":
-            result[key] = None if info[key] is None else _intent(info[key], f"{path}.selector", nested=True)
+            result[key] = None if info[key] is None else _intent(info[key], f"{path}.selector", nested=True, notes=notes)
         elif key == "clipData":
             clip = info[key]
             if clip is None:
                 result[key] = None
                 continue
-            _complete(clip, f"{path}.clipData")
+            if not _complete(clip, f"{path}.clipData", notes):
+                continue
             if clip.get("kind") != "clipdata" or clip.get("count") != len(clip.get("items", [])):
-                raise SenderError(f"{path}.clipData: incomplete capture")
+                _fail(notes, f"{path}.clipData: incomplete capture")
             items = []
-            for item in clip["items"]:
-                _complete(item, f"{path}.clipData.item")
+            for item in clip.get("items", []):
+                if not _complete(item, f"{path}.clipData.item", notes):
+                    continue
                 if not all(k in item for k in ("text", "html", "uri", "intent")):
-                    raise SenderError(f"{path}.clipData: item fields were not captured")
-                items.append({"text": item["text"], "htmlText": item["html"], "uri": item["uri"],
-                              "intent": None if item["intent"] is None else _intent(item["intent"], path + ".clipData.intent", nested=True)})
+                    _fail(notes, f"{path}.clipData: item fields were not captured")
+                items.append({"text": item.get("text"), "htmlText": item.get("html"), "uri": item.get("uri"),
+                              "intent": None if item.get("intent") is None else
+                              _intent(item["intent"], path + ".clipData.intent", nested=True, notes=notes)})
             result[key] = {"label": clip.get("label"), "mimeTypes": clip.get("mimeTypes"), "items": items}
         else:
             result[key] = info[key]
-    result["flags"] = int(result["flags"]) & 0xffffffff
+    if "flags" in result:
+        result["flags"] = int(result["flags"]) & 0xffffffff
     if nested:
         if "extras" not in info:
-            raise SenderError(f"{path}.extras: not captured")
-        result["extras"] = None if info["extras"] is None else _bundle(info["extras"], path + ".extras")
+            _fail(notes, f"{path}.extras: not captured")
+        result["extras"] = None if info.get("extras") is None else _bundle(info["extras"], path + ".extras", notes)
     else:
         metadata = info.get("extrasMeta")
         if (metadata is None and info.get("extras")) or (metadata and (metadata.get("error") or metadata.get("omitted"))):
-            raise SenderError(f"{path}.extras: completeness cannot be established")
+            _fail(notes, f"{path}.extras: completeness cannot be established")
         result["extras"] = {}
-        for key, item in info.get("extras", {}).items():
+        for key, item in (info.get("extras") or {}).items():
             if item.get("keyTruncated") or item.get("structuredVersion") != 1:
-                raise SenderError(f"{path}.extras.{key}: incomplete or legacy capture")
-            result["extras"][key] = _value(item.get("structured"), path + ".extras.'" + key + "'")
+                _fail(notes, f"{path}.extras.{key}: incomplete or legacy capture")
+                continue
+            value = _value(item.get("structured"), path + ".extras.'" + key + "'", notes)
+            if value is not SKIP:
+                result["extras"][key] = value
         if not result["extras"] and metadata is None:
             result["extras"] = None
     return result
+
+
+def _receiver_permission(entry, request, notes=None):
+    surface = entry.get("attackSurface") or entry.get("attack_surface") or {}
+    if "broadcastPermission" in surface:
+        permission = surface["broadcastPermission"]
+        if permission is None:
+            request["receiverPermission"] = None
+        elif isinstance(permission, dict) and isinstance(permission.get("name"), str):
+            request["receiverPermission"] = permission["name"]
+        else:
+            _fail(notes, "The captured receiver permission must be entered explicitly")
 
 
 @refuses_malformed
@@ -143,15 +186,7 @@ def prepare_intent_request(entry, operation):
         raise SenderError("Choose an Intent sending operation")
     request = {"operation": operation, "intent": _intent(entry.get("intent"), "intent")}
     if operation in ("sendBroadcast", "sendOrderedBroadcast"):
-        surface = entry.get("attack_surface") or {}
-        if "broadcastPermission" in surface:
-            permission = surface["broadcastPermission"]
-            if permission is None:
-                request["receiverPermission"] = None
-            elif isinstance(permission, dict) and isinstance(permission.get("name"), str):
-                request["receiverPermission"] = permission["name"]
-            else:
-                raise SenderError("The captured receiver permission must be entered explicitly")
+        _receiver_permission(entry, request)
     # Do not add NEW_TASK or change any captured field. The editor can repair a
     # request that is unsuitable for an Application-context Activity launch.
     return request
@@ -184,6 +219,29 @@ CAPTURE_OPERATIONS = {
     "getService": "startService",
     "startForegroundService": "startForegroundService",
 }
+
+
+def capture_as_request(entry):
+    """The captured Intent in Sender's request format, for reading and copying.
+
+    Nothing is refused: whatever could not be rebuilt is listed under
+    `notCaptured`. Sender rejects that field, so such a request cannot be
+    saved or sent before it has been reviewed and the list removed.
+    """
+    notes = []
+    request = {}
+    try:
+        operation = capture_operation(entry)
+        if operation is not None:
+            request["operation"] = operation
+        request["intent"] = _intent(entry.get("intent") if isinstance(entry, dict) else None, "intent", notes=notes)
+        if operation in ("sendBroadcast", "sendOrderedBroadcast"):
+            _receiver_permission(entry, request, notes)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        notes.append("This capture is malformed and could not be read in full")
+    if notes:
+        request = {"notCaptured": notes, **request}
+    return request
 
 
 def capture_operation(entry):

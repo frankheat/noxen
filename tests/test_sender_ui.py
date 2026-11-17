@@ -301,6 +301,22 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual(saved[0]["request"]["intent"]["action"], "test.PING")
                 self.assertEqual(tabs.active, "tab_history")  # Like a repeater: the source tab stays open.
 
+                # The same capture can be read as JSON, in the form Sender uses, and back as details.
+                detail = app.query_one("#history_detail")
+                shown = lambda: "\n".join(strip.text for strip in detail.lines)
+                app._refresh_history_detail()
+                self.assertIn("[HOOK]", shown())
+                self.assertTrue(app.check_action("toggle_detail_view", ()))
+                await pilot.press("f4")
+                await pilot.pause()
+                self.assertEqual(str(app.query_one("#btn_history_view").label), "Details")
+                self.assertIn('"operation": "sendOrderedBroadcast"', shown())
+                self.assertIn('"action": "test.PING"', shown())
+                self.assertNotIn("[HOOK]", shown())
+                await pilot.click("#btn_history_view")
+                await pilot.pause()
+                self.assertIn("[HOOK]", shown())
+
                 # A receiving hook that does not imply an operation asks for one.
                 app._history_selected_entry = {"id": 8, "method": "setResult", "intent": intent}
                 await pilot.click("#btn_history_sender")

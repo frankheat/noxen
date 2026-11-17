@@ -11,8 +11,8 @@ from unittest.mock import patch
 from noxen.db import ProjectDB
 from noxen.sender import SenderError, validate_request, compare_sender_runs
 from noxen.sender_service import SenderService
-from noxen.sender_capture import (capture_operation, prepare_component_request, prepare_intent_request,
-                                  prepare_monitor_request)
+from noxen.sender_capture import (capture_as_request, capture_operation, prepare_component_request,
+                                  prepare_intent_request, prepare_monitor_request)
 from noxen.frida_session import SessionConfig
 
 
@@ -216,6 +216,37 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_capture_is_shown_as_a_request_and_lists_what_could_not_be_rebuilt(self):
+        entry = self.capture()
+        entry["method"] = "sendOrderedBroadcast"
+        entry["attackSurface"] = {"broadcastPermission": {"name": "test.PERM", "level": "normal"}}
+        # A complete capture is exactly what To Sender would create, receiver permission included.
+        shown = capture_as_request(entry)
+        self.assertEqual(shown, prepare_intent_request(entry, "sendOrderedBroadcast"))
+        self.assertEqual(shown["receiverPermission"], "test.PERM")
+        validate_request(shown)
+        # A hook that implies no operation leaves it for the reader to choose.
+        self.assertNotIn("operation", capture_as_request(dict(entry, method="setResult")))
+
+        entry["intent"]["extras"] = {
+            "ok": {"structuredVersion": 1, "structured": {"kind": "scalar", "type": "java.lang.Integer", "value": "7"}},
+            "opaque": {"structuredVersion": 1, "structured": {"kind": "object", "type": "test.Custom"}},
+            "cut": {"structuredVersion": 1, "structured": {"kind": "scalar", "type": "java.lang.String",
+                                                          "value": "abc", "truncated": True}},
+        }
+        shown = capture_as_request(entry)
+        self.assertEqual(shown["intent"]["extras"], {"ok": {"type": "int", "value": 7},
+                                                     "cut": {"type": "String", "value": "abc"}})
+        self.assertEqual(list(shown)[0], "notCaptured")
+        self.assertTrue(any("opaque" in note and "test.Custom" in note for note in shown["notCaptured"]))
+        self.assertTrue(any("cut" in note for note in shown["notCaptured"]))
+        with self.assertRaisesRegex(SenderError, "notCaptured"):  # It cannot be saved before being reviewed.
+            validate_request(shown)
+        with self.assertRaises(SenderError):
+            prepare_intent_request(entry, "sendOrderedBroadcast")
+        for junk in (None, 5, {"intent": []}, {"intent": {"extras": {"k": 1}}}):
+            self.assertIn("notCaptured", capture_as_request(junk))
+
     def test_malformed_captures_are_refused_instead_of_raising(self):
         for junk in (None, 5, [], "x", {"intent": []}, {"intent": {"extras": {"k": 1}}}, {"method": {}}):
             self.assertIsNone(capture_operation(junk) if not isinstance(junk, dict) or "intent" in junk else None)
