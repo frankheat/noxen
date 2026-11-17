@@ -105,7 +105,7 @@ from noxen.rendering import (
 )
 from noxen.settings import DARK_THEME, LIGHT_THEME, load_settings, save_settings
 from noxen.system_server_session import SystemServerConfig, SystemServerSession
-from noxen.textual_compat import SELECT_EMPTY, is_select_empty, set_button_label
+from noxen.textual_compat import SELECT_EMPTY, is_select_empty, set_button_label, use_thin_scrollbars
 from noxen.ui_theme import register_noxen_themes, semantic_colors, themed_markup
 
 _HISTORY_COLUMNS = [
@@ -274,6 +274,7 @@ class NoxenApp(App):
 
     def __init__(self, cli_args):
         super().__init__()
+        use_thin_scrollbars()
         self._history_epoch = 0
         self.mcp_service = MCPService(self)
         register_noxen_themes(self)

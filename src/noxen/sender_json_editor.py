@@ -239,7 +239,7 @@ class JsonRequestEditor(Vertical):
     JsonRequestEditor > JsonArea { height: 1fr; border: none; padding: 0; background: $background; }
     JsonRequestEditor > CompletionList {
         position: absolute; overlay: screen; display: none;
-        border: round $accent; background: $surface; padding: 0; scrollbar-size-vertical: 1;
+        border: round $accent; background: $surface; padding: 0;
     }
     JsonRequestEditor > CompletionList > .option-list--option-highlighted { background: $accent 35%; color: $foreground; text-style: bold; }
     JsonRequestEditor > .json_status { height: 1; color: $foreground-muted; }

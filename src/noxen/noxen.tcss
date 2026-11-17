@@ -21,8 +21,12 @@ Toast:light {
     background: #E5E9E7;
     color: $foreground;
 }
+* {
+    scrollbar-size-vertical: 1;  /* One cell, like the horizontal ones: thinner than Textual's default of 2. */
+}
 Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     scrollbar-background: $surface;
+    scrollbar-corner-color: $surface;
     scrollbar-color: $foreground-muted;
     scrollbar-color-hover: $success;
     scrollbar-color-active: $success;
