@@ -435,10 +435,17 @@ class SenderUITests(IsolatedAppTestCase):
                                 "arguments": [{"type": "android.net.Uri", "value": "content://test/file"}]},
                           "log": {"class": "android.util.Log", "method": "d", "types": [], "arguments": []}}
                 # Monitor reloads its events on a timer, so each selection is acted on at once.
+                self.assertTrue(monitor.query_one("#monitor_to_sender").disabled)  # Nothing selected.
                 monitor.display_events, monitor.selected = events, "log"
+                monitor.refresh_to_sender()
+                self.assertTrue(monitor.query_one("#monitor_to_sender").disabled)  # Not a call Sender can repeat...
+                self.assertIsNone(app.check_action("send_to_sender", ()))  # ...nor through Ctrl+R.
                 app.action_send_to_sender()
-                self.assertEqual(len(app.db.sender_requests()), 3)  # Not a provider call.
+                self.assertEqual(len(app.db.sender_requests()), 3)
                 monitor.display_events, monitor.selected = events, "k"
+                monitor.refresh_to_sender()
+                self.assertFalse(monitor.query_one("#monitor_to_sender").disabled)
+                self.assertTrue(app.check_action("send_to_sender", ()))
                 app.action_send_to_sender()
                 newest = app.db.sender_request(pane._selected_id)
                 self.assertEqual((newest["name"], newest["request"]["operation"], newest["request"]["uri"]),

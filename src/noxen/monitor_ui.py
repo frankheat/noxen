@@ -28,6 +28,9 @@ from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hoo
                            missing_default_hooks, new_profile, render_event_detail, signature, validate_hook,
                            validate_profiles)
 from noxen.rendering import capture_datetime, capture_order_label, format_capture_time
+from noxen.sender import SenderError
+from noxen.sender_capture import prepare_monitor_request
+from noxen.textual_compat import set_button_label
 from noxen.ui_theme import enabled_cell
 
 ALL_HOOKS_ROW = ":all"
@@ -383,7 +386,7 @@ class MonitorPane(Vertical):
             with TabPane("Events", id="monitor_events_view"):
                 with Horizontal(classes="monitor_controls"):
                     yield Input(placeholder="Search Monitor events", id="monitor_search")
-                    yield ModalButton("To Sender", id="monitor_to_sender")
+                    yield ModalButton("To Sender", id="monitor_to_sender", disabled=True)
                     yield ModalButton("⊟", id="monitor_columns")
                 yield Label("", id="monitor_status", markup=False)
                 yield Rule(classes="section_separator")
@@ -587,7 +590,7 @@ class MonitorPane(Vertical):
         restore.disabled = connecting
         toolbar = self.query_one("#monitor_hook_actions")
         if missing:
-            restore.label = f"Restore missing hooks ({missing})"
+            set_button_label(restore, f"Restore missing hooks ({missing})")
         required = toolbar.styles.gutter.width + sum(
             button.get_content_width(self.size, self.app.size) + button.styles.gutter.width + button.styles.margin.width
             for button in toolbar.query(Button) if button.display
@@ -1150,6 +1153,7 @@ class MonitorPane(Vertical):
             self.query_one("#monitor_event_text", Static).update("")
             empty.update("No matching events." if self.display_event_query else
                          "No events yet. Enable a profile in Profiles and use the target app.")
+        self.refresh_to_sender()
 
     @staticmethod
     def event_key(event):
@@ -1157,6 +1161,24 @@ class MonitorPane(Vertical):
 
     def selected_event(self):
         return self.display_events.get(self.selected)
+
+    def sendable(self):
+        """Whether the selected event is a call that Sender can repeat as it was captured."""
+        event = self.selected_event()
+        if event is None:
+            return False
+        try:
+            prepare_monitor_request(event)
+        except SenderError:
+            return False
+        return True
+
+    def refresh_to_sender(self):
+        button = self.query_one("#monitor_to_sender", Button)
+        disabled = not self.sendable()
+        if button.disabled != disabled:
+            button.disabled = disabled
+            self.app.refresh_bindings()
 
     def show_event(self, key):
         if key == self.selected:
@@ -1166,6 +1188,7 @@ class MonitorPane(Vertical):
         if event:
             self.query_one("#monitor_event_text", Static).update(render_event_detail(event))
             self.query_one("#monitor_detail").scroll_home(animate=False, immediate=True)
+        self.refresh_to_sender()
 
     def on_data_table_row_highlighted(self, event):
         event.stop()

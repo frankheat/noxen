@@ -118,7 +118,7 @@ from noxen.rendering import (
 )
 from noxen.settings import DARK_THEME, LIGHT_THEME, load_settings, save_settings
 from noxen.system_server_session import SystemServerConfig, SystemServerSession
-from noxen.textual_compat import SELECT_EMPTY, is_select_empty
+from noxen.textual_compat import SELECT_EMPTY, is_select_empty, set_button_label
 from noxen.ui_theme import register_noxen_themes, semantic_colors, themed_markup
 
 _HISTORY_COLUMNS = [
@@ -1348,7 +1348,7 @@ class NoxenApp(App):
             self.mcp_service.interception_changed()
             try:
                 btn = self.query_one("#intercept_toggle", Button)
-                btn.label = "Intercept on" if enabled else "Intercept off"
+                set_button_label(btn, "Intercept on" if enabled else "Intercept off")
                 self._set_intercept_action_button_classes(
                     btn,
                     "intercept-on" if enabled else "intercept-off",
@@ -1593,9 +1593,9 @@ class NoxenApp(App):
                 with Horizontal(id="history_header"):
                     yield ModalButton("Filters", id="btn_history_filters")
                     yield ModalButton("Stack", id="btn_history_stack")
-                    yield ModalButton("To Sender", id="btn_history_sender")
                     yield Label("", id="filter_bar_spacer")
                     yield Input(id="history_search", placeholder="Search", select_on_focus=False)
+                    yield ModalButton("To Sender", id="btn_history_sender")
                     yield ModalButton("⊟", id="btn_columns")
                 yield Rule(classes="section_separator")
                 yield HistoryTable(id="history_table")
@@ -2900,7 +2900,10 @@ class NoxenApp(App):
         if action == "toggle_detail_view":
             return self._active_tab in ("tab_history", "tab_intercept") and not self.screen.is_modal
         if action == "send_to_sender":
-            return (self._active_tab == "tab_history" and not self.screen.is_modal) or self._monitor_events_active()
+            if self._monitor_events_active():
+                # Shown, but unavailable for a call that Sender cannot repeat as it was captured.
+                return True if self.query_one(MonitorPane).sendable() else None
+            return self._active_tab == "tab_history" and not self.screen.is_modal
         if action == "clear_log":
             return self._active_tab in ("tab_log", "tab_history") or self._monitor_events_active()
         if action == "toggle_command_bar":

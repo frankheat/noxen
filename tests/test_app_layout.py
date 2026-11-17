@@ -55,8 +55,6 @@ class AppLayoutTests(unittest.TestCase):
         self.assertGreaterEqual(HISTORY_COMMAND_OUTPUT_HEIGHT, MIN_PANEL_HEIGHT)
         self.assertLessEqual(HISTORY_COMMAND_OUTPUT_HEIGHT, MAX_COMMAND_OUTPUT_HEIGHT)
 
-    def test_intercept_toggle_width_fits_off_label(self):
-        self.assertGreaterEqual(css_int_property("#intercept_header #intercept_toggle", "width"), 21)
 
     def test_home_anr_bypass_label_width_fits_text(self):
         label = "Input ANR bypass (experimental)"
@@ -147,6 +145,52 @@ class _FakeLogApp:
 
     def query_one(self, _selector, _widget_type):
         return self.output
+
+
+class ButtonSpacingTests(IsolatedAppTestCase):
+    async def test_every_button_has_the_same_space_on_each_side_of_its_label(self):
+        from rich.cells import cell_len
+        from textual.widgets import Button, TabbedContent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NoxenApp(SimpleNamespace(project=None, new_project=os.path.join(tmp, "p.noxen"),
+                                           skip_device_scan=True))
+            async with app.run_test(size=(140, 45)) as pilot:
+                def check(where):
+                    visible = set(app.screen._compositor.visible_widgets)
+                    buttons = [b for b in app.screen.query(Button) if b in visible and b.region.width]
+                    self.assertTrue(buttons, where)
+                    for button in buttons:
+                        spare = button.content_region.width - cell_len(str(button.label))
+                        # Textual centres the label: an odd spare column would all go to the right.
+                        self.assertEqual(spare % 2, 0, f"{where}: {button.id} {str(button.label)!r}")
+
+                tabs = app.query_one("#main_tabs", TabbedContent)
+                for pane in ("tab_home", "tab_intercept", "tab_history", "tab_monitor", "tab_sender",
+                             "tab_mcp", "tab_log", "tab_settings"):
+                    tabs.active = pane
+                    await pilot.pause(0.3)
+                    check(pane)
+                # A button whose label changes stays even with each label.
+                tabs.active = "tab_intercept"
+                for enabled in (True, False):
+                    app.update_intercept_button(enabled)
+                    await pilot.pause()
+                    check(f"intercept {enabled}")
+                connect = app.query_one("#home_btn", Button)
+                tabs.active = "tab_home"
+                for label in ("Connect", "Connecting…"):
+                    connect.label = label
+                    await pilot.pause()
+                    check(label)
+
+                # In History, To Sender sits between the search bar and the columns button.
+                tabs.active = "tab_history"
+                await pilot.pause(0.3)
+                search, sender, columns = (app.query_one(selector).region
+                                           for selector in ("#history_search", "#btn_history_sender", "#btn_columns"))
+                self.assertLess(search.right, sender.x)
+                self.assertLess(sender.right, columns.x)
 
 
 if __name__ == "__main__":

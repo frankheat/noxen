@@ -282,7 +282,8 @@ class ConnectionFeedbackTests(IsolatedAppTestCase):
                     self.assertEqual(app._connection_state, "connecting")
                     self.assertTrue(app.query_one("#home_btn", Button).disabled)
                     self.assertEqual(str(app.query_one("#home_btn", Button).label), "Connecting…")
-                    self.assertGreaterEqual(app.query_one("#home_btn", Button).region.width, 18)
+                    button = app.query_one("#home_btn", Button)
+                    self.assertGreaterEqual(button.content_region.width, len("Connecting…") + 2)  # Fits, spaced.
                     self.assertFalse(app.query_one("#session_bar").has_class("connected"))
                     self.assertTrue(app.query_one("#session_bar").has_class("connecting"))
                     self.assertEqual(app.query_one("#session_bar").styles.background.hex, "#65B8E8")

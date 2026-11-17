@@ -2,6 +2,12 @@ Screen {
     background: $background;
     color: $foreground;
 }
+/* A button fits its label with one space on each side (Textual adds that space).
+   Textual's default minimum width centred short labels with the odd column on the right. */
+Button {
+    min-width: 0 !important;
+    padding: 0 !important;
+}
 ModalScreen {
     background: $background 16%;
 }
@@ -170,7 +176,7 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     color: $button-color-foreground;
 }
 #intercept_header #intercept_toggle {
-    width: 21;
+    width: auto;
 }
 #intercept_header_spacer { width: 1fr; }
 TabbedContent {
@@ -696,8 +702,8 @@ SenderPane Select > SelectCurrent {
     min-width: 9;
 }
 #home_btn {
-    width: auto;
-    min-width: 18;
+    width: 17;  /* "Connect" and "Connecting…" both centre evenly. */
+    min-width: 0;
     height: 3;
     border: round $foreground-muted;
     padding: 0 2;
