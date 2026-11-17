@@ -4,7 +4,9 @@ import re
 from collections.abc import Sequence
 
 
-IntentMod = tuple[str, str, str, str]
+# (type, key, value, extra type or nested path). For action, data and MIME type,
+# nested ones included, a None value clears the field and "" sets an empty string.
+IntentMod = tuple[str, str, str | None, str]
 IntentModParseResult = tuple[IntentMod | None, str | None]
 
 NESTED_INTENT_FIELDS = {
@@ -225,7 +227,7 @@ def parse_intent_mod_command(parts: list[str]) -> IntentModParseResult:
         return _single_value_mod(parts, "data", "[red]Usage: data <uri>[/red]")
     if command == "mime":
         if len(parts) == 2 and parts[1].lower() == "clear":
-            return ("mime", "", "", ""), None
+            return ("mime", "", None, ""), None
         return _single_value_mod(
             parts,
             "mime",
@@ -274,7 +276,8 @@ def confirmed_modification(
         return None, False, "Resulting Component could not be verified; requested changes are not shown as applied"
 
     expected = {
-        (nested_mod_path(key, encoded_path), NESTED_INTENT_FIELDS[kind]): value or None
+        (nested_mod_path(key, encoded_path), NESTED_INTENT_FIELDS[kind]):
+            (value or None) if kind == "nested_component" else value
         for kind, key, value, encoded_path in mods if kind in NESTED_INTENT_FIELDS
     }
     observed_nodes = dict(nested_intents(actual)) if expected else {}
@@ -319,7 +322,8 @@ def confirmed_modification(
 
     changed = any(
         comparable(original, field) != comparable(actual, field)
-        for field in ("component", "action", "data", "mimeType", "flags", "categories", "extras", "selector", "clipData")
+        for field in ("component", "package", "action", "data", "mimeType", "flags", "categories", "extras",
+                      "selector", "clipData")
     )
     if not report.get("ok"):
         detail = str(report.get("error") or "unknown agent error")
@@ -395,11 +399,11 @@ def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
         if mod_type == "component":
             info["component"] = normalize_component(value) or None
         elif mod_type == "action":
-            info["action"] = value or None
+            info["action"] = value
         elif mod_type == "data":
-            info["data"] = value or None
+            info["data"] = value
         elif mod_type == "mime":
-            info["mimeType"] = value or None
+            info["mimeType"] = value
         elif mod_type == "cat_add":
             if value not in info["categories"]:
                 info["categories"].append(value)
@@ -419,7 +423,7 @@ def apply_mods_to_intent(intent: dict, mods: list[IntentMod]) -> dict:
             field = NESTED_INTENT_FIELDS[mod_type]
             node = dict(nested_intents(info)).get(nested_mod_path(key, extra_type))
             if field in nested_intent_fields(node):
-                node[field] = (normalize_component(value) if field == "component" else value) or None
+                node[field] = normalize_component(value or "") or None if field == "component" else value
         elif mod_type == "extra_add":
             canonical = normalize_extra_type(extra_type) or "string"
             existing = original_extras.get(key, {})
@@ -451,7 +455,7 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
         old_value = before.get(field)
         new_value = after.get(field)
         if new_value != old_value:
-            mods.append((mod_type, "", "" if new_value is None else str(new_value), ""))
+            mods.append((mod_type, "", None if new_value is None else str(new_value), ""))
 
     old_categories = list(before.get("categories") or [])
     new_categories = list(after.get("categories") or [])
@@ -499,8 +503,10 @@ def diff_intents(original: dict, draft: dict) -> list[IntentMod]:
         key, encoded_path = (path[1], "") if direct else ("", json.dumps(path))
         for kind, field in NESTED_INTENT_FIELDS.items():
             if field in old_fields and field in new_fields and old_fields[field] != new_fields[field]:
-                value = new_fields[field] or ""
-                mods.append((kind, key, normalize_component(value) if field == "component" else value, encoded_path))
+                value = new_fields[field]
+                if field == "component":
+                    value = normalize_component(value or "")
+                mods.append((kind, key, value, encoded_path))
     return mods
 
 

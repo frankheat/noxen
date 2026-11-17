@@ -2212,7 +2212,14 @@
             }
           }));
         }
-        return { identity: identity2, execute, cancel, checkActivityContext: () => J().performNow(activityContext) };
+        return {
+          identity: identity2,
+          execute,
+          cancel,
+          checkActivityContext: () => J().performNow(activityContext),
+          buildBundle: bundle,
+          buildIntent: intent
+        };
       }
       module.exports = { createSender };
     }

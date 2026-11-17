@@ -171,7 +171,7 @@ class IntentModsTests(unittest.TestCase):
         )
         self.assertEqual(
             parse_intent_mod_command(["mime", "clear"]),
-            (("mime", "", "", ""), None),
+            (("mime", "", None, ""), None),
         )
         self.assertEqual(
             parse_intent_mod_command(["+x", "string", "token", "hello", "world"]),

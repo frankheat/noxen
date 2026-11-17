@@ -10,7 +10,7 @@ const agentSource = fs.readFileSync(agentPath, 'utf8').replace(
   'const Java_bridge = {};'
 );
 
-function runIntercept(mods, floatParser = value => Number(value)) {
+function runIntercept(mods, floatParser = value => Number(value), built = []) {
   const messages = [];
   const floatValues = [];
   const java = {
@@ -34,6 +34,11 @@ function runIntercept(mods, floatParser = value => Number(value)) {
   const context = vm.createContext({ Java: java, Process: { id: 123 }, rpc: {}, send: value => messages.push(value) });
   vm.runInContext(agentSource, context, { filename: agentPath });
   context.getStackTrace = () => [];
+  // Sender's builders, as Intercept reuses them for whole values.
+  context.getSender = () => ({
+    buildBundle(values) { built.push(['bundle', values]); return { values }; },
+    buildIntent(spec) { built.push(['intent', spec]); return { spec, getClipData() { return { clip: spec.clipData }; } }; },
+  });
   context.beginHold = () => 'hold-1';
   context.endHold = () => {};
   context.dumpIntent = intent => ({
@@ -60,6 +65,10 @@ function runIntercept(mods, floatParser = value => Number(value)) {
     addCategory(value) { this.categories.add(value); },
     removeCategory(value) { this.categories.delete(value); },
     removeExtra(key) { delete this.extras[key]; },
+    setPackage(value) { this.package = value; },
+    setSelector(value) { this.selector = value; },
+    setClipData(value) { this.clipData = value; },
+    putExtras: { overload() { return { call(receiver, bundle) { Object.assign(receiver.extras, bundle.values); } }; } },
     putExtra: { overload() { return { call(receiver, key, value) { receiver.extras[key] = value; } }; } },
   };
   const dropped = context.processIntercept('Example', 'startActivity', intent, null, null);
@@ -163,4 +172,46 @@ test('data and MIME changes preserve each other and the result includes flags an
   assert.equal(report.infoIntent.flags, 0x20);
   assert.deepEqual(report.infoIntent.categories, ['new.category']);
   assert.deepEqual(report.infoIntent.extras, {});
+});
+
+test('a null value clears a text field and an empty string is kept as one', () => {
+  const normalized = (() => {
+    const context = vm.createContext({ Java: {}, rpc: {}, send() {} });
+    vm.runInContext(agentSource, context, { filename: agentPath });
+    return context.normalizeRpcMods([
+      { type: 'action', val: null }, { type: 'action', val: '' }, { type: 'package', val: null },
+      { type: 'cat_add', val: null },
+    ]);
+  })();
+  assert.deepEqual(normalized.map(mod => mod.val), [null, '', null, '']);
+  const cleared = runIntercept([{ type: 'action', val: null }, { type: 'mime', val: null }]);
+  assert.equal(cleared.intent.action, null);
+  assert.equal(cleared.intent.mimeType, null);
+  const emptied = runIntercept([{ type: 'action', val: '' }, { type: 'mime', val: '' }]);
+  assert.equal(emptied.intent.action, '');
+  assert.equal(emptied.intent.mimeType, '');
+});
+
+test('whole values are built with Sender builders from their JSON', () => {
+  const built = [];
+  const item = { type: 'short', value: 3 };
+  const selector = { action: 'sel', flags: 0, categories: [] };
+  const clip = { label: null, mimeTypes: ['text/plain'], items: [{ text: 't' }] };
+  const result = runIntercept([
+    { type: 'package', val: null },
+    { type: 'extra_json', key: 'stale', val: JSON.stringify(item) },
+    { type: 'selector_json', val: JSON.stringify(selector) },
+    { type: 'clipdata_json', val: JSON.stringify(clip) },
+    { type: 'package', val: 'later.pkg' },
+  ], undefined, built);
+  const report = result.messages.find(message => message.noxenEvent === 'modification_result');
+  assert.equal(report.ok, true);
+  const plain = value => JSON.parse(JSON.stringify(value));  // Objects from the agent's own context.
+  assert.deepEqual(plain(built), [['bundle', { stale: item }], ['intent', selector], ['intent', { clipData: clip }]]);
+  assert.deepEqual(plain(result.intent.extras.stale), item);  // Removed first, then put back as built.
+  assert.deepEqual(plain(result.intent.selector.spec), selector);
+  assert.deepEqual(plain(result.intent.clipData), { clip });
+  assert.equal(result.intent.package, 'later.pkg');
+  const removed = runIntercept([{ type: 'selector_json', val: 'null' }, { type: 'clipdata_json', val: 'null' }]);
+  assert.equal(removed.intent.clipData, null);
 });

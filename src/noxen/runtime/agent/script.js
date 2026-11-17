@@ -874,7 +874,7 @@ function parseIntentComponent(value) {
 }
 
 function parseIntentData(value) {
-  if (value === "") return null;
+  if (value === null) return null;
   if (!UriJava) throw new Error("android.net.Uri is unavailable");
   return UriJava.parse(javaStringArgument(value));
 }
@@ -901,7 +901,7 @@ function applyNestedIntentMods(intent, path, mods) {
       var replacement = IntentJava.$new(Java.cast(node, IntentJava));
       for (var mod of mods) {
         if (mod.type === "nested_component") replacement.setComponent(parseIntentComponent(mod.val));
-        else if (mod.type === "nested_action") replacement.setAction(mod.val === "" ? null : javaStringArgument(mod.val));
+        else if (mod.type === "nested_action") replacement.setAction(mod.val === null ? null : javaStringArgument(mod.val));
       }
       applyIntentDataAndMime(replacement, mods, "nested_data", "nested_mime");
       return replacement;
@@ -928,9 +928,19 @@ function applyNestedIntentMods(intent, path, mods) {
       var clip = Java.cast(node, Clip);
       var item = clip.getItemAt(step);
       var next = edit(item.getIntent(), index + 1);
-      // Copy the framework item, including metadata that a public constructor would drop.
-      var itemCopy = Java.use("android.content.ClipData$Item").$new(item);
-      itemCopy.mIntent.value = next;
+      var ItemClass = Java.use("android.content.ClipData$Item");
+      var itemCopy;
+      if (ItemClass.$new.overloads.some(function (o) {
+        return o.argumentTypes.length === 1 && o.argumentTypes[0].className === "android.content.ClipData$Item";
+      })) {
+        // Android 13+: copy the framework item, including metadata that a public constructor would drop.
+        itemCopy = ItemClass.$new.overload("android.content.ClipData$Item").call(ItemClass, item);
+        itemCopy.mIntent.value = next;
+      } else {
+        // Before Android 13 there is no copy constructor; these four fields are the whole item.
+        itemCopy = ItemClass.$new.overload("java.lang.CharSequence", "java.lang.String", "android.content.Intent",
+          "android.net.Uri").call(ItemClass, item.getText(), item.getHtmlText(), next, item.getUri());
+      }
       var clipCopy = Clip.$new(clip);
       clipCopy.setItemAt(step, itemCopy);
       return clipCopy;
@@ -966,7 +976,7 @@ function applyIntentDataAndMime(intent, mods, dataKind, mimeKind) {
   if (!dataMod && !mimeMod) return;
   // Updating either field alone would clear the other.
   var data = dataMod ? parseIntentData(dataMod.val) : intent.getData();
-  var mime = mimeMod ? (mimeMod.val === "" ? null : javaStringArgument(mimeMod.val))
+  var mime = mimeMod ? (mimeMod.val === null ? null : javaStringArgument(mimeMod.val))
     : capturedJavaText(intent, "android.content.Intent", "getType");
   intent.setDataAndType(data, mime);
 }
@@ -991,7 +1001,24 @@ function applyModifications(intent) {
 
     modQueue.forEach(function(mod) {
       if (mod.type === "action") {
-        intent.setAction(mod.val === "" ? null : javaStringArgument(mod.val));
+        intent.setAction(mod.val === null ? null : javaStringArgument(mod.val));
+      }
+      else if (mod.type === "package") {
+        intent.setPackage(mod.val === null ? null : javaStringArgument(mod.val));
+      }
+      else if (mod.type === "extra_json") {
+        var jsonKey = javaStringArgument(mod.key);
+        var built = {};
+        built[mod.key] = JSON.parse(mod.val);
+        intent.removeExtra(jsonKey);
+        intent.putExtras.overload("android.os.Bundle").call(intent, getSender().buildBundle(built));
+      }
+      else if (mod.type === "selector_json") {
+        intent.setSelector(getSender().buildIntent(JSON.parse(mod.val)));
+      }
+      else if (mod.type === "clipdata_json") {
+        var clipSpec = JSON.parse(mod.val);
+        intent.setClipData(clipSpec === null ? null : getSender().buildIntent({ clipData: clipSpec }).getClipData());
       }
       else if (mod.type === "component") {
         intent.setComponent(parseIntentComponent(mod.val));
@@ -1380,16 +1407,24 @@ function normalizeRpcMods(mods) {
     component: true, action: true, data: true, mime: true,
     cat_add: true, cat_rem: true,
     flag_add: true, flag_rem: true,
-    extra_add: true, extra_rem: true
+    extra_add: true, extra_rem: true,
+    // Whole values in Sender's JSON format, built with Sender's own builders.
+    package: true, extra_json: true, selector_json: true, clipdata_json: true
+  };
+  // For text fields a null value clears the field and "" sets an empty string.
+  var clearable = {
+    action: true, data: true, mime: true, nested_action: true, nested_data: true, nested_mime: true,
+    package: true
   };
   return mods.map(function (mod) {
     if (!mod || !(Object.hasOwn(supported, mod.type) || Object.hasOwn(nestedIntentModTypes, mod.type))) {
       throw new Error("unsupported modification type");
     }
+    var cleared = (mod.val === null || mod.val === undefined) && Object.hasOwn(clearable, mod.type);
     return {
       type: String(mod.type),
       key: requireWellFormedText(mod.key === null || mod.key === undefined ? "" : String(mod.key)),
-      val: requireWellFormedText(mod.val === null || mod.val === undefined ? "" : String(mod.val)),
+      val: cleared ? null : requireWellFormedText(mod.val === null || mod.val === undefined ? "" : String(mod.val)),
       extraType: mod.extraType === null || mod.extraType === undefined
         ? "" : requireWellFormedText(String(mod.extraType))
     };

@@ -143,8 +143,8 @@ class MCPServiceTests(MCPAppTestCase):
         await self.pilot.pause()
         area = self.app.query_one("#edit_form").area
         document = json.loads(area.text)
-        document["extras"]["next"]["value"].update(
-            component="pkg/.Two", action="NEW", data="https://example.org/new", mimeType="")
+        document["extras"]["next"]["value"].update(  # null clears, as "" does over MCP.
+            component="pkg/.Two", action="NEW", data="https://example.org/new", mimeType=None)
         area.load(json.dumps(document, indent=4))
         self.assertEqual(self.app._collect_edit_mods(), mods)
         entry = self.app._current_intercepted_entry

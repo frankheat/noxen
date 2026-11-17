@@ -523,7 +523,7 @@ class NoxenApp(App):
         try:
             # Commands staged before opening the editor are part of what it shows.
             for mod in self._staged_mods:
-                draft = apply_mod_to_json(draft, mod)
+                draft = apply_mod_to_json(draft, mod, self._current_intercepted_entry.get("intent"))
         except ValueError as error:
             self.write_cmd(f"[red]Cannot open the editor: {error}. Forward, drop or remove the staged change first.[/red]")
             return
@@ -642,7 +642,7 @@ class NoxenApp(App):
         except ValueError as error:
             return f"Fix the JSON before applying a command: {error}"
         try:
-            doc = apply_mod_to_json(doc, mod)
+            doc = apply_mod_to_json(doc, mod, (self._current_intercepted_entry or {}).get("intent"))
         except ValueError as error:
             return str(error)
         area.load(format_request(doc))

@@ -682,6 +682,8 @@ class MCPService:
                 if flag is None:
                     raise OperationError(f"{prefix}: flag must be a 32-bit integer or bit mask")
                 value = str(flag)
+            if kind in {"action", "data", "mime", "nested_action", "nested_data", "nested_mime"} and value == "":
+                value = None  # MCP clears a text field with an empty string.
             mod = (kind, key, value, extra_type)
             if error := self.app._mod_safety_error(mod):
                 raise OperationError(f"{prefix}: {error}")

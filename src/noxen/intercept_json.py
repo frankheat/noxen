@@ -3,9 +3,16 @@
 The editor shows the captured Intent in Sender's format. What the user changes
 is turned back into the staged modifications the agent applies, so values that
 could not be captured (and are not in the JSON) stay on the Intent untouched.
+
+A change is made as narrowly as possible: a field, an extra, or a field of a nested
+Intent. Anything else (another extra type, a Bundle's contents, a selector or
+ClipData) is replaced as a whole, built on the device from its JSON with Sender's
+builders, but only when that value was captured in full: otherwise replacing it
+would lose what the JSON could not show.
 """
 
 import copy
+import json
 
 from noxen.intent_mods import (
     NESTED_INTENT_FIELDS,
@@ -19,7 +26,7 @@ from noxen.intent_mods import (
     split_extra_values,
     validate_extra_value,
 )
-from noxen.sender import SenderError, fields, string, typed_values
+from noxen.sender import SenderError, fields, string, typed_values, validate_intent
 from noxen.sender_capture import _intent
 
 SCALARS = ("component", "action", "data", "mimeType")
@@ -56,12 +63,18 @@ def json_to_mods(captured, shown, edited):
         return _json_to_mods(captured, shown, edited)
     except SenderError as error:  # A changed value has the wrong shape.
         raise ValueError(str(error)) from None
+    except (AttributeError, IndexError, KeyError, TypeError):
+        # A capture read back from a damaged project is refused, never half-applied.
+        raise ValueError("This capture is malformed, so the Intent cannot be modified from it") from None
 
 
 def _json_to_mods(captured, shown, edited):
     # Only what changed is checked: the capture itself may hold states Sender would not build.
     fields(edited, INTENT_KEYS, "intent")
     draft = copy.deepcopy(captured or {})
+    # Paths that hold something not captured in full: such a value can only change field by field.
+    _, notes = editable_intent({"intent": captured})
+    whole = []  # Values replaced as a whole, built on the device from their JSON.
     # A field deleted from the JSON is cleared; one never shown (not captured in full) stays as it is.
     empty = {"flags": 0, "categories": [], "extras": {}}
     edited = {**{key: empty.get(key) for key in shown if key not in edited}, **edited}
@@ -69,8 +82,13 @@ def _json_to_mods(captured, shown, edited):
         if key in edited and edited[key] != shown.get(key):
             string(edited[key], f"intent.{key}", nullable=True)
             draft[key] = normalize_component(edited[key]) or None if key == "component" and edited[key] else edited[key]
-    if edited.get("package", shown.get("package")) != shown.get("package"):
-        raise ValueError("package cannot be changed on a held Intent")
+    package = edited.get("package", shown.get("package"))
+    selector = edited.get("selector", shown.get("selector"))
+    if package != shown.get("package"):
+        string(package, "intent.package", nullable=True)
+    if (package != shown.get("package") or selector != shown.get("selector")) \
+            and package is not None and selector is not None:
+        raise ValueError("intent: package and selector cannot both be set (Android refuses it)")
     if "flags" in edited and edited["flags"] != shown.get("flags"):
         if type(edited["flags"]) is not int or not 0 <= edited["flags"] <= 0xFFFFFFFF:
             raise ValueError("intent.flags: expected unsigned 32-bit integer")
@@ -84,14 +102,40 @@ def _json_to_mods(captured, shown, edited):
         draft["categories"] = list(categories)
     if not isinstance(edited.get("extras") or {}, dict):
         raise ValueError("intent.extras: expected keyed typed values")
-    _extras(draft, shown.get("extras") or {}, edited.get("extras") or {})
-    for key in ("selector", "clipData"):
-        if key in edited or key in shown:
-            _nested_field(draft, key, shown.get(key), edited.get(key), (key,))
-    return diff_intents(captured or {}, draft)
+    _extras(draft, shown.get("extras") or {}, edited.get("extras") or {}, captured, notes, whole)
+    for key, kind in (("selector", "selector_json"), ("clipData", "clipdata_json")):
+        before, after = shown.get(key), edited.get(key)
+        if (key in edited or key in shown) and before != after:
+            try:
+                _trial(draft, lambda trial: _nested_field(trial, key, before, after, (key,)))
+            except ValueError as refusal:
+                if not _complete(notes, f"intent.{key}"):
+                    raise ValueError(f"{refusal}; {key} holds values not captured in full, "
+                                     "so it cannot be replaced as a whole") from None
+                if after is not None:
+                    validate_intent(copy.deepcopy({key: after}), "intent")
+                whole.append((kind, "", json.dumps(after, ensure_ascii=False), ""))
+    mods = diff_intents(captured or {}, draft)
+    # Clear the package before a selector is set, and set it after one is removed: Android forbids both.
+    first = [("package", "", None, "")] if package is None and package != shown.get("package") else []
+    last = [("package", "", package, "")] if package is not None and package != shown.get("package") else []
+    return first + mods + whole + last
 
 
-def _extras(draft, shown, edited):
+def _trial(draft, change):
+    """Apply a field-level change to a copy, so a refused one leaves nothing half done."""
+    trial = copy.deepcopy(draft)
+    change(trial)
+    draft.clear()
+    draft.update(trial)
+
+
+def _complete(notes, path):
+    """Whether everything under `path` was captured in full."""
+    return not any(note == path or note.startswith((path + ".", path + ":", path + "[")) for note in notes)
+
+
+def _extras(draft, shown, edited, captured, notes, whole):
     extras = draft.setdefault("extras", {})
     for key in shown:
         if key not in edited:
@@ -100,12 +144,26 @@ def _extras(draft, shown, edited):
         before = shown.get(key)
         if item == before:
             continue
+        path = f"intent.extras.'{key}'"
+        complete = _complete(notes, path)
         if before is not None and isinstance(item, dict) and before["type"] == item.get("type") \
                 and item["type"] in ("Intent", "Bundle"):
-            _nested_value(draft, before, item, ("extras", key))
-            continue
+            try:
+                _trial(draft, lambda trial: _nested_value(trial, before, item, ("extras", key)))
+                continue
+            except ValueError as refusal:
+                if not complete:
+                    raise ValueError(f"{refusal}; extras.{key} holds values not captured in full, "
+                                     "so it cannot be replaced as a whole") from None
         typed_values({key: item}, "intent.extras")
-        extra_type, value = _agent_extra(key, item)
+        try:
+            extra_type, value = _agent_extra(key, item)
+        except ValueError:
+            # Any other Sender type is built on the device from its JSON, replacing the whole value.
+            whole.append(("extra_json", key, json.dumps(item, ensure_ascii=False), ""))
+            if key in ((captured or {}).get("extras") or {}):
+                extras[key] = copy.deepcopy(captured["extras"][key])  # Left to the JSON modification.
+            continue
         mods = ([("extra_rem", key, "", "")] if key in extras else []) + [("extra_add", key, value, extra_type)]
         extras[key] = apply_mods_to_intent({"extras": {key: extras.get(key)} if key in extras else {}}, mods)["extras"][key]
 
@@ -122,9 +180,9 @@ def _agent_extra(key, item):
     if kind.endswith("[]"):
         if any(element is None for element in value):
             raise ValueError(f"extras.{key}: array elements cannot be null on a held Intent")
-        text = ",".join(_element(kind[:-2], element) for element in value)
         if not value:
             raise ValueError(f"extras.{key}: an empty array cannot be set on a held Intent")
+        text = ",".join(_element(kind[:-2], element, in_list=True) for element in value)
     else:
         text = _element(kind, value)
     extra_type = EXTRA_TYPES[kind]
@@ -133,10 +191,11 @@ def _agent_extra(key, item):
     return extra_type, text
 
 
-def _element(kind, value):
+def _element(kind, value, in_list=False):
     if kind == "boolean":
         return "true" if value else "false"
-    if kind == "String":
+    if kind == "String" and in_list:
+        # The agent splits a list on commas: "\," is a comma inside an item, "\\" a backslash.
         return value.replace("\\", "\\\\").replace(",", "\\,")
     return str(value)
 
@@ -212,14 +271,18 @@ def _label(path):
     return ".".join(str(part) for part in path)
 
 
-def apply_mod_to_json(intent, mod):
-    """A command typed while the editor is open, applied to the JSON. Raises ValueError when it cannot be shown."""
+def apply_mod_to_json(intent, mod, captured=None):
+    """A command typed while the editor is open, applied to the JSON. Raises ValueError when it cannot be shown.
+
+    `captured` is the held Intent: an extra that was not captured in full is not in the JSON,
+    so a command removing it is refused instead of being silently lost.
+    """
     kind, key, value, extra_type = mod
     intent = copy.deepcopy(intent)
     if kind == "component":
         intent["component"] = normalize_component(value) or None
     elif kind in ("action", "data", "mime"):
-        intent["mimeType" if kind == "mime" else kind] = value or None
+        intent["mimeType" if kind == "mime" else kind] = value
     elif kind in ("cat_add", "cat_rem"):
         categories = [c for c in intent.get("categories") or [] if c != value]
         intent["categories"] = categories + [value] if kind == "cat_add" else categories
@@ -228,6 +291,9 @@ def apply_mod_to_json(intent, mod):
         flags = intent.get("flags") or 0
         intent["flags"] = flags | flag if kind == "flag_add" else flags & ~flag
     elif kind == "extra_rem":
+        if key not in (intent.get("extras") or {}) and key in ((captured or {}).get("extras") or {}):
+            raise ValueError(f"Extra {key!r} was not captured in full, so it is not in the JSON; "
+                             "press Escape to close the editor and remove it with -x")
         (intent.get("extras") or {}).pop(key, None)
     elif kind == "extra_add":
         intent["extras"] = dict(intent.get("extras") or {})
@@ -237,7 +303,7 @@ def apply_mod_to_json(intent, mod):
         if node is None:
             raise ValueError("That nested Intent is not in the JSON")
         field = NESTED_INTENT_FIELDS[kind]
-        node[field] = (normalize_component(value) if field == "component" else value) or None
+        node[field] = normalize_component(value or "") or None if field == "component" else value
     else:
         raise ValueError(f"{kind} cannot be applied in the JSON editor")
     return intent

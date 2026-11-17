@@ -351,6 +351,8 @@ function createSender(withoutRecording = fn => fn()) {
       } catch (error) { reject(error); }
     }));
   }
-  return {identity, execute, cancel, checkActivityContext: () => J().performNow(activityContext)};
+  // Intercept reuses the builders to set any Sender-typed value on a held Intent.
+  return {identity, execute, cancel, checkActivityContext: () => J().performNow(activityContext),
+          buildBundle: bundle, buildIntent: intent};
 }
 module.exports = {createSender};

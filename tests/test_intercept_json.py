@@ -58,7 +58,8 @@ class InterceptJsonTests(unittest.TestCase):
                          [("extra_rem", "n", "", ""), ("extra_add", "n", "4", "int")])
         self.assertEqual(self.mods(lambda e: e["extras"].pop("n")), [("extra_rem", "n", "", "")])
         # A field deleted from the JSON is cleared; the uncaptured extra is never removed.
-        self.assertEqual(self.mods(lambda e: e.pop("action")), [("action", "", "", "")])
+        self.assertEqual(self.mods(lambda e: e.pop("action")), [("action", "", None, "")])
+        self.assertEqual(self.mods(lambda e: e.update(action="")), [("action", "", "", "")])  # Empty, not cleared.
         self.assertNotIn(("extra_rem", "obj", "", ""), self.mods(lambda e: e["extras"].clear()))
 
     def test_typed_values_are_written_the_way_the_agent_reads_them(self):
@@ -66,25 +67,60 @@ class InterceptJsonTests(unittest.TestCase):
         self.assertEqual(add("s", {"type": "String", "value": None}), [("extra_add", "s", "", "null")])
         self.assertEqual(add("l", {"type": "long", "value": "5000000000"}), [("extra_add", "l", "5000000000", "long")])
         self.assertEqual(add("b", {"type": "boolean", "value": False}), [("extra_add", "b", "false", "bool")])
+        # Only list items are escaped: a single String is passed as it is.
+        self.assertEqual(add("s", {"type": "String", "value": "a,b\\c"}), [("extra_add", "s", "a,b\\c", "string")])
         self.assertEqual(add("a", {"type": "String[]", "value": ["a,b", "c\\d"]}),
                          [("extra_add", "a", "a\\,b,c\\\\d", "string[]")])
         result = apply_mods_to_intent(self.captured, add("a", {"type": "String[]", "value": ["a,b", "c\\d"]}))
         self.assertEqual(result["extras"]["a"]["noxenType"], "string[]")
 
-    def test_changes_the_agent_cannot_make_are_refused_with_the_reason(self):
+    def test_invalid_changes_are_refused_with_the_reason(self):
         for change, message in (
-            (lambda e: e["extras"].update(s={"type": "short", "value": 1}), "short values cannot be set"),
-            (lambda e: e["extras"].update(s={"type": "int[]", "value": []}), "empty array"),
-            (lambda e: e.update(package="p"), "package cannot be changed"),
             (lambda e: e.update(component="x"), "package/class"),
             (lambda e: e.update(flags=-1), "flags"),
             (lambda e: e.update(categories=["a", "a"]), "duplicate category"),
             (lambda e: e.update(extra=1), "unsupported fields"),
-            (lambda e: e["extras"]["inner"]["value"]["extras"]["k"].update(value="w"), "inside a Bundle"),
-            (lambda e: e["extras"]["inner"]["value"].update(flags=1), "only component"),
+            (lambda e: e["extras"].update(s={"type": "short", "value": 1 << 20}), "short out of range"),
+            (lambda e: e["extras"].update(s={"type": "Parcel", "value": 1}), "unsupported type"),
+            (lambda e: e.update(package="p", selector={"action": "a"}), "package and selector"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 self.mods(change)
+
+    def test_any_sender_type_and_structure_is_set_as_a_whole_value(self):
+        whole = lambda key, item: ("extra_json", key, json.dumps(item, ensure_ascii=False), "")  # noqa: E731
+        short = {"type": "short", "value": 1}
+        self.assertEqual(self.mods(lambda e: e["extras"].update(s=short)), [whole("s", short)])
+        empty = {"type": "int[]", "value": []}
+        self.assertEqual(self.mods(lambda e: e["extras"].update(a=empty)), [whole("a", empty)])
+        # A Bundle's contents or a nested Intent's other fields: the extra, captured in full, is rebuilt.
+        def nested_flags(e):
+            e["extras"]["inner"]["value"].update(flags=1)
+        edited = copy.deepcopy(self.shown)
+        nested_flags(edited)
+        self.assertEqual(self.mods(nested_flags), [whole("inner", edited["extras"]["inner"])])
+        self.assertEqual(self.mods(lambda e: e.update(package="p")), [("package", "", "p", "")])
+        selector = {"component": "a.b/a.b.S", "action": "s", "flags": 0, "categories": [], "extras": None}
+        self.assertEqual(self.mods(lambda e: e.update(selector=selector)),
+                         [("selector_json", "", json.dumps(selector), "")])
+        # Package is cleared before a selector is set, never together.
+        with_package = {**self.shown, "package": "p"}
+        mods = json_to_mods({**self.captured, "package": "p"}, with_package,
+                            {**with_package, "package": None, "selector": selector})
+        self.assertEqual([mod[0] for mod in mods], ["package", "selector_json"])
+
+    def test_values_not_captured_in_full_are_never_replaced_as_a_whole(self):
+        captured = self.captured
+        captured["extras"]["inner"]["structured"]["extras"]["items"].append(
+            {"key": "opaque", "value": {"kind": "object", "type": "x.Y"}})
+        captured["extras"]["inner"]["structured"]["extras"]["count"] = 2
+        shown, _ = editable_intent({"intent": captured})
+        edited = copy.deepcopy(shown)
+        edited["extras"]["inner"]["value"]["action"] = "NEW"  # A field: still possible.
+        self.assertEqual(json_to_mods(captured, shown, edited), [("nested_action", "inner", "NEW", "")])
+        edited["extras"]["inner"]["value"]["flags"] = 1  # The whole Intent: would lose "opaque".
+        with self.assertRaisesRegex(ValueError, "not captured in full"):
+            json_to_mods(captured, shown, edited)
 
     def test_fields_of_nested_intents_can_change(self):
         self.assertEqual(self.mods(lambda e: e["extras"]["inner"]["value"].update(action="NEW")),

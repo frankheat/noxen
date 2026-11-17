@@ -27,13 +27,18 @@ class FidelityTests(unittest.TestCase):
     def test_explicit_clear_of_an_empty_string_is_a_real_modification(self):
         for field, command in (("action", "action"), ("data", "data"), ("mimeType", "mime")):
             original = intent()
-            draft = apply_mods_to_intent(original, [(command, "", "", "")])
+            draft = apply_mods_to_intent(original, [(command, "", None, "")])  # None clears...
             self.assertIsNone(draft[field])
-            self.assertEqual(diff_intents(original, draft), [(command, "", "", "")])
+            self.assertEqual(diff_intents(original, draft), [(command, "", None, "")])
             actual, changed, warning = confirmed_modification(original, {"ok": True, "infoIntent": draft})
             self.assertTrue(changed)
             self.assertIsNone(warning)
             self.assertIsNone(actual[field])
+            # ...and "" is an empty string, which Android keeps apart from null.
+            cleared = intent(**{field: None})
+            emptied = apply_mods_to_intent(cleared, [(command, "", "", "")])
+            self.assertEqual(emptied[field], "")
+            self.assertEqual(diff_intents(cleared, emptied), [(command, "", "", "")])
 
     def test_explicit_empty_category_commands_keep_exact_values(self):
         original = intent(categories=["A", " A "])
@@ -179,10 +184,10 @@ class FidelityEditorTests(IsolatedAppTestCase):
             self.assertEqual(self.shown(app)["categories"], ["A", " A ", ""])
             self.assertIsNone(app._apply_command_mod_to_editor(("cat_rem", "", " A ", "")))
             self.assertEqual(self.shown(app)["categories"], ["A", ""])
-            self.assertIsNone(app._apply_command_mod_to_editor(("mime", "", "", "")))
+            self.assertIsNone(app._apply_command_mod_to_editor(("mime", "", None, "")))  # mime clear
             document = self.shown(app)
             self.assertIsNone(document["mimeType"])
             self.assertEqual(document["action"], "")
             self.assertEqual(document["data"], "")
-            self.assertIn(("mime", "", "", ""), app._collect_edit_mods())
+            self.assertIn(("mime", "", None, ""), app._collect_edit_mods())
 
