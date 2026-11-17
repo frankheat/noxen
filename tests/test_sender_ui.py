@@ -326,7 +326,9 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.pause(0.2)
                 self.assertIn('        "action": "test.PING",\n        "extras": {\n'
                               '            "tok": {"type": "String", "value": ""}\n        }', area.text)
-                self.assertTrue(pane.editor_dirty())
+                # The text is valid, so it is pending or, on a slow machine, already saved on its own.
+                saved = service.db.sender_request(first["id"])["request"]["intent"]
+                self.assertTrue(pane.editor_dirty() or saved.get("extras") == {"tok": {"type": "String", "value": ""}})
 
                 # An opening brace closes itself on its own line; folding keeps the request intact.
                 area.move_cursor(area.document.end)

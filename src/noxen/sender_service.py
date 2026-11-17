@@ -318,7 +318,7 @@ class SenderService:
         if run_id == self.active_run and self.task:
             try:
                 await asyncio.wait_for(asyncio.shield(self.task), timeout)
-            except TimeoutError:
+            except asyncio.TimeoutError:  # Not the builtin TimeoutError before Python 3.11.
                 pass
         return self.get_run(run_id)
 
