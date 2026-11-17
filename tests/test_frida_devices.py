@@ -4,7 +4,7 @@ import unittest
 import weakref
 from types import SimpleNamespace
 
-from noxen.frida_devices import prefer_non_local_devices, scan_devices
+from noxen.frida_devices import prefer_non_local_devices, scan_devices, usable_devices
 from noxen.filters import FilterManager
 from noxen.frida_session import FridaSession, SessionConfig
 
@@ -40,7 +40,7 @@ def module_for(managers):
 
 class FridaDeviceTests(unittest.TestCase):
     def test_refresh_replaces_failed_backend_without_using_global_manager(self):
-        socket = SimpleNamespace(id="socket", type="remote")
+        socket = SimpleNamespace(id="tcp@10.0.0.2:27042", type="remote")  # A remote frida-server.
         usb = SimpleNamespace(id="emulator-5554", type="usb")
         old, recovered = Manager([socket]), Manager([socket, usb])
         module = module_for([old, recovered])
@@ -119,6 +119,19 @@ class FridaDeviceTests(unittest.TestCase):
         local = SimpleNamespace(type="local")
 
         self.assertEqual(prefer_non_local_devices([local]), [local])
+
+    def test_devices_that_cannot_run_hooks_are_left_out(self):
+        usb = SimpleNamespace(id="emulator-5554", type="usb")
+        socket_device = SimpleNamespace(id="socket", type="remote")
+        gdb = SimpleNamespace(id="barebone", type="remote")
+        tcp = SimpleNamespace(id="tcp@10.0.0.2:27042", type="remote")
+        devices = [usb, socket_device, gdb, tcp]
+        # The GDB stub never; the local socket only while a frida-server answers on it.
+        self.assertEqual(usable_devices(devices, socket_listening=lambda: False), [usb, tcp])
+        self.assertEqual(usable_devices(devices, socket_listening=lambda: True), [usb, socket_device, tcp])
+        probed = []
+        usable_devices([usb], socket_listening=lambda: probed.append(1))
+        self.assertEqual(probed, [])  # Nothing to check without the socket device.
 
 
 if __name__ == "__main__":

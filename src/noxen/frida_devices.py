@@ -1,5 +1,9 @@
+import socket
 import threading
 import weakref
+
+# Frida's "Local Socket" device: a frida-server on this port, e.g. one forwarded with `adb forward`.
+LOCAL_SOCKET_ADDRESS = ("127.0.0.1", 27042)
 
 
 def _close_manager(impl):
@@ -61,7 +65,28 @@ def enumerate_preferred_devices(frida_module, usb_timeout: int = 1):
             if usb_device is not None and all(device.id != usb_device.id for device in devices):
                 devices.append(usb_device)
 
-    return prefer_non_local_devices(devices)
+    return prefer_non_local_devices(usable_devices(devices))
+
+
+def local_socket_listening(address=LOCAL_SOCKET_ADDRESS, timeout=0.2):
+    try:
+        with socket.create_connection(address, timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def usable_devices(devices, socket_listening=None):
+    """Leave out the devices Frida always lists that cannot run noxen's hooks.
+
+    "GDB Remote Stub" talks to a GDB stub (QEMU, a kernel): there is no Java to
+    hook. "Local Socket" is only kept when a frida-server answers on its port.
+    """
+    socket_listening = socket_listening or local_socket_listening
+    kept = [device for device in devices if getattr(device, "id", None) != "barebone"]
+    if any(getattr(device, "id", None) == "socket" for device in kept) and not socket_listening():
+        kept = [device for device in kept if getattr(device, "id", None) != "socket"]
+    return kept
 
 
 def prefer_non_local_devices(devices):

@@ -191,7 +191,8 @@ class ConnectDeviceLoadingTests(IsolatedAppTestCase):
             get_device_manager=lambda: FakeDeviceManager([socket_device], usb_device=usb_device),
         )
 
-        devices = enumerate_preferred_devices(fake_frida, usb_timeout=1)
+        with patch("noxen.frida_devices.local_socket_listening", return_value=True):
+            devices = enumerate_preferred_devices(fake_frida, usb_timeout=1)
 
         self.assertEqual(devices, [socket_device, usb_device])
 
