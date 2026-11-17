@@ -74,7 +74,7 @@ from noxen.history_table import HistoryTable
 from noxen.monitor_ui import MonitorPane, RecordingDialog
 from noxen.sender_service import SenderService
 from noxen.sender import INTENT_OPERATIONS
-from noxen.sender_ui import SenderPane, SenderRequestModal, SenderTabMenu
+from noxen.sender_ui import SenderPane, SenderTabMenu
 from noxen.sender_capture import (capture_operation, prepare_component_request, prepare_intent_request,
                                   prepare_monitor_request)
 from noxen.intent_mods import (
@@ -1165,8 +1165,7 @@ class NoxenApp(App):
                 if component is None:
                     raise ValueError("Select a component first")
                 request = prepare_component_request(info.get("identity", {}).get("package"), component)
-                self.push_screen(SenderRequestModal(self.sender_service,
-                    {"id": None, "revision": 0, "name": component["name"], "request": request}))
+                self.query_one(SenderPane).receive_request(request, name=component["name"][:200])
             except ValueError as error:
                 self.notify(str(error), severity="error")
             return

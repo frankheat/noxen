@@ -1,281 +1,52 @@
 """Sender requests and execution records. UI and MCP share SenderService."""
 
-import copy
 import re
 import sqlite3
 from uuid import uuid4
 
 from rich.text import Text
 from textual import work
-from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
+from textual.containers import Horizontal, HorizontalScroll, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, OptionList, RichLog, Rule, Select, Tree, Collapsible
+from textual.widgets import Button, Input, Label, OptionList, RichLog, Rule, Select
 from textual.widgets.option_list import Option
 
 from noxen.modals import ModalButton
 from noxen.monitor_ui import RecordingDialog
-from noxen.sender import OPERATIONS, INTENT_OPERATIONS, SenderError, empty_request, render_sender_detail
+from noxen.sender import SenderError, empty_request, render_sender_detail
 from noxen.sender_service import endpoint_for_app, sender_io
 from noxen.textual_compat import is_select_empty
 from noxen import sender_json
 from noxen.sender_json_editor import JsonRequestEditor
-from noxen.sender_editor import MISSING, ScalarField, OptionalSection, object_fields, object_sections, ValueEditor, EntryRow, SCALARS, LABELS, changing_draft, check_draft_ready
 
 
-class SenderRequestModal(ModalScreen):
+class SenderRenameModal(ModalScreen):
+    """Rename a request. The name is what its tab shows."""
+
     BINDINGS = [("escape", "dismiss", "Cancel")]
     DEFAULT_CSS = """
-    SenderRequestModal { align: center middle; }
-    SenderRequestModal > Vertical { width: 90%; max-width: 120; height: 90%; padding: 1 2; background: $surface; border: solid $foreground-muted; }
-    SenderRequestModal .title { text-style: bold; margin-bottom: 1; }
-    SenderRequestModal #sender_request_name { height: 3; margin-bottom: 1; }
-    SenderRequestModal #sender_operation { height: 3; margin-bottom: 1; }
-    SenderRequestModal #sender_request_body { height: 1fr; }
-    SenderRequestModal #sender_fields { height: auto; }
-    SenderRequestModal .buttons { height: 3; align: right middle; margin-top: 1; }
-    SenderRequestModal Button { width: auto; min-width: 8; border: round $foreground-muted; background: transparent; }
-    SenderRequestModal .buttons Button { min-width: 10; margin-left: 1; }
-    SenderRequestModal Collapsible { background: transparent; }
-    /* Sections and nested objects are hidden until navigation opens them, so
-       a newly mounted one never shows before it has been placed. */
-    SenderRequestModal OptionalSection { display: none; }
-    SenderRequestModal OptionalSection.navigation_target,
-    SenderRequestModal OptionalSection.navigation_path { display: block; }
-    SenderRequestModal EntryRow > .entry_body { display: none; }
-    SenderRequestModal EntryRow > .entry_body.navigation_path { display: block; }
-    SenderRequestModal .off_path { display: none; }
+    SenderRenameModal { align: center middle; }
+    SenderRenameModal > Vertical { width: 60; max-width: 90%; height: auto; padding: 1 2; background: $surface; border: solid $foreground-muted; }
+    SenderRenameModal Label { margin-bottom: 1; text-style: bold; }
+    SenderRenameModal Input { height: 3; padding: 0 1; border: round $foreground-muted; }
+    SenderRenameModal Input:focus { border: round $accent; }
     """
 
-    def __init__(self, service, saved=None):
+    def __init__(self, name):
         super().__init__()
-        self.service, self.saved = service, saved
-        request = saved["request"] if saved else empty_request()
-        self.operation = request["operation"]
-        self.drafts = {self.operation: copy.deepcopy(request)}
-        self.fields = []
-        self._object_target = None
-        self._navigation_signature = None
-
-    def build_fields(self):
-        request = self.drafts.setdefault(self.operation, empty_request(self.operation))
-        intent = self.operation in INTENT_OPERATIONS
-        body = request["intent"] if intent else request
-        specs = object_fields("Intent") if intent else [("uri", "String", False, False)]
-        if intent and self.operation in ("sendBroadcast", "sendOrderedBroadcast"):
-            specs = [*specs, ("receiverPermission", "String", True, True)]
-        if not intent:
-            text_keys = {"query": ["selection", "sortOrder"], "update": ["selection"],
-                         "delete": ["selection"], "call": ["method", "arg"]}.get(self.operation, [])
-            specs += [(key, "String", key != "method", key != "method") for key in text_keys]
-            if self.operation == "query":
-                specs += [("maxRows", "int", True, False)]
-            if self.operation in ("query", "openFileDescriptor"):
-                specs += [("maxBytes", "int", True, False)]
-        self.fields = []
-        for key, kind, optional, nullable in specs:
-            source = request if key == "receiverPermission" else body
-            field = ScalarField(key, kind, source.get(key, MISSING), optional=optional, nullable=nullable,
-                                input_id=f"sender_value_{key}")
-            field.id = f"sender_field_{key}"
-            self.fields.append(field)
-        sections = object_sections("Intent") if intent else {
-            "query": [("projection", "String[]"), ("selectionArgs", "String[]")],
-            "insert": [("values", "ContentValues")],
-            "update": [("values", "ContentValues"), ("selectionArgs", "String[]")],
-            "delete": [("selectionArgs", "String[]")], "call": [("extras", "Bundle")],
-        }.get(self.operation, [])
-        for key, kind in sections:
-            field = OptionalSection(key, kind, body.get(key, {} if key == "values" else MISSING),
-                                    depth=1 if key == "selector" else 0, required=key == "values")
-            self.fields.append(field)
-        return self.fields
+        self.current = name
 
     def compose(self):
         with Vertical():
-            yield Label("Edit request" if self.saved and self.saved["id"] else "New request", classes="title")
-            with Horizontal(id="sender_workspace"):
-                tree = Tree("Request", id="sender_request_tree")
-                tree.auto_expand = False  # A click opens the object; it must not fold the explorer.
-                tree.guide_depth = 3
-                yield tree
-                with VerticalScroll(id="sender_request_body"):
-                    yield Label("Request", id="sender_object_title", classes="title")
-                    with Vertical(id="sender_request_identity"):
-                        yield Label("Name")
-                        yield Input(self.saved["name"] if self.saved else "", id="sender_request_name", select_on_focus=False)
-                        yield Label("Operation")
-                        yield Select([(op, op) for op in OPERATIONS], value=self.operation, allow_blank=False, id="sender_operation")
-                    with Vertical(id="sender_fields"):
-                        yield from self.build_fields()
-            with Horizontal(classes="buttons"):
-                yield ModalButton("Browse", id="sender_request_browse")
-                yield ModalButton("Cancel", id="sender_request_cancel")
-                yield ModalButton("Save", id="sender_request_save")
+            yield Label("Rename request")
+            yield Input(self.current, id="sender_rename", select_on_focus=True)
 
     def on_mount(self):
-        self.refresh_navigation()
-        self.set_interval(0.2, self.refresh_navigation)
+        self.query_one(Input).focus()
 
-    def on_resize(self, event):
-        self.set_class(event.size.width < 90, "narrow_request")
-
-    def navigation_items(self):
-        items = []
-        def visit(widget, parent, label):
-            items.append((widget, parent, label))
-            editor = widget.editor if isinstance(widget, OptionalSection) else widget
-            if editor is None:
-                return
-            for child in editor.members:
-                if isinstance(child, OptionalSection):
-                    visit(child, widget, LABELS.get(child.key, child.key.capitalize()))
-                elif isinstance(child, EntryRow) and child.editor is not None and child.kind not in SCALARS:
-                    key = child.key_field.query_one(Input).value if child.is_map else f"Item {child.key}"
-                    visit(child.editor, widget, f"{key or '(empty key)'} · {child.kind}")
-        for field in self.fields:
-            if isinstance(field, OptionalSection):
-                visit(field, None, LABELS.get(field.key, field.key.capitalize()))
-        return items
-
-    def refresh_navigation(self):
-        if not self.query("#sender_request_tree"):
-            return  # The timer can fire once more while the editor is closing.
-        if getattr(self, "_changing_draft", False) or any(getattr(w, "_changing_draft", False) for w in self.query()):
-            return
-        items = self.navigation_items()
-        signature = tuple((id(w), id(p), label, getattr(w, "editor", w) is None) for w, p, label in items)
-        if signature == self._navigation_signature:
-            return
-        self._navigation_signature = signature
-        tree = self.query_one("#sender_request_tree", Tree)
-        tree.clear()
-        nodes = {None: tree.root}
-        for widget, parent, label in items:
-            has_children = any(p is widget for _, p, _ in items)
-            unset = isinstance(widget, OptionalSection) and widget.editor is None
-            caption = Text("+ " + label, style="dim") if unset else Text(label)
-            nodes[widget] = nodes[parent].add(caption, data=widget, expand=True, allow_expand=has_children)
-        tree.root.expand()
-        self._navigation_nodes = nodes
-        if self._object_target not in nodes:
-            self._object_target = None
-        tree.move_cursor(nodes[self._object_target])
-        self.focus_request_object(self._object_target, scroll=False)
-
-    def on_tree_node_selected(self, event):
-        if event.control.id == "sender_request_tree":
-            event.stop()
-            self.focus_request_object(event.node.data)
-            self.remove_class("browse_request")
-
-    def focus_request_object(self, target, *, scroll=True):
-        with self.app.batch_update():  # One repaint: no half-updated form in between.
-            self._show_request_object(target, scroll)
-
-    def _show_request_object(self, target, scroll):
-        self._object_target = target
-        node = getattr(self, "_navigation_nodes", {}).get(target)
-        if node is not None:
-            self.query_one("#sender_request_tree", Tree).move_cursor(node)
-        # Everything stays mounted so the draft survives navigation. Only the
-        # chain from the fields down to the target is shown, without the
-        # headings and buttons that belong to the levels above it.
-        # Classes change without a per-widget restyle; one pass follows.
-        fields = self.query_one("#sender_fields")
-        for name in ("off_path", "navigation_path", "navigation_target"):
-            for widget in fields.query("." + name):
-                widget.remove_class(name, update=False)
-        if target is not None:
-            target.add_class("navigation_target", update=False)
-            current = target
-            while current is not fields:
-                parent = current.parent
-                for sibling in parent.children:
-                    own_null = sibling.has_class("set_null") and getattr(parent.parent, "editor", None) is target
-                    if sibling is not current and not own_null:
-                        sibling.add_class("off_path", update=False)
-                if parent is not fields:
-                    parent.add_class("navigation_path", update=False)
-                if isinstance(parent, Collapsible):
-                    parent.collapsed = False
-                current = parent
-        self.app.update_styles(fields)
-        self.query_one("#sender_request_identity").display = target is None
-        labels = {w: (p, label) for w, p, label in self.navigation_items()}
-        path = []
-        current = target
-        while current in labels:
-            current, label = labels[current]
-            path.append(label)
-        title = "Request" if not path else " / ".join(reversed(path))
-        # The title shares a row with the object's own Add / Remove buttons when it has them.
-        previous = getattr(self, "_title_slot", None)
-        if previous is not None and previous[0].is_attached:
-            previous[0].update(previous[1])
-        slot = None
-        if isinstance(target, OptionalSection):
-            slot = target.query_one(".section_header > Label", Label)
-            self._title_slot = (slot, LABELS.get(target.key, target.key.capitalize()))
-        elif isinstance(target, ValueEditor) and target.query(".add_row > .add_title"):
-            slot = target.query_one(".add_row > .add_title", Label)
-            self._title_slot = (slot, "")
-        else:
-            self._title_slot = None
-        heading = self.query_one("#sender_object_title", Label)
-        heading.display = slot is None
-        (slot or heading).update(Text(title))
-        if scroll:
-            self.query_one("#sender_request_body", VerticalScroll).scroll_home(animate=False)
-
-    def collect_request(self):
-        check_draft_ready(self)
-        request = {"operation": self.operation}
-        if self.operation in INTENT_OPERATIONS:
-            request["intent"] = {}
-        for field in self.fields:
-            value = field.collect()
-            if value is not MISSING:
-                destination = request["intent"] if self.operation in INTENT_OPERATIONS and field.key != "receiverPermission" else request
-                destination[field.key] = value
-        return request
-
-    async def on_select_changed(self, event):
-        if event.select.id != "sender_operation":
-            return
+    def on_input_submitted(self, event):
         event.stop()
-        if is_select_empty(event.value) or self.operation == event.value:
-            return
-        try:
-            self.drafts[self.operation] = self.collect_request()
-        except ValueError as error:
-            with event.select.prevent(Select.Changed):
-                event.select.value = self.operation
-            self.notify(str(error), severity="error")
-            return
-        # One repaint for the whole swap: no empty form, no unplaced sections.
-        with self.app.batch_update():
-            with changing_draft(self):
-                self.operation = event.value
-                container = self.query_one("#sender_fields", Vertical)
-                await container.remove_children()
-                await container.mount(*self.build_fields())
-            self.refresh_navigation()
-
-    def on_button_pressed(self, event):
-        event.stop()
-        if event.button.id == "sender_request_browse":
-            self.toggle_class("browse_request")
-        elif event.button.id == "sender_request_cancel":
-            self.dismiss(None)
-        elif event.button.id == "sender_request_save":
-            try:
-                saved = self.service.save_request(
-                    self.query_one("#sender_request_name", Input).value, self.collect_request(),
-                    self.saved["id"] if self.saved else None, self.saved["revision"] if self.saved else 0)
-            except (ValueError, OSError, sqlite3.Error) as error:
-                self.notify(str(error), severity="error")
-                return
-            self.dismiss(saved)
+        self.dismiss(event.value)
 
 
 class SenderTabMenu(ModalScreen):
@@ -287,7 +58,7 @@ class SenderTabMenu(ModalScreen):
     SenderTabMenu OptionList { width: auto; height: auto; border: round $foreground-muted; background: $surface; }
     """
 
-    def __init__(self, x, y, options=(("Edit", "edit"), ("Duplicate", "duplicate"), ("Remove", "remove"))):
+    def __init__(self, x, y, options=(("Rename", "rename"), ("Duplicate", "duplicate"), ("Remove", "remove"))):
         super().__init__()
         self.position, self.options = (x, y), options
 
@@ -385,7 +156,6 @@ class SenderPane(Vertical):
                 with Horizontal(classes="side_header"):
                     yield ModalButton("Send", id="sender_send")
                     yield ModalButton("Cancel", id="sender_cancel_run", tooltip="Ask a running query or file read to stop")
-                    yield ModalButton("Edit", id="sender_edit")
                     yield ModalButton("Save", id="sender_save")
                     yield ModalButton("Revert", id="sender_revert")
                 yield JsonRequestEditor(id="sender_request_detail")
@@ -489,8 +259,7 @@ class SenderPane(Vertical):
             key = (row["id"], row["revision"])
             same_request = self._editor_key is not None and self._editor_key[0] == row["id"]
             if key != self._editor_key and same_request and self.editor_dirty():
-                self.editor.say(f"Changed elsewhere (revision {row['revision']}): Revert to load it, "
-                                "or copy your text first", error=True)
+                self.editor.say(f"Changed elsewhere: Revert loads revision {row['revision']}", error=True)
                 return
             if key != self._editor_key:
                 self.stash_draft()
@@ -539,7 +308,6 @@ class SenderPane(Vertical):
             self._checking_activity_send or status["state"] != "ready" or status["active_run"] is not None
             or row is None
         )
-        self.query_one("#sender_edit", Button).disabled = row is None
         self.query_one("#sender_cancel_run", Button).disabled = not (
             row is not None and status["active_run"] is not None and status["active_run"] in self._run_ids[:1]
             and row["request"]["operation"] in ("query", "openFileDescriptor"))
@@ -563,8 +331,8 @@ class SenderPane(Vertical):
             if self.is_mounted:
                 self.notify(f"Could not read Sender records: {error}", severity="error")
             return
-        if self._signature != signature:
-            return
+        if self._signature != signature or not self.query("#sender_run_older"):
+            return  # Superseded, or the pane was closed while the records were read.
         self._requests, self._run_ids = requests, run_ids
         if self._run_id not in run_ids:
             self._run_id = None
@@ -655,17 +423,23 @@ class SenderPane(Vertical):
         names = [row["name"] for row in self.service.db.sender_requests()]  # Not the last refresh: it may be stale.
         return str(max([int(name) for name in names if name.isdecimal() and len(name) <= 9], default=0) + 1)
 
-    def receive_request(self, request):
-        """Add a request prepared in another tab. One that fails validation opens in the editor instead."""
-        name = self.next_name()
+    def receive_request(self, request, name=None):
+        """Add a request prepared in another tab and select it.
+
+        One that is not valid as captured is still shown, as unsaved text over
+        an empty request, so it can be repaired here instead of being altered.
+        """
+        name = name or self.next_name()
         try:
             saved = self.service.save_request(name, request)
         except SenderError as error:
-            self.notify(f"{error}. Review the request before saving it.", severity="warning")
-            self.edit_request({"id": None, "revision": 0, "name": name, "request": request})
-            return
+            saved = self.service.save_request(name, {"operation": "sendBroadcast", "intent": {}})
+            self._drafts[saved["id"]] = (sender_json.format_request(request), {}, saved["revision"],
+                                         sender_json.format_request(saved["request"]))
+            self.notify(f"{error}. It is in Sender as request {name}, unsaved: fix it there.", severity="warning")
+        else:
+            self.notify(f"Sent to Sender as request {name}")
         self.select_request(saved["id"])
-        self.notify(f"Sent to Sender as request {name}")
 
     def browse_runs(self, step):
         if self._run_ids:
@@ -699,13 +473,6 @@ class SenderPane(Vertical):
             if self.is_mounted:
                 self.refresh_sender()
 
-    def edit_request(self, draft):
-        def saved(result):
-            if result:
-                self.select_request(result["id"])
-            self.refresh_sender()
-        self.app.push_screen(SenderRequestModal(self.service, draft), saved)
-
     def open_tab_menu(self, request_id, x, y):
         self.select_request(request_id)
         def chosen(action):
@@ -713,13 +480,23 @@ class SenderPane(Vertical):
             if row is None:
                 return
             try:
-                unsaved = request_id in self._drafts or (
-                    self._editor_key is not None and self._editor_key[0] == request_id and self.editor_dirty())
-                if action == "edit":
-                    if unsaved:  # The form edits the saved request; it must not fork from the text on screen.
-                        self.notify("Save or revert the JSON changes to this request first", severity="warning")
-                        return
-                    self.edit_request(row)
+                if action == "rename":
+                    def renamed(name):
+                        if name is None or name == row["name"]:
+                            return
+                        try:
+                            current = self.service.db.sender_request(request_id)
+                            saved = self.service.save_request(name, current["request"], request_id, current["revision"])
+                            # Only the name changed: text being typed is still based on the same request.
+                            if self._editor_key == (request_id, current["revision"]):
+                                self._editor_key = (request_id, saved["revision"])
+                            draft = self._drafts.get(request_id)
+                            if draft is not None and draft[2] == current["revision"]:
+                                self._drafts[request_id] = (draft[0], draft[1], saved["revision"], draft[3])
+                            self.refresh_sender()
+                        except Exception as error:
+                            self.notify(str(error), severity="error")
+                    self.app.push_screen(SenderRenameModal(row["name"]), renamed)
                 elif action == "duplicate":
                     name = self.next_name() if row["name"].isdecimal() else (row["name"] + " copy")[:200]
                     self.select_request(self.service.save_request(name, row["request"])["id"])
@@ -755,16 +532,12 @@ class SenderPane(Vertical):
             elif button == "sender_disconnect":
                 await self.service.disconnect(self.service.token)
             elif button == "sender_new":
-                self.edit_request({"id": None, "revision": 0, "name": self.next_name(), "request": empty_request()})
+                self.select_request(self.service.save_request(self.next_name(), empty_request())["id"])
+                self.editor.area.focus()
             elif button == "sender_save":
                 self.save_editor()
             elif button == "sender_revert":
                 self.revert_editor()
-            elif button == "sender_edit":
-                # The form edits the saved request, so what is typed here is saved first.
-                row = self.save_editor()
-                if row is not None:
-                    self.edit_request(row)
             elif button == "sender_cancel_run":
                 status = self.service.status()
                 if status["active_run"] is not None:

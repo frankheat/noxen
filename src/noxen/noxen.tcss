@@ -335,7 +335,6 @@ Input:light > .input--suggestion {
     color: $foreground-muted;
 }
 #monitor_search,
-SenderRequestModal #sender_request_name,
 #mcp_port,
 #monitor_dialog Input {
     height: 3;
@@ -344,13 +343,10 @@ SenderRequestModal #sender_request_name,
 }
 #monitor_search { background: transparent; }
 #monitor_search:focus,
-SenderRequestModal #sender_request_name:focus,
 #mcp_port:focus,
 #monitor_dialog Input:focus { border: round $accent; }
 MCPPane Button,
 SenderPane Button,
-SenderRequestModal Button,
-SenderTextModal Button,
 #log_crashes,
 #info_prepare_sender,
 #crash_actions Button,
@@ -370,12 +366,6 @@ MCPPane Button:hover,
 SenderPane Button:hover,
 SenderPane Button:focus,
 SenderPane Button.-active,
-SenderRequestModal Button:hover,
-SenderRequestModal Button:focus,
-SenderRequestModal Button.-active,
-SenderTextModal Button:hover,
-SenderTextModal Button:focus,
-SenderTextModal Button.-active,
 MCPPane Button:focus,
 MCPPane Button.-active,
 #log_crashes:hover,
@@ -404,7 +394,6 @@ MCPPane Button.-active,
 }
 MCPPane Button:disabled,
 SenderPane Button:disabled,
-SenderRequestModal Button:disabled,
 #monitor_pane .monitor_controls Button:disabled,
 #monitor_dialog Button:disabled {
     border: round $foreground-muted;
@@ -697,17 +686,11 @@ Switch.-on > .switch--slider {
 #home_form Select:focus > SelectCurrent {
     border: tall $foreground-muted;
 }
-SenderPane Select > SelectCurrent,
-SenderRequestModal Select > SelectCurrent,
-SenderTextModal Select > SelectCurrent {
+SenderPane Select > SelectCurrent {
     border: round $foreground-muted;
     background: $background;
 }
-SenderRequestModal TextArea,
-SenderTextModal TextArea {
-    border: round $foreground-muted;
-    background: $background;
-}
+
 #info_prepare_sender {
     width: auto;
     min-width: 9;
@@ -956,91 +939,6 @@ Footer {
 #info_perm_table, #info_comp_table { height: 1fr; margin: 1 1; }
 #info_comp_detail { height: 12; margin: 1 1; background: $surface; }
 #info_overview_log { height: 1fr; padding: 1 2; }
-
-/* Sender values use the same compact rows as the interception editor. */
-SenderRequestModal ScalarField { height: 1; margin-bottom: 1; }
-SenderRequestModal ScalarField > Label { height: 1; content-align: left middle; }
-SenderRequestModal ScalarField Input { height: 1; padding: 0; border: none; }
-SenderRequestModal ScalarField > Button {
-    width: 3; min-width: 3; height: 1; margin-left: 1; padding: 0;
-    border: none; color: $foreground-muted;
-}
-SenderRequestModal ValueEditor .entry_header { height: 1; }
-SenderRequestModal ValueEditor .entry_header > Label { height: 1; }
-SenderRequestModal ValueEditor .entry_header > Button {
-    width: 5; min-width: 5; height: 1; padding: 0; border: none;
-}
-SenderRequestModal ValueEditor .entry_header > Select,
-SenderRequestModal ScalarField Select { height: 1; }
-SenderRequestModal ValueEditor Select > SelectCurrent {
-    border: none; height: 1; padding: 0;
-}
-SenderRequestModal ValueEditor Select > SelectOverlay { width: 22; }
-SenderRequestModal ValueEditor .column_headings > .remove_heading { width: 5; }
-SenderRequestModal ValueEditor .entry_body { padding-left: 1; }
-SenderRequestModal Collapsible { border: none; padding: 0; background-tint: transparent; }
-SenderRequestModal Collapsible > Contents { padding: 1 0 0 2; }
-SenderRequestModal ValueEditor.narrow > .column_headings { display: none; }
-/* Narrow keyed rows: key and type on one line, value and remove on the next. */
-SenderRequestModal EntryRow.map_entry.narrow > .entry_header {
-    layout: grid; grid-size: 2; grid-columns: 1fr 16; grid-rows: 1; grid-gutter: 0 1; height: 2;
-}
-SenderRequestModal EntryRow.map_entry.narrow > .entry_header > ScalarField { width: 100%; margin: 0; }
-SenderRequestModal EntryRow.map_entry.narrow > .entry_header > Button { margin-left: 11; }
-SenderRequestModal EntryRow.map_entry.narrow > .entry_header > ScalarField > Label { display: block; width: 7; }
-SenderRequestModal EntryRow.map_entry.narrow > .entry_header > Select { width: 100%; margin: 0; }
-SenderRequestModal EntryRow.map_entry.narrow > .entry_header > .entry_preview { width: 100%; }
-SenderRequestModal EntryRow.map_entry.narrow > .entry_header > .entry_preview ScalarField > Label { display: block; width: 7; }
-SenderRequestModal EntryRow.map_entry.narrow > .entry_header > .entry_preview > Button { margin-left: 6; }
-
-SenderRequestModal #sender_workspace { height: 1fr; }
-SenderRequestModal #sender_request_tree {
-    width: 36; margin-right: 2; background: $background;
-    scrollbar-size: 1 1;
-}
-/* Guides keep one colour: focusing the explorer must not light up the selected subtree. */
-SenderRequestModal #sender_request_tree > .tree--guides,
-SenderRequestModal #sender_request_tree > .tree--guides-hover,
-SenderRequestModal #sender_request_tree > .tree--guides-selected,
-SenderRequestModal #sender_request_tree:focus > .tree--guides,
-SenderRequestModal #sender_request_tree:focus > .tree--guides-hover,
-SenderRequestModal #sender_request_tree:focus > .tree--guides-selected { color: $foreground-muted 60%; text-style: none; }
-SenderRequestModal #sender_request_identity { height: auto; }
-SenderRequestModal #sender_request_body { width: 1fr; }
-SenderRequestModal #sender_request_browse { display: none; }
-SenderRequestModal.narrow_request #sender_request_tree { display: none; }
-SenderRequestModal.narrow_request #sender_request_browse { display: block; }
-SenderRequestModal.narrow_request.browse_request #sender_request_tree { display: block; width: 1fr; margin-right: 0; }
-SenderRequestModal.narrow_request.browse_request #sender_request_body { display: none; }
-/* Object navigation: levels above the open object keep no chrome of their own. */
-SenderRequestModal .navigation_path { padding: 0; margin: 0; border: none; }
-SenderRequestModal Collapsible.navigation_path > Contents { padding: 0; }
-SenderRequestModal ValueEditor .entry_body.navigation_path { padding: 0; }
-SenderRequestModal OptionalSection.navigation_target { border: none; margin: 0; }
-SenderRequestModal .entry_preview > .open_value,
-SenderRequestModal .entry_preview > .set_value,
-SenderRequestModal .entry_body > .set_null {
-    width: auto; min-width: 0; height: 1; border: none; padding: 0;
-}
-SenderRequestModal .entry_body > .set_null { margin-top: 1; color: $foreground-muted; }
-/* One-line buttons keep their height in every state, including while pressed. */
-SenderRequestModal ScalarField > Button:hover,
-SenderRequestModal ScalarField > Button:focus,
-SenderRequestModal ScalarField > Button.-active,
-SenderRequestModal ValueEditor .entry_header > Button:hover,
-SenderRequestModal ValueEditor .entry_header > Button:focus,
-SenderRequestModal ValueEditor .entry_header > Button.-active,
-SenderRequestModal .entry_preview > .open_value:hover,
-SenderRequestModal .entry_preview > .open_value:focus,
-SenderRequestModal .entry_preview > .open_value.-active,
-SenderRequestModal .entry_preview > .set_value:hover,
-SenderRequestModal .entry_preview > .set_value:focus,
-SenderRequestModal .entry_preview > .set_value.-active,
-SenderRequestModal .entry_body > .set_null:hover,
-SenderRequestModal .entry_body > .set_null:focus,
-SenderRequestModal .entry_body > .set_null.-active {
-    height: 1; border: none; padding: 0; color: $accent; background: transparent; tint: transparent;
-}
 
 /* Sender request tabs and panes. */
 SenderPane Button:disabled { width: auto; }

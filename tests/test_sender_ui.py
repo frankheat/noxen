@@ -1,13 +1,12 @@
-import json
 import sqlite3
 import tempfile
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from textual.widgets import TabbedContent, Input, Select, TextArea, DataTable, Label
+from textual.widgets import TabbedContent, Input, Label
 
 from noxen.app import NoxenApp
-from noxen.sender_ui import RequestTab, SenderPane, SenderRequestModal, SenderTabMenu
+from noxen.sender_ui import RequestTab, SenderPane, SenderRenameModal, SenderTabMenu
 from noxen.mcp_service import OperationError
 from noxen.monitor_ui import RecordingDialog
 from tests.ui_test_case import IsolatedAppTestCase
@@ -56,37 +55,33 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual(result["result"]["activityLaunch"], "unverified")
                 self.assertEqual(result["activityContext"]["state"], "background")
 
-    async def test_captured_control_text_roundtrips_and_save_failure_keeps_editor(self):
+    async def test_control_text_null_and_empty_roundtrip_and_a_failed_save_keeps_the_text(self):
         with tempfile.TemporaryDirectory() as directory:
             app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
             async with app.run_test(size=(120, 45)) as pilot:
                 saved = app.sender_service.save_request("Control characters", {
-                    "operation": "sendBroadcast", "intent": {"action": "one\ntwo\u0000three"}})
-                app.push_screen(SenderRequestModal(app.sender_service, saved))
+                    "operation": "sendBroadcast",
+                    "intent": {"action": "one\ntwo\u0000three", "data": None, "mimeType": ""}})
+                app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
+                await pilot.pause(0.6)
+                pane = app.query_one(SenderPane)
+                area = pane.editor.area
+                # Control characters are written as escapes; null and "" stay distinct from a missing field.
+                self.assertIn('"action": "one\\ntwo\\u0000three"', area.text)
+                self.assertIn('"data": null', area.text)
+                self.assertIn('"mimeType": ""', area.text)
+                self.assertNotIn("package", area.text)
+                area.load(area.text.replace('"mimeType": ""', '"mimeType": "", "package": null'))
                 await pilot.pause()
-                modal = app.screen
-                field = modal.query_one("#sender_value_action", Input)
-                self.assertTrue(field.disabled)
-                self.assertNotIn("\n", field.value)
-                self.assertEqual(json.loads(field.value), "one\ntwo\u0000three")
-                await pilot.hover("#sender_field_action")
-                await pilot.click("#sender_field_action .scalar_edit")
-                await pilot.pause()
-                exact = app.screen
-                exact.query_one("#sender_text_value", TextArea).load_text("bad\\escape")
-                await pilot.click("#sender_text_apply")
-                await pilot.pause()
-                self.assertIs(app.screen, exact)
-                await pilot.click("#sender_text_cancel")
-                await pilot.pause()
-                self.assertIs(app.screen, modal)
                 with patch.object(app.db, "save_sender_request", side_effect=sqlite3.OperationalError("disk full")):
-                    await pilot.click("#sender_request_save")
+                    await pilot.click("#sender_save")
                     await pilot.pause()
-                    self.assertIs(app.screen, modal)
-                await pilot.click("#sender_request_save")
+                    self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
+                    self.assertTrue(pane.editor_dirty())
+                await pilot.click("#sender_save")
                 await pilot.pause()
-                self.assertEqual(app.db.sender_request(saved["id"])["request"]["intent"]["action"], "one\ntwo\u0000three")
+                self.assertEqual(app.db.sender_request(saved["id"])["request"]["intent"], {
+                    "action": "one\ntwo\u0000three", "data": None, "mimeType": "", "package": None})
 
     async def test_mcp_sender_control_results_and_large_run_sections(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -121,62 +116,6 @@ class SenderUITests(IsolatedAppTestCase):
                     part = await service.invoke("get_sender_run", run_id=run["id"], section=section)
                     self.assertEqual(part[section], result[section])
 
-    async def test_request_editor_saves_null_and_empty_distinctly_and_mcp_conflicts(self):
-        with tempfile.TemporaryDirectory() as directory:
-            app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
-            async with app.run_test(size=(130, 50)) as pilot:
-                app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
-                await pilot.pause()
-                await pilot.click("#sender_new")
-                await pilot.pause()
-                modal = app.screen
-                self.assertIsInstance(modal, SenderRequestModal)
-                modal.query_one("#sender_request_name", Input).value = "An empty action"
-                modal.query_one("#sender_value_package", Input).value = r"sample\npackage"
-                await pilot.hover("#sender_field_action")
-                await pilot.click("#sender_field_action .scalar_edit")
-                await pilot.pause()
-                app.screen.query_one("#sender_text_state", Select).value = "text"
-                app.screen.query_one("#sender_text_value", TextArea).load_text("")
-                await pilot.click("#sender_text_apply")
-                await pilot.pause()
-                await pilot.hover("#sender_field_data")
-                await pilot.click("#sender_field_data .scalar_edit")
-                await pilot.pause()
-                app.screen.query_one("#sender_text_state", Select).value = "text"
-                app.screen.query_one("#sender_text_value", TextArea).load_text(r"one\ntwo\u0000")
-                await pilot.resize_terminal(60, 24)
-                await pilot.pause()
-                await pilot.click("#sender_text_apply")
-                await pilot.resize_terminal(130, 50)
-                await pilot.pause()
-                self.assertIs(app.screen, modal)
-                self.assertEqual(modal.query_one("#sender_value_action", Input).placeholder, "Empty string")
-                await pilot.click("#sender_request_save")
-                await pilot.pause()
-                rows = app.db.sender_requests()
-                self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0]["request"]["intent"]["action"], "")
-                self.assertEqual(rows[0]["request"]["intent"]["data"], "one\ntwo\x00")
-                self.assertEqual(rows[0]["request"]["intent"]["package"], r"sample\npackage")
-                self.assertNotIn("component", rows[0]["request"]["intent"])
-                app.mcp_service.enabled = True
-                app.mcp_service.allow_control = True
-                await pilot.pause(0.5)
-                await pilot.click(app.query_one(RequestTab), button=3)
-                await pilot.pause()
-                self.assertIsInstance(app.screen, SenderTabMenu)
-                await pilot.press("enter")  # Edit is the first entry of the tab menu.
-                await pilot.pause()
-                await app.mcp_service.invoke("save_sender_request", name="MCP change", request=rows[0]["request"],
-                    request_id=rows[0]["id"], revision=1, expected_connection=app.mcp_service.connection_token())
-                await pilot.click("#sender_request_save")
-                await pilot.pause()
-                self.assertIsInstance(app.screen, SenderRequestModal)
-                self.assertEqual(app.db.sender_requests()[0]["name"], "MCP change")
-                await pilot.click("#sender_request_cancel")
-                self.assertEqual(app.query_one("#main_tabs", TabbedContent).active, "tab_sender")
-
     async def test_new_requests_are_numbered_and_their_runs_can_be_browsed(self):
         with tempfile.TemporaryDirectory() as directory:
             app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
@@ -197,21 +136,30 @@ class SenderUITests(IsolatedAppTestCase):
                 pane.refresh_sender()
                 self.assertFalse(pane.query_one("#sender_disconnect").disabled)
                 for expected in ("1", "2"):
-                    await pilot.click("#sender_new")
-                    await pilot.pause()
-                    self.assertEqual(app.screen.query_one("#sender_request_name", Input).value, expected)
-                    await pilot.click("#sender_request_save")
+                    await pilot.click("#sender_new")  # Created at once, ready to edit as JSON.
                     await pilot.pause(0.5)
+                    self.assertEqual(pane.selected()["name"], expected)
                 self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "2"])
-                self.assertEqual(pane.selected()["name"], "2")
-                # The name is the tab label: renaming the request renames its tab.
-                await pilot.click("#sender_edit")
+                self.assertIs(app.focused, pane.editor.area)
+                # The name is the tab label: renaming the request renames its tab, and keeps text being typed.
+                area = pane.editor.area
+                area.load(area.text.replace('"flags": 0', '"flags": 16'))
                 await pilot.pause()
-                app.screen.query_one("#sender_request_name", Input).value = "login"
-                await pilot.click("#sender_request_save")
+                await pilot.click(list(pane.query(RequestTab))[1], button=3)
+                await pilot.pause()
+                await pilot.press("enter")  # Rename is the first entry of the tab menu.
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SenderRenameModal)
+                app.screen.query_one("#sender_rename", Input).value = "login"
+                await pilot.press("enter")
                 await pilot.pause(0.5)
                 self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "login"])
                 self.assertEqual(pane.next_name(), "2")
+                self.assertFalse(pane.editor.query_one(".json_status").has_class("error"))
+                await pilot.click("#sender_save")
+                await pilot.pause(0.5)
+                self.assertEqual(pane.selected()["request"]["intent"]["flags"], 16)
+                self.assertEqual(pane.selected()["name"], "login")
 
                 title = pane.query_one("#sender_result_title", Label)
                 self.assertTrue(pane.query_one("#sender_cancel_run").disabled)
@@ -227,7 +175,7 @@ class SenderUITests(IsolatedAppTestCase):
                 # The request follows the run on screen, read only.
                 self.assertEqual(pane._editor_key, ("run", min(runs)))
                 self.assertTrue(pane.editor.area.read_only)
-                for button in ("#sender_send", "#sender_edit", "#sender_cancel_run"):
+                for button in ("#sender_send", "#sender_save", "#sender_cancel_run"):
                     widget = pane.query_one(button)  # Border and one space each side: no lopsided padding.
                     self.assertEqual(widget.region.width, len(str(widget.label)) + 4)
                 self.assertTrue(pane.query_one("#sender_run_older").disabled)
@@ -325,18 +273,13 @@ class SenderUITests(IsolatedAppTestCase):
                 pane.select_request(first["id"])
                 await pilot.pause(0.6)
 
-                # Invalid text is not saved; the form editor still opens the saved request.
+                # Invalid text is not saved.
                 area.focus()
                 area.move_cursor(area.document.end)
                 await pilot.press("x", "ctrl+s")
                 await pilot.pause(0.2)
                 self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
                 self.assertEqual(service.db.sender_request(first["id"])["revision"], 3)
-                await pilot.click("#sender_revert")  # The cursor moved to the error, so undo by reverting.
-                await pilot.pause(0.6)
-                await pilot.click("#sender_edit")
-                await pilot.pause(0.6)
-                self.assertIsInstance(app.screen, SenderRequestModal)
 
     async def test_history_and_monitor_selections_are_sent_to_sender(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -372,16 +315,16 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.pause()
                 self.assertEqual(app.db.sender_request(pane._selected_id)["request"]["operation"], "sendBroadcast")
 
-                # startActivity without NEW_TASK cannot be saved as captured: it opens for review instead.
+                # startActivity without NEW_TASK cannot be saved as captured: it arrives as unsaved text to repair.
                 app._history_selected_entry = {"id": 9, "method": "startActivity", "intent": intent}
                 await pilot.press("ctrl+r")
-                await pilot.pause()
-                self.assertIsInstance(app.screen, SenderRequestModal)
-                self.assertEqual(len(app.db.sender_requests()), 2)
-                await pilot.pause(0.5)  # Let the editor finish mounting before closing it.
-                await pilot.press("escape")
-                await pilot.pause(0.3)
-                self.assertNotIsInstance(app.screen, SenderRequestModal)
+                await pilot.pause(0.6)
+                self.assertEqual(len(app.db.sender_requests()), 3)
+                self.assertEqual(app.db.sender_request(pane._selected_id)["request"],
+                                 {"operation": "sendBroadcast", "intent": {}})
+                self.assertIn('"operation": "startActivity"', pane.editor.area.text)
+                self.assertIn('"action": "test.PING"', pane.editor.area.text)
+                self.assertTrue(pane.editor_dirty())
 
                 await pilot.click("#--content-tab-tab_monitor")
                 await pilot.pause(0.3)
@@ -389,7 +332,7 @@ class SenderUITests(IsolatedAppTestCase):
                 monitor = app.query_one("#monitor_pane")
                 await pilot.click("#monitor_to_sender")  # No event selected: nothing is created.
                 await pilot.pause()
-                self.assertEqual(len(app.db.sender_requests()), 2)
+                self.assertEqual(len(app.db.sender_requests()), 3)
                 events = {"k": {"class": "android.content.ContentResolver", "method": "openInputStream",
                                 "types": ["android.net.Uri"],
                                 "arguments": [{"type": "android.net.Uri", "value": "content://test/file"}]},
@@ -397,30 +340,12 @@ class SenderUITests(IsolatedAppTestCase):
                 # Monitor reloads its events on a timer, so each selection is acted on at once.
                 monitor.display_events, monitor.selected = events, "log"
                 app.action_send_to_sender()
-                self.assertEqual(len(app.db.sender_requests()), 2)  # Not a provider call.
+                self.assertEqual(len(app.db.sender_requests()), 3)  # Not a provider call.
                 monitor.display_events, monitor.selected = events, "k"
                 app.action_send_to_sender()
                 newest = app.db.sender_request(pane._selected_id)
                 self.assertEqual((newest["name"], newest["request"]["operation"], newest["request"]["uri"]),
-                                 ("3", "openFileDescriptor", "content://test/file"))
-
-    async def test_provider_editor_switches_arguments_and_keeps_operation_fields_separate(self):
-        with tempfile.TemporaryDirectory() as directory:
-            app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
-            async with app.run_test(size=(120, 45)) as pilot:
-                app.push_screen(SenderRequestModal(app.sender_service))
-                await pilot.pause()
-                modal = app.screen
-                modal.query_one("#sender_request_name", Input).value = "Query notes"
-                modal.query_one("#sender_operation", Select).value = "query"
-                await pilot.pause()
-                modal.query_one("#sender_value_uri", Input).value = "content://test/notes"
-                self.assertFalse(modal.query("#sender_field_component"))
-                self.assertTrue(modal.query_one("#sender_field_uri").display)
-                self.assertNotIn("intent", modal.collect_request())
-                await pilot.click("#sender_request_save")
-                await pilot.pause()
-                self.assertEqual(app.db.sender_requests()[0]["request"]["operation"], "query")
+                                 ("4", "openFileDescriptor", "content://test/file"))
 
     async def test_sender_tabs_and_controls_fit_and_do_not_change_other_tabs(self):
         for theme in ("noxen-dark", "noxen-light"):
