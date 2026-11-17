@@ -38,8 +38,8 @@ class JsonArea(TextArea):
     BINDINGS = [
         Binding("ctrl+@", "suggest", "Suggest", show=False, priority=True),
         Binding("ctrl+space", "suggest", "Suggest", priority=True),
-        Binding("f2", "fold", "Fold", priority=True),
-        Binding("f3", "unfold_all", "Unfold all", priority=True),
+        Binding("ctrl+o", "fold", "Fold", priority=True),
+        Binding("ctrl+n", "unfold_all", "Unfold all", priority=True),
     ]
 
     def __init__(self, **kwargs):

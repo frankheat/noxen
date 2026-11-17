@@ -354,7 +354,7 @@ Input:light > .input--suggestion {
 MCPPane Button,
 SenderPane Button,
 #log_crashes,
-#info_prepare_sender,
+#info_to_sender,
 #crash_actions Button,
 #monitor_pane .monitor_controls Button,
 #monitor_dialog Button,
@@ -375,9 +375,9 @@ SenderPane Button.-active,
 MCPPane Button:focus,
 MCPPane Button.-active,
 #log_crashes:hover,
-#info_prepare_sender:hover,
-#info_prepare_sender:focus,
-#info_prepare_sender.-active,
+#info_to_sender:hover,
+#info_to_sender:focus,
+#info_to_sender.-active,
 #log_crashes:focus,
 #log_crashes.-active,
 #crash_actions Button:hover,
@@ -697,9 +697,9 @@ SenderPane Select > SelectCurrent {
     background: $background;
 }
 
-#info_prepare_sender {
+#info_to_sender {
     width: auto;
-    min-width: 9;
+    margin-left: 1;
 }
 #home_btn {
     width: 17;  /* "Connect" and "Connecting…" both centre evenly. */

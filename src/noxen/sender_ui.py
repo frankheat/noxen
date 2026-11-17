@@ -456,13 +456,13 @@ class SenderPane(Vertical):
         names = [row["name"] for row in self.service.db.sender_requests()]  # Not the last refresh: it may be stale.
         return str(max([int(name) for name in names if name.isdecimal() and len(name) <= 9], default=0) + 1)
 
-    def receive_request(self, request, name=None):
-        """Add a request prepared in another tab and select it.
+    def receive_request(self, request):
+        """Add a request prepared in another tab and select it, named with the next number like +.
 
         One that is not valid as captured is still shown, as unsaved text over
         an empty request, so it can be repaired here instead of being altered.
         """
-        name = name or self.next_name()
+        name = self.next_name()
         try:
             saved = self.service.save_request(name, request)
         except SenderError as error:

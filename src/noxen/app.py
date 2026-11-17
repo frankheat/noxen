@@ -331,9 +331,9 @@ class NoxenApp(App):
         Binding("alt+left", "sender_divider(-1)", "◀", show=True),
         Binding("alt+right", "sender_divider(1)", "▶", show=True),
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
-        Binding("ctrl+r", "info_refresh", "Refresh", show=True, priority=True),
+        Binding("ctrl+g", "info_refresh", "Refresh", show=True, priority=True),
         Binding("ctrl+r", "send_to_sender", "To Sender", show=True, priority=True),
-        Binding("f4", "toggle_detail_view", "JSON / Details", show=True, priority=True),
+        Binding("ctrl+t", "toggle_detail_view", "JSON / Details", show=True, priority=True),
         Binding("ctrl+f", "forward_current", "Forward", show=True, priority=True),
         Binding("ctrl+f", "apply_edit", "Apply & Forward", show=True, priority=True),
         Binding("ctrl+d", "drop_current", "Drop", show=True, priority=True),
@@ -1173,16 +1173,8 @@ class NoxenApp(App):
         return True
 
     def on_button_pressed(self, event: Button.Pressed):
-        if event.button.id == "info_prepare_sender":
-            try:
-                info = self._app_info or {}
-                component = next((c for c in info.get("components", []) if c.get("name") == self._info_selected_component), None)
-                if component is None:
-                    raise ValueError("Select a component first")
-                request = prepare_component_request(info.get("identity", {}).get("package"), component)
-                self.query_one(SenderPane).receive_request(request, name=component["name"][:200])
-            except ValueError as error:
-                self.notify(str(error), severity="error")
+        if event.button.id == "info_to_sender":
+            self.action_send_to_sender()
             return
         if event.button.id == "log_crashes":
             self.push_screen(CrashesModal(self.db))
@@ -1633,7 +1625,7 @@ class NoxenApp(App):
                             with Horizontal(id="info_exposed_group", classes="switch-control"):
                                 yield Switch(value=False, id="info_comp_exposed")
                                 yield Label("Exposed only", classes="switch-control-label")
-                            yield ModalButton("Prepare", id="info_prepare_sender", tooltip="Prepare a Sender request; does not send it")
+                            yield ModalButton("To Sender", id="info_to_sender", disabled=True)
                         yield Rule(classes="section_separator")
                         yield DataTable(id="info_comp_table", cursor_type="row")
                         yield Rule(classes="section_separator")
@@ -2385,6 +2377,7 @@ class NoxenApp(App):
             self.query_one("#info_comp_detail", RichLog).clear()
         else:
             table.move_cursor(row=index, animate=False)
+        self._refresh_info_to_sender()
 
     def _set_info_columns(self, table_id: str) -> DataTable:
         """Rebuild an Info app table's columns (and clear its rows), marking the sort column."""
@@ -2401,6 +2394,7 @@ class NoxenApp(App):
         self.workers.cancel_group(self, "app_info")
         self._app_info = None
         self._info_selected_component = None
+        self._refresh_info_to_sender()
         try:
             self.query_one("#info_views", TabbedContent).add_class("empty")
             self.query_one("#info_empty", Label).display = True
@@ -2689,6 +2683,7 @@ class NoxenApp(App):
                 return
             name = event.row_key.value
             self._info_selected_component = name
+            self._refresh_info_to_sender()
             comp = next(
                 (c for c in (self._app_info or {}).get("components", []) if c.get("name") == name),
                 None,
@@ -2903,6 +2898,8 @@ class NoxenApp(App):
             if self._monitor_events_active():
                 # Shown, but unavailable for a call that Sender cannot repeat as it was captured.
                 return True if self.query_one(MonitorPane).sendable() else None
+            if self._info_components_active():
+                return True if self._info_sendable() else None
             return self._active_tab == "tab_history" and not self.screen.is_modal
         if action == "clear_log":
             return self._active_tab in ("tab_log", "tab_history") or self._monitor_events_active()
@@ -3045,10 +3042,44 @@ class NoxenApp(App):
             return self._history_command_bar_visible
         return False
 
+    def _info_components_active(self):
+        return (
+            self._active_tab == "tab_info" and not self.screen.is_modal
+            and self.query_one("#info_views", TabbedContent).active == "info_view_components"
+        )
+
+    def _info_component_request(self):
+        """The Sender request for the selected Info app component. Raises ValueError when there is none."""
+        info = self._app_info or {}
+        component = next((c for c in info.get("components", []) if c.get("name") == self._info_selected_component), None)
+        if component is None:
+            raise ValueError("Select a component first")
+        return prepare_component_request((info.get("identity") or {}).get("package"), component)
+
+    def _info_sendable(self):
+        try:
+            self._info_component_request()
+        except ValueError:
+            return False
+        return True
+
+    def _refresh_info_to_sender(self):
+        try:
+            button = self.query_one("#info_to_sender", Button)
+        except Exception:
+            return
+        disabled = not self._info_sendable()
+        if button.disabled != disabled:
+            button.disabled = disabled
+            self.refresh_bindings()
+
     def action_send_to_sender(self):
-        """Copy the selected History Intent or Monitor provider call into a new Sender request."""
+        """Copy the selected History Intent, Monitor provider call or Info app component into a new Sender request."""
         sender = self.query_one(SenderPane)
         try:
+            if self._active_tab == "tab_info":
+                sender.receive_request(self._info_component_request())
+                return
             if self._active_tab == "tab_monitor":
                 event = self.query_one(MonitorPane).selected_event()
                 if event is None:

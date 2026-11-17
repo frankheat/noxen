@@ -286,7 +286,7 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertTrue(area.text.endswith("}{\n    \n}"))
                 await pilot.press("ctrl+z")
                 area.move_cursor((4, 0))
-                await pilot.press("f2")
+                await pilot.press("ctrl+o")
                 await pilot.pause(0.2)
                 self.assertIn('"extras": {⋯₁}', area.text)
 
@@ -367,7 +367,7 @@ class SenderUITests(IsolatedAppTestCase):
                 app._refresh_history_detail()
                 self.assertIn("[HOOK]", shown())
                 self.assertTrue(app.check_action("toggle_detail_view", ()))
-                await pilot.press("f4")
+                await pilot.press("ctrl+t")
                 await pilot.pause()
                 self.assertFalse(app.query("#btn_history_view"))  # A shortcut only, shown in the footer.
                 self.assertIn('"hook": "sendOrderedBroadcast()"', shown())  # Shown for reading only...
@@ -375,7 +375,7 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertNotIn("hook", saved[0]["request"])  # ...To Sender converts it away.
                 self.assertIn('"action": "test.PING"', shown())
                 self.assertNotIn("[HOOK]", shown())
-                await pilot.press("f4")
+                await pilot.press("ctrl+t")
                 await pilot.pause()
                 self.assertIn("[HOOK]", shown())
 
@@ -450,6 +450,31 @@ class SenderUITests(IsolatedAppTestCase):
                 newest = app.db.sender_request(pane._selected_id)
                 self.assertEqual((newest["name"], newest["request"]["operation"], newest["request"]["uri"]),
                                  ("4", "openFileDescriptor", "content://test/file"))
+
+                # Info app sends a component the same way: named with the next number, not the component.
+                await pilot.click("#--content-tab-tab_info")
+                await pilot.pause(0.3)
+                app.query_one("#info_views", TabbedContent).active = "info_view_components"
+                await pilot.pause(0.3)
+                button = app.query_one("#info_to_sender")
+                self.assertEqual(str(button.label), "To Sender")
+                self.assertTrue(button.disabled)  # No component selected.
+                app._app_info = {"identity": {"package": "test.app"},
+                                 "components": [{"name": "test.app.Receiver", "type": "receiver"},
+                                                {"name": "test.app.Two", "type": "provider", "authority": "a;b"}]}
+                app._info_selected_component = "test.app.Two"
+                app._refresh_info_to_sender()
+                self.assertTrue(button.disabled)  # Two authorities: Sender cannot choose one.
+                self.assertIsNone(app.check_action("send_to_sender", ()))
+                app._info_selected_component = "test.app.Receiver"
+                app._refresh_info_to_sender()
+                self.assertFalse(button.disabled)
+                self.assertTrue(app.check_action("send_to_sender", ()))
+                await pilot.press("ctrl+r")  # Ctrl+R is To Sender here too; Refresh is Ctrl+G.
+                await pilot.pause()
+                newest = app.db.sender_request(pane._selected_id)
+                self.assertEqual((newest["name"], newest["request"]["intent"]["component"]),
+                                 ("5", "test.app/test.app.Receiver"))
 
     async def test_sender_tabs_and_controls_fit_and_do_not_change_other_tabs(self):
         for theme in ("noxen-dark", "noxen-light"):
