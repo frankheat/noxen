@@ -50,14 +50,7 @@ class ExtraKeyModal(ModalScreen):
     #extra_key_title { text-style: bold; margin-bottom: 1; }
     #extra_key_text { height: 1fr; }
     #extra_key_buttons { height: 3; align: right middle; margin-top: 1; }
-    #extra_key_buttons Button {
-        width: auto; min-width: 10; height: 3; margin-left: 1; padding: 0 1;
-        border: round $foreground-muted; background: transparent; color: $foreground;
-        text-style: bold; tint: transparent; background-tint: $surface 0%;
-    }
-    #extra_key_close:hover, #extra_key_close:focus, #extra_key_close.-active {
-        border: round $accent; color: $accent;
-    }
+    #extra_key_buttons Button { margin-left: 1; }
     """
 
     def __init__(self, key: str, *, title: str = "Extra key (read-only)"):
@@ -188,26 +181,7 @@ class FileBrowserModal(ModalScreen):
         height: 3;
         align: right middle;
     }
-    #fbm_buttons Button {
-        width: auto;
-        height: 3;
-        border: round $foreground-muted;
-        padding: 0 2;
-        background: transparent;
-        color: $foreground;
-        text-style: bold;
-        margin-left: 1;
-    }
-    #fbm_ok:hover, #fbm_ok:focus {
-        border: round $success;
-        color: $success;
-        background-tint: $surface 0%;
-    }
-    #fbm_cancel:hover, #fbm_cancel:focus {
-        border: round $accent;
-        color: $accent;
-        background-tint: $surface 0%;
-    }
+    #fbm_buttons Button { margin-left: 1; }
     """
 
     def __init__(self, title: str):
@@ -223,7 +197,7 @@ class FileBrowserModal(ModalScreen):
             yield Label("No file selected", id="fbm_selected")
             with Horizontal(id="fbm_buttons"):
                 yield Button("Cancel", id="fbm_cancel")
-                yield Button("Select", id="fbm_ok", disabled=True)
+                yield Button("Select", id="fbm_ok", classes="confirm", disabled=True)
 
     def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
         self._selected_path = str(event.path)
@@ -243,7 +217,6 @@ class FileBrowserModal(ModalScreen):
 
 class ColumnSelectModal(ModalScreen):
     CSS = """
-    Button { text-style: bold; }
     ColumnSelectModal { align: center middle; }
     #csm_dialog {
         width: 48;
@@ -317,31 +290,7 @@ class ColumnSelectModal(ModalScreen):
         color: $foreground-muted;
     }
     #csm_width_actions { height: 3; margin-top: 1; align: right middle; }
-    #csm_width_actions Button {
-        width: auto;
-        height: 3;
-        border: round $foreground-muted;
-        padding: 0 2;
-        background: transparent;
-        color: $foreground;
-        text-style: bold;
-        margin-left: 0;
-    }
     #csm_width_actions #csm_btn_apply_widths { margin-left: 2; }
-    #csm_btn_apply_widths:hover,
-    #csm_btn_apply_widths:focus {
-        border: round $success;
-        background: transparent;
-        color: $success;
-        background-tint: $surface 0%;
-    }
-    #csm_btn_reset_widths:hover,
-    #csm_btn_reset_widths:focus {
-        border: round $error-darken-1;
-        background: transparent;
-        color: $error;
-        background-tint: $surface 0%;
-    }
     #csm_status { height: 1; margin-top: 1; }
     """
 
@@ -380,8 +329,8 @@ class ColumnSelectModal(ModalScreen):
                 for key, label in self._columns:
                     yield self._column_row(key, label)
             with Horizontal(id="csm_width_actions"):
-                yield Button("Reset widths", id="csm_btn_reset_widths")
-                yield Button("Apply widths", id="csm_btn_apply_widths")
+                yield Button("Reset widths", id="csm_btn_reset_widths", classes="danger")
+                yield Button("Apply widths", id="csm_btn_apply_widths", classes="confirm")
             yield Label("", id="csm_status", markup=True)
 
     def on_mount(self):
@@ -565,7 +514,6 @@ class HelpModal(ModalScreen):
 
 class StackModal(ModalScreen):
     CSS = """
-    Button { text-style: bold; }
     StackModal { align: center middle; }
     #sm_dialog {
         width: 40;
@@ -599,20 +547,6 @@ class StackModal(ModalScreen):
     #sm_depth_input { width: 1fr; height: 1; }
     #sm_error { height: 1; margin-top: 1; }
     #sm_footer { height: 3; align: right middle; margin-top: 1; }
-    #sm_save {
-        height: 3;
-        border: round $foreground-muted;
-        background: transparent;
-        color: $foreground;
-        padding: 0 1;
-        width: auto;
-    }
-    #sm_save:hover, #sm_save:focus {
-        border: round $success;
-        background: transparent;
-        color: $success;
-        background-tint: $surface 0%;
-    }
     """
 
     def __init__(self, show_stack: bool, depth: int, on_confirm: callable):
@@ -634,7 +568,7 @@ class StackModal(ModalScreen):
                 yield Input(value=str(self._depth), id="sm_depth_input")
             yield Label("", id="sm_error")
             with Horizontal(id="sm_footer"):
-                yield Button("Save", id="sm_save")
+                yield Button("Save", id="sm_save", classes="confirm")
 
     def on_button_pressed(self, event: Button.Pressed):
         event.stop()
@@ -660,7 +594,6 @@ class StackModal(ModalScreen):
 
 class FilterModal(ModalScreen):
     CSS = """
-    Button { text-style: bold; }
     FilterModal { align: center middle; }
     #hfm_dialog {
         width: 90%;
@@ -719,39 +652,15 @@ class FilterModal(ModalScreen):
         color: $foreground-muted;
         background: transparent;
     }
+    .hfm_pair_rm:disabled { border: none; }
     .hfm_pair_rm:hover, .hfm_pair_rm:focus {
+        border: none;
         color: $error;
         background: $boost;
         background-tint: $surface 0%;
     }
     #hfm_add_ctrl { height: auto; margin-top: 1; align: left middle; }
     #hfm_add_ctrl_spacer { width: 1fr; }
-    #hfm_btn_remove, #hfm_btn_add_pair, #hfm_btn_add_filter {
-        height: 3;
-        border: round $foreground-muted;
-        background: transparent;
-        color: $foreground;
-        padding: 0 1;
-    }
-    #hfm_btn_remove:hover:enabled, #hfm_btn_remove:focus,
-    #hfm_btn_remove.-active:enabled {
-        border: round $error;
-        background: transparent;
-        color: $error;
-        background-tint: $surface 0%;
-    }
-    #hfm_btn_add_pair:hover, #hfm_btn_add_pair:focus {
-        border: round $accent;
-        background: transparent;
-        color: $accent;
-        background-tint: $surface 0%;
-    }
-    #hfm_btn_add_filter:hover, #hfm_btn_add_filter:focus {
-        border: round $success;
-        background: transparent;
-        color: $success;
-        background-tint: $surface 0%;
-    }
     #hfm_status { height: 1; margin-top: 1; }
     #hfm_filters_table:focus { border: solid $foreground-muted; background-tint: $surface 0%; }
     """
@@ -791,7 +700,7 @@ class FilterModal(ModalScreen):
             yield Label(self._title, id="hfm_title")
             yield DataTable(id="hfm_filters_table", cursor_type="row")
             with Horizontal(id="hfm_remove_row"):
-                yield Button("Remove selected", id="hfm_btn_remove", disabled=True)
+                yield Button("Remove selected", id="hfm_btn_remove", classes="danger", disabled=True)
             yield Rule()
             yield Label("Add filter", classes="hfm_section")
             with Horizontal(id="hfm_type_row"):
@@ -801,7 +710,7 @@ class FilterModal(ModalScreen):
             with Horizontal(id="hfm_add_ctrl"):
                 yield Button("+ Add condition", id="hfm_btn_add_pair")
                 yield Label("", id="hfm_add_ctrl_spacer")
-                yield Button("Add Filter", id="hfm_btn_add_filter")
+                yield Button("Add Filter", id="hfm_btn_add_filter", classes="confirm")
             yield Label("", id="hfm_status", markup=True)
 
     def on_mount(self):

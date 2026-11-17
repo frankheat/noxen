@@ -38,8 +38,6 @@ class SenderRenameModal(ModalScreen):
     SenderRenameModal { align: center middle; }
     SenderRenameModal > Vertical { width: 60; max-width: 90%; height: auto; padding: 1 2; background: $surface; border: solid $foreground-muted; }
     SenderRenameModal Label { margin-bottom: 1; text-style: bold; }
-    SenderRenameModal Input { height: 3; padding: 0 1; border: round $foreground-muted; }
-    SenderRenameModal Input:focus { border: round $accent; }
     """
 
     def __init__(self, name):
@@ -49,7 +47,7 @@ class SenderRenameModal(ModalScreen):
     def compose(self):
         with Vertical():
             yield Label("Rename request")
-            yield Input(self.current, id="sender_rename", select_on_focus=True)
+            yield Input(self.current, id="sender_rename", select_on_focus=True, classes="field")
 
     def on_mount(self):
         self.query_one(Input).focus()
@@ -112,7 +110,7 @@ class SenderPane(Vertical):
     DEFAULT_CSS = """
     SenderPane { height: 1fr; }
     SenderPane .sender_controls { height: 3; margin: 0 1; }
-    SenderPane Button { width: auto; min-width: 0; margin-right: 1; border: round $foreground-muted; background: transparent; }
+    SenderPane Button { margin-right: 1; }
     SenderPane #sender_device { width: 1fr; margin-right: 1; }
     SenderPane #sender_app { width: 2fr; margin-right: 1; }
     SenderPane #sender_state { height: auto; margin: 0 1 1 1; }
@@ -320,7 +318,13 @@ class SenderPane(Vertical):
     def refresh_sender(self):
         devices = [(d.name, d.id) for d in self.app._home_devices]
         if devices != self._devices:
-            self.query_one("#sender_device", Select).set_options(devices)
+            select = self.query_one("#sender_device", Select)
+            previous = select.value
+            select.set_options(devices)
+            if previous in [device_id for _name, device_id in devices]:
+                select.value = previous  # A rescan keeps the choice.
+            elif len(devices) == 1:
+                select.value = devices[0][1]  # Nothing to choose between: its apps are listed at once.
             self._devices = devices
         status = self.service.status()
         label = status["state"].capitalize()
@@ -397,11 +401,14 @@ class SenderPane(Vertical):
         tabs = self.query_one("#sender_tabs", HorizontalScroll)
         signature = tuple((row["id"], row["name"]) for row in self._requests)
         if signature != self._tab_signature:
-            self._tab_signature = signature
+            # Recorded only once the tabs are back: a rebuild cut short by a newer load
+            # (this worker is exclusive) is redone by it, instead of leaving no tabs.
+            self._tab_signature = None
             with self.app.batch_update():
                 await tabs.remove_children(RequestTab)
                 if self._requests:
                     await tabs.mount(*(RequestTab(row) for row in self._requests), before="#sender_new")
+            self._tab_signature = signature
         for tab in tabs.query(RequestTab):
             tab.set_class(tab.request_id == self._selected_id, "-selected")
             if tab.request_id == self._selected_id:

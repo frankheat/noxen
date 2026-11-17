@@ -4,12 +4,13 @@ import tempfile
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from textual.widgets import TabbedContent, Input, Label
+from textual.widgets import TabbedContent, Input, Label, Select
 
 from noxen.app import NoxenApp
 from noxen.sender_ui import NEW_REQUEST_TEXT, RequestTab, SenderPane, SenderRenameModal, SenderTabMenu
 from noxen.sender_json_editor import CompletionList
 from noxen.mcp_service import OperationError
+from noxen.textual_compat import is_select_empty
 from noxen.monitor_ui import RecordingDialog
 from tests.ui_test_case import IsolatedAppTestCase
 
@@ -196,6 +197,32 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.click("#sender_run_newer")
                 await pilot.pause(0.6)
                 self.assertIsNone(pane._run_id)  # Back on the latest run, which later sends keep following.
+
+    async def test_the_only_device_is_selected_and_a_rescan_keeps_the_choice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
+            async with app.run_test(size=(130, 40)) as pilot:
+                app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
+                await pilot.pause()
+                pane = app.query_one(SenderPane)
+                select = pane.query_one("#sender_device", Select)
+                loaded = []
+                with patch.object(pane, "load_applications", side_effect=lambda device, _: loaded.append(device)):
+                    first = SimpleNamespace(name="Emulator", id="emulator-5554")
+                    app._home_devices = [first]
+                    pane.refresh_sender()
+                    await pilot.pause()
+                    self.assertEqual(select.value, "emulator-5554")
+                    self.assertEqual(loaded, ["emulator-5554"])  # Its apps are listed without a click.
+                    app._home_devices = [first, SimpleNamespace(name="Phone", id="usb-1")]
+                    pane.refresh_sender()
+                    await pilot.pause()
+                    self.assertEqual(select.value, "emulator-5554")
+                    app._home_devices = [SimpleNamespace(name="Phone", id="usb-1"),
+                                         SimpleNamespace(name="Tablet", id="usb-2")]
+                    pane.refresh_sender()
+                    await pilot.pause()
+                    self.assertTrue(is_select_empty(select.value))  # Several new devices: the user chooses.
 
     async def test_tab_menu_closes_other_tabs_and_tabs_to_one_side(self):
         with tempfile.TemporaryDirectory() as directory:

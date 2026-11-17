@@ -2,11 +2,56 @@ Screen {
     background: $background;
     color: $foreground;
 }
-/* A button fits its label with one space on each side (Textual adds that space).
+/* Controls share one look, defined here once: other rules only size and place them,
+   or give a button its state colours (Intercept's Forward, Drop, ...).
+   A button fits its label with one space on each side (Textual adds that space);
    Textual's default minimum width centred short labels with the odd column on the right. */
 Button {
+    width: auto;
     min-width: 0 !important;
+    height: 3;
     padding: 0 !important;
+    border: round $foreground-muted;
+    background: transparent;
+    color: $foreground;
+    text-style: bold;
+    tint: transparent;
+    background-tint: transparent;
+}
+Button:hover, Button:focus, Button.-active {
+    border: round $accent;
+    background: transparent;
+    color: $accent;
+}
+Button:disabled, Button:disabled:hover {
+    border: round $foreground-muted;
+    color: $foreground-muted;
+}
+/* .confirm starts or saves something (Connect, Save, Select); .danger ends or removes it. */
+Button.confirm:hover, Button.confirm:focus, Button.confirm.-active {
+    border: round $success;
+    color: $success;
+}
+Button.danger:hover, Button.danger:focus, Button.danger.-active {
+    border: round $error-darken-1;
+    color: $error;
+}
+Select > SelectCurrent {
+    border: round $foreground-muted;
+    background: transparent;
+}
+Select:focus > SelectCurrent {
+    border: round $accent;
+}
+/* A boxed text field; plain Inputs (command bars, inline cells) stay borderless. */
+Input.field {
+    height: 3;
+    padding: 0 1;
+    border: round $foreground-muted;
+    background: transparent;
+}
+Input.field:focus {
+    border: round $accent;
 }
 ModalScreen {
     background: $background 16%;
@@ -38,42 +83,7 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     align: left middle;
 }
 #intercept_header Button {
-    width: auto;
-    height: 1;
-    border: none;
-    padding: 0 1;
     margin: 0 1 0 0;
-}
-#intercept_header Button:focus {
-    border: none;
-    text-style: bold;
-    background-tint: $surface 0%;
-}
-#intercept_header #intercept_toggle,
-#intercept_header #btn_forward,
-#intercept_header #btn_drop,
-#intercept_header #btn_edit,
-#intercept_header #btn_cancel_edit {
-    height: 3;
-    margin: 0 1 0 0;
-    border: round $foreground-muted;
-    background: transparent;
-    color: $foreground-muted;
-    text-style: bold;
-}
-#intercept_header #intercept_toggle:focus,
-#intercept_header #btn_forward:focus,
-#intercept_header #btn_drop:focus,
-#intercept_header #btn_edit:focus,
-#intercept_header #btn_cancel_edit:focus,
-#intercept_header #intercept_toggle:hover,
-#intercept_header #btn_forward:hover,
-#intercept_header #btn_drop:hover,
-#intercept_header #btn_edit:hover,
-#intercept_header #btn_cancel_edit:hover {
-    border: round $foreground-muted;
-    background: $boost;
-    background-tint: $surface 0%;
 }
 #intercept_header #intercept_toggle.intercept-on,
 #intercept_header #intercept_toggle.intercept-on:focus,
@@ -119,37 +129,6 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
 }
 #intercept_header #btn_cancel_edit {
     display: none;
-    border: round $foreground-muted;
-    background: transparent;
-    color: $foreground;
-}
-#intercept_header #btn_cancel_edit:focus,
-#intercept_header #btn_cancel_edit:hover {
-    border: round $accent;
-    background: $boost;
-    color: $accent;
-}
-#intercept_header #btn_forward:disabled,
-#intercept_header #btn_drop:disabled,
-#intercept_header #btn_edit:disabled {
-    border: round $foreground-muted;
-    background: transparent;
-    color: $foreground-muted;
-}
-#intercept_header #btn_intercept_filters,
-#intercept_header #btn_intercept_stack {
-    height: 3;
-    border: round $foreground-muted;
-    background: transparent;
-    color: $foreground;
-}
-#intercept_header #btn_intercept_filters:focus,
-#intercept_header #btn_intercept_stack:focus,
-#intercept_header #btn_intercept_filters:hover,
-#intercept_header #btn_intercept_stack:hover {
-    border: round $accent;
-    background: transparent;
-    color: $accent;
 }
 #session_bar {
     height: 1;
@@ -249,65 +228,18 @@ TabPane {
     align: left middle;
 }
 #history_header Button {
-    width: auto;
-    height: 1;
-    border: none;
-    padding: 0 1;
     margin: 0 1 0 0;
-}
-#history_header Button:focus {
-    border: none;
-    text-style: bold;
-    background-tint: $surface 0%;
 }
 #filter_bar_spacer { width: 0; }
 #history_search {
     width: 1fr;
-    height: 3;
-    padding: 0 1;
     margin-right: 1;
-    background: transparent;
-    border: round $foreground-muted;
-}
-#history_header #btn_history_filters,
-#history_header #btn_history_sender,
-#history_header #btn_history_stack {
-    height: 3;
-    border: round $foreground-muted;
-    background: transparent;
-    color: $foreground;
-}
-#history_header #btn_history_filters:focus,
-#history_header #btn_history_stack:focus,
-#history_header #btn_history_sender:focus,
-#history_header #btn_history_sender:hover,
-#history_header #btn_history_filters:hover,
-#history_header #btn_history_stack:hover {
-    border: round $accent;
-    background: transparent;
-    color: $accent;
 }
 #history_header #btn_columns,
 #monitor_pane #monitor_columns {
     margin: 0;
-    padding: 0 1;
-    width: auto;
-    min-width: 0;
-    height: 3;
-    border: round $foreground-muted;
-    background: transparent;
-    color: $foreground;
-    text-style: bold;
 }
 #monitor_pane #monitor_columns { margin-left: 1; }
-#history_header #btn_columns:hover,
-#history_header #btn_columns:focus,
-#monitor_pane #monitor_columns:hover,
-#monitor_pane #monitor_columns:focus {
-    border: round $accent;
-    background: transparent;
-    color: $accent;
-}
 #intercept_cmd_output {
     height: 7;
     margin: 0 1;
@@ -342,71 +274,6 @@ Input:focus {
 }
 Input:light > .input--placeholder,
 Input:light > .input--suggestion {
-    color: $foreground-muted;
-}
-#monitor_search,
-#mcp_port,
-#monitor_dialog Input {
-    height: 3;
-    padding: 0 1;
-    border: round $foreground-muted;
-}
-#monitor_search { background: transparent; }
-#monitor_search:focus,
-#mcp_port:focus,
-#monitor_dialog Input:focus { border: round $accent; }
-MCPPane Button,
-SenderPane Button,
-#log_crashes,
-#info_to_sender,
-#crash_actions Button,
-#monitor_pane .monitor_controls Button,
-#monitor_dialog Button,
-#monitor_restore_dialog Button,
-#recording_dialog Button {
-    height: 3;
-    border: round $foreground-muted;
-    background: transparent;
-    color: $foreground;
-    text-style: bold;
-    tint: transparent;
-    background-tint: transparent;
-}
-MCPPane Button:hover,
-SenderPane Button:hover,
-SenderPane Button:focus,
-SenderPane Button.-active,
-MCPPane Button:focus,
-MCPPane Button.-active,
-#log_crashes:hover,
-#info_to_sender:hover,
-#info_to_sender:focus,
-#info_to_sender.-active,
-#log_crashes:focus,
-#log_crashes.-active,
-#crash_actions Button:hover,
-#crash_actions Button:focus,
-#crash_actions Button.-active,
-#monitor_pane .monitor_controls Button:hover,
-#monitor_pane .monitor_controls Button:focus,
-#monitor_pane .monitor_controls Button.-active,
-#monitor_dialog Button:hover,
-#monitor_dialog Button:focus,
-#monitor_dialog Button.-active,
-#monitor_restore_dialog Button:hover,
-#monitor_restore_dialog Button:focus,
-#monitor_restore_dialog Button.-active,
-#recording_dialog Button:hover,
-#recording_dialog Button:focus,
-#recording_dialog Button.-active {
-    border: round $accent;
-    color: $accent;
-}
-MCPPane Button:disabled,
-SenderPane Button:disabled,
-#monitor_pane .monitor_controls Button:disabled,
-#monitor_dialog Button:disabled {
-    border: round $foreground-muted;
     color: $foreground-muted;
 }
 #intercept_input_bar.intercepted {
@@ -450,7 +317,8 @@ SelectOverlay {
     border: tall $foreground-muted;
 }
 .compact_select { height: 1; }
-.compact_select > SelectCurrent { border: none; height: 1; padding: 0 1; }
+.compact_select > SelectCurrent,
+.compact_select:focus > SelectCurrent { border: none; height: 1; padding: 0 1; }
 OptionList > .option-list--option-highlighted {
     background: $primary;
     color: $button-color-foreground;
@@ -560,23 +428,6 @@ Switch.-on > .switch--slider {
 }
 #settings_theme { width: 11; }
 #settings_theme > SelectCurrent { padding-left: 2; }
-#settings_save {
-    width: auto;
-    min-width: 0;
-    height: 3;
-    border: round $foreground-muted;
-    padding: 0 2;
-    background: transparent;
-    color: $foreground;
-    text-style: bold;
-}
-#settings_save:hover,
-#settings_save:focus {
-    border: round $success;
-    background: transparent;
-    color: $success;
-    background-tint: $surface 0%;
-}
 #home_split {
     height: 1fr;
 }
@@ -627,49 +478,12 @@ Switch.-on > .switch--slider {
 }
 #home_hooks_path, #home_script_path {
     width: 1fr;
-    height: 3;
-    border: tall $foreground-muted;
-    background: $surface;
-    padding: 0 1;
 }
 #home_hooks_browse, #home_script_browse,
-#home_hooks_clear, #home_script_clear {
-    width: auto;
-    height: 3;
-    border: round $foreground-muted;
-    padding: 0 1;
+#home_hooks_clear, #home_script_clear,
+#home_refresh, #home_target_refresh,
+#home_disconnect {
     margin-left: 1;
-    background: transparent;
-    color: $foreground;
-    text-style: bold;
-}
-#home_hooks_browse:hover, #home_hooks_browse:focus,
-#home_script_browse:hover, #home_script_browse:focus {
-    border: round $accent;
-    background: transparent;
-    color: $accent;
-}
-#home_hooks_clear:hover, #home_hooks_clear:focus,
-#home_script_clear:hover, #home_script_clear:focus {
-    border: round $error-darken-1;
-    color: $error;
-    background: transparent;
-}
-#home_refresh, #home_target_refresh {
-    width: auto;
-    height: 3;
-    border: round $foreground-muted;
-    padding: 0 1;
-    margin-left: 1;
-    background: transparent;
-    color: $foreground;
-    text-style: bold;
-}
-#home_refresh:hover, #home_target_refresh:hover,
-#home_refresh:focus, #home_target_refresh:focus {
-    border: round $accent;
-    background: transparent;
-    color: $accent;
 }
 #home_anr_row {
     height: 3;
@@ -689,17 +503,6 @@ Switch.-on > .switch--slider {
 #home_target_select {
     width: 1fr;
 }
-#home_form Select > SelectCurrent {
-    border: tall $foreground-muted;
-    background: $surface;
-}
-#home_form Select:focus > SelectCurrent {
-    border: tall $foreground-muted;
-}
-SenderPane Select > SelectCurrent {
-    border: round $foreground-muted;
-    background: $background;
-}
 
 #info_to_sender {
     width: auto;
@@ -707,41 +510,10 @@ SenderPane Select > SelectCurrent {
 }
 #home_btn {
     width: 17;  /* "Connect" and "Connecting…" both centre evenly. */
-    min-width: 0;
-    height: 3;
-    border: round $foreground-muted;
-    padding: 0 2;
-    background: transparent;
-    color: $foreground;
-    text-style: bold;
-}
-#home_btn:hover,
-#home_btn:focus {
-    border: round $success;
-    background: transparent;
-    color: $success;
-    background-tint: $surface 0%;
 }
 #home_btn_row {
     height: auto;
     margin: 0;
-}
-#home_disconnect {
-    width: auto;
-    height: 3;
-    border: round $foreground-muted;
-    padding: 0 2;
-    background: transparent;
-    color: $foreground;
-    text-style: bold;
-    margin-left: 1;
-}
-#home_disconnect:hover,
-#home_disconnect:focus {
-    border: round $error-darken-1;
-    background: transparent;
-    color: $error;
-    background-tint: $surface 0%;
 }
 #home_error {
     height: 1;
@@ -786,15 +558,7 @@ Footer {
 }
 .info_controls Input {
     width: 1fr;
-    height: 3;
-    padding: 0 1;
     margin-right: 1;
-    background: transparent;
-    border: round $foreground-muted;
-}
-.info_controls Input:focus {
-    border: round $foreground-muted;
-    background-tint: $surface 0%;
 }
 .info_controls Select {
     height: 3;
@@ -803,14 +567,6 @@ Footer {
 /* width = longest option + a couple of extra chars (Select chrome ~8 cells) */
 #info_comp_type { width: 19; }
 #info_perm_source { width: 21; }
-.info_controls Select > SelectCurrent {
-    border: round $foreground-muted;
-    background: transparent;
-}
-.info_controls Select:focus > SelectCurrent {
-    border: round $accent;
-    background-tint: $surface 0%;
-}
 .switch-control {
     width: auto;
     height: 3;

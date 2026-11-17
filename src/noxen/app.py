@@ -1050,23 +1050,25 @@ class NoxenApp(App):
                             yield Label("Hook config", classes="connect_label")
                             yield Input(
                                 id="home_hooks_path",
+                                classes="field",
                                 value=self.db.load_hook_config_path(),
                                 placeholder="additional hook definitions (.json)",
                                 select_on_focus=False,
                             )
                             yield ModalButton("Browse", id="home_hooks_browse")
-                            yield Button("✕", id="home_hooks_clear")
+                            yield Button("✕", id="home_hooks_clear", classes="danger")
 
                         with Horizontal(classes="connect_row"):
                             yield Label("Extra script", classes="connect_label")
                             yield Input(
                                 id="home_script_path",
+                                classes="field",
                                 value=self.db.load_extra_script_path(),
                                 placeholder="additional Frida script (.js)",
                                 select_on_focus=False,
                             )
                             yield ModalButton("Browse", id="home_script_browse")
-                            yield Button("✕", id="home_script_clear")
+                            yield Button("✕", id="home_script_clear", classes="danger")
 
                         with Horizontal(classes="connect_row", id="home_anr_row"):
                             yield Label("Input ANR bypass (experimental)", id="home_anr_bypass_label")
@@ -1075,8 +1077,8 @@ class NoxenApp(App):
                         yield Label("", id="home_error")
                         yield Rule(classes="section_separator")
                         with Horizontal(id="home_btn_row"):
-                            yield Button("Connect", id="home_btn")
-                            yield Button("Disconnect", id="home_disconnect", disabled=True)
+                            yield Button("Connect", id="home_btn", classes="confirm")
+                            yield Button("Disconnect", id="home_disconnect", classes="danger", disabled=True)
             with TabPane(" Intercept ", id="tab_intercept"):
                 yield Horizontal(
                     Button(
@@ -1117,7 +1119,7 @@ class NoxenApp(App):
                     yield ModalButton("Filters", id="btn_history_filters")
                     yield ModalButton("Stack", id="btn_history_stack")
                     yield Label("", id="filter_bar_spacer")
-                    yield Input(id="history_search", placeholder="Search", select_on_focus=False)
+                    yield Input(id="history_search", placeholder="Search", select_on_focus=False, classes="field")
                     yield ModalButton("To Sender", id="btn_history_sender")
                     yield ModalButton("⊟", id="btn_columns")
                 yield Rule(classes="section_separator")
@@ -1137,7 +1139,7 @@ class NoxenApp(App):
                         yield Rule(classes="section_separator")
                     with TabPane("Permissions", id="info_view_permissions"):
                         with Horizontal(classes="info_controls"):
-                            yield Input(id="info_perm_search", placeholder="Search permissions", select_on_focus=False)
+                            yield Input(id="info_perm_search", placeholder="Search permissions", select_on_focus=False, classes="field")
                             yield Select(
                                 [("All sources", "all"), ("requested", "requested"), ("defined", "defined")],
                                 id="info_perm_source", value="all", allow_blank=False,
@@ -1147,7 +1149,7 @@ class NoxenApp(App):
                         yield Rule(classes="section_separator")
                     with TabPane("Components", id="info_view_components"):
                         with Horizontal(classes="info_controls"):
-                            yield Input(id="info_comp_search", placeholder="Search components", select_on_focus=False)
+                            yield Input(id="info_comp_search", placeholder="Search components", select_on_focus=False, classes="field")
                             yield Select(
                                 [("All types", "all"), ("activity", "activity"), ("service", "service"),
                                  ("receiver", "receiver"), ("provider", "provider")],
@@ -1202,7 +1204,7 @@ class NoxenApp(App):
                             classes="compact_select",
                         )
                     yield Rule(classes="section_separator")
-                    yield Button("Save", id="settings_save")
+                    yield Button("Save", id="settings_save", classes="confirm")
         with Vertical(id="history_bar_container"):
             yield RichLog(id="history_cmd_output", markup=True, highlight=False)
             yield OptionList(id="history_cmd_suggestions")

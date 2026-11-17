@@ -177,12 +177,13 @@ class ThemeRuntimeTests(IsolatedAppTestCase):
                     app.query_one("#info_views", TabbedContent).active = "info_view_permissions"
                     await pilot.pause()
                     permission_search = app.query_one("#info_perm_search")
+                    history_search = app.query_one("#history_search")
+                    # Boxed fields share one look: the same border, accented while focused.
+                    self.assertEqual(permission_search.styles.border.top, history_search.styles.border.top)
                     permission_search.focus()
                     await pilot.pause()
-                    self.assertEqual(
-                        permission_search.styles.border.top[1],
-                        app.query_one("#history_search").styles.border.top[1],
-                    )
+                    self.assertEqual(permission_search.styles.border.top[0], "round")
+                    self.assertNotEqual(permission_search.styles.border.top[1], history_search.styles.border.top[1])
                     table = app.query_one("#info_perm_table")
                     table.focus()
                     await pilot.pause()

@@ -24,9 +24,9 @@ class MCPPane(VerticalScroll):
             yield Label("Stopped", id="mcp_state", markup=False)
         with Horizontal(classes="mcp_controls"):
             yield Label("Port", classes="mcp_field_label")
-            yield Input("8765", type="integer", id="mcp_port", select_on_focus=False)
-            yield ModalButton("Start", id="mcp_start")
-            yield ModalButton("Stop", id="mcp_stop", disabled=True)
+            yield Input("8765", type="integer", id="mcp_port", select_on_focus=False, classes="field")
+            yield ModalButton("Start", id="mcp_start", classes="confirm")
+            yield ModalButton("Stop", id="mcp_stop", classes="danger", disabled=True)
         with Horizontal(classes="mcp_controls"):
             with Horizontal(id="mcp_control_group", classes="switch-control"):
                 yield Switch(False, id="mcp_allow_control",

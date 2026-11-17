@@ -74,7 +74,8 @@ class MonitorDialog(ModalScreen):
             with VerticalScroll(id="monitor_dialog_body"):
                 if is_profile:
                     yield Label("Profile name")
-                    yield Input(self.profile_name, id="monitor_name", max_length=60, select_on_focus=False)
+                    yield Input(self.profile_name, id="monitor_name", max_length=60, select_on_focus=False,
+                                classes="field")
                 else:
                     yield from self.compose_hook_fields()
             error = Label("", id="monitor_error", markup=False)
@@ -82,7 +83,7 @@ class MonitorDialog(ModalScreen):
             yield error
             with Horizontal(classes="buttons"):
                 yield Button("Cancel", id="monitor_cancel")
-                yield Button("Save", id="monitor_save")
+                yield Button("Save", id="monitor_save", classes="confirm")
 
     def on_mount(self):
         selector = "#monitor_name" if self.profile_name is not None else "#monitor_class"
@@ -92,13 +93,13 @@ class MonitorDialog(ModalScreen):
         hook = self.hook or {}
         yield Label("Class")
         yield Input(hook.get("class", ""), placeholder="com.example.ReportManager", id="monitor_class",
-                    select_on_focus=False)
+                    select_on_focus=False, classes="field")
         yield Label("Method ($init for constructors)")
         yield Input(hook.get("method", ""), placeholder="exportReport", id="monitor_method",
-                    select_on_focus=False)
+                    select_on_focus=False, classes="field")
         yield Label("Argument types (comma-separated, blank for none)")
         yield Input(", ".join(hook.get("args", [])), placeholder="java.lang.String, boolean", id="monitor_args",
-                    select_on_focus=False)
+                    select_on_focus=False, classes="field")
         for key, title, default in (("captureArguments", "Capture arguments", True),
                                     ("captureReturn", "Capture return value", True),
                                     ("captureStack", "Capture stack (up to 16 frames)", False)):
@@ -385,7 +386,7 @@ class MonitorPane(Vertical):
         with TabbedContent(id="monitor_views", initial="monitor_events_view", classes="subtabs"):
             with TabPane("Events", id="monitor_events_view"):
                 with Horizontal(classes="monitor_controls"):
-                    yield Input(placeholder="Search Monitor events", id="monitor_search")
+                    yield Input(placeholder="Search Monitor events", id="monitor_search", classes="field")
                     yield ModalButton("To Sender", id="monitor_to_sender", disabled=True)
                     yield ModalButton("⊟", id="monitor_columns")
                 yield Label("", id="monitor_status", markup=False)
