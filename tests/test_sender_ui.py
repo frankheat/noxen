@@ -7,7 +7,8 @@ from types import SimpleNamespace
 from textual.widgets import TabbedContent, Input, Label
 
 from noxen.app import NoxenApp
-from noxen.sender_ui import RequestTab, SenderPane, SenderRenameModal, SenderTabMenu
+from noxen.sender_ui import NEW_REQUEST_TEXT, RequestTab, SenderPane, SenderRenameModal, SenderTabMenu
+from noxen.sender_json_editor import CompletionList
 from noxen.mcp_service import OperationError
 from noxen.monitor_ui import RecordingDialog
 from tests.ui_test_case import IsolatedAppTestCase
@@ -135,15 +136,26 @@ class SenderUITests(IsolatedAppTestCase):
                 await service.connect(endpoint, "test.app", service.token)
                 pane.refresh_sender()
                 self.assertFalse(pane.query_one("#sender_disconnect").disabled)
+                area = pane.editor.area
                 for expected in ("1", "2"):
-                    await pilot.click("#sender_new")  # Created at once, ready to edit as JSON.
+                    await pilot.click("#sender_new")  # Created at once, empty, ready to edit as JSON.
                     await pilot.pause(0.5)
                     self.assertEqual(pane.selected()["name"], expected)
+                    self.assertEqual(pane.selected()["request"], {})  # No operation is chosen for the user...
+                    self.assertEqual(area.text, NEW_REQUEST_TEXT)
+                    self.assertTrue(pane.editor.query_one(CompletionList).display)  # ...the choices are listed.
+                    self.assertEqual(area._matches[0][0], "startActivity")
+                    self.assertTrue(pane.query_one("#sender_send").disabled)
+                    self.assertEqual(str(pane.editor.query_one(".json_status").content), "Choose an operation")
                 self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "2"])
-                self.assertIs(app.focused, pane.editor.area)
+                self.assertIs(app.focused, area)
+                # Choosing the operation also writes what it needs, and the request is saved.
+                await pilot.press("down", "enter")
+                await pilot.pause(1.2)
+                self.assertEqual(pane.selected()["request"], {"operation": "sendBroadcast", "intent": {}})
+                self.assertFalse(pane.query_one("#sender_send").disabled)
                 # The name is the tab label: renaming the request renames its tab, and keeps text being typed.
-                area = pane.editor.area
-                area.load(area.text.replace('"flags": 0', '"flags": 16'))
+                area.load('{\n    "operation": "sendBroadcast",\n    "intent": {"flags": 16}\n}')
                 await pilot.pause()
                 await pilot.click(list(pane.query(RequestTab))[1], button=3)
                 await pilot.pause()
@@ -310,13 +322,13 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertTrue(app.check_action("toggle_detail_view", ()))
                 await pilot.press("f4")
                 await pilot.pause()
-                self.assertEqual(str(app.query_one("#btn_history_view").label), "Details")
+                self.assertFalse(app.query("#btn_history_view"))  # A shortcut only, shown in the footer.
                 self.assertIn('"hook": "sendOrderedBroadcast()"', shown())  # Shown for reading only...
                 self.assertIn('"operation": "sendOrderedBroadcast"', shown())  # The hooked call itself.
                 self.assertNotIn("hook", saved[0]["request"])  # ...To Sender converts it away.
                 self.assertIn('"action": "test.PING"', shown())
                 self.assertNotIn("[HOOK]", shown())
-                await pilot.click("#btn_history_view")
+                await pilot.press("f4")
                 await pilot.pause()
                 self.assertIn("[HOOK]", shown())
 
@@ -359,8 +371,7 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.press("ctrl+r")
                 await pilot.pause(0.6)
                 self.assertEqual(len(app.db.sender_requests()), 3)
-                self.assertEqual(app.db.sender_request(pane._selected_id)["request"],
-                                 {"operation": "sendBroadcast", "intent": {}})
+                self.assertEqual(app.db.sender_request(pane._selected_id)["request"], {})  # Nothing invented.
                 self.assertIn('"operation": "startActivity"', pane.editor.area.text)
                 self.assertIn('"action": "test.PING"', pane.editor.area.text)
                 self.assertTrue(pane.editor_dirty())

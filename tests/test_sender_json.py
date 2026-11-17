@@ -45,6 +45,13 @@ class SenderJsonTests(unittest.TestCase):
         self.assertEqual(complete('{"operation": "call", "extras": {\n    St|\n}}', "String"),
                          '{"operation": "call", "extras": {\n    "|": {"type": "String", "value": ""}\n}}')
         self.assertEqual(complete('{"operation": "st|"}', "startActivity"), '{"operation": "startActivity"|}')
+        # In a new request, the operation brings what it needs; in one with other fields it does not.
+        self.assertEqual(complete('{\n    "operation": "|"\n}', "sendBroadcast", always=True),
+                         '{\n    "operation": "sendBroadcast",\n    "intent": {\n        |\n    }\n}')
+        self.assertEqual(complete('{\n    "operation": "|"\n}', "query", always=True),
+                         '{\n    "operation": "query",\n    "uri": "content://|"\n}')
+        self.assertEqual(complete('{\n    "operation": "|",\n    "intent": {}\n}', "query", always=True),
+                         '{\n    "operation": "query"|,\n    "intent": {}\n}')
 
     def test_snippets_produce_requests_that_validate(self):
         text = complete('{\n    "operation": "sendBroadcast",\n    in|\n}', "intent").replace("|", "")

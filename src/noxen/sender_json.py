@@ -47,6 +47,14 @@ REQUEST_SNIPPETS = {"operation": TEXT, "intent": INTENT_SNIPPET, "receiverPermis
                     "values": BLOCK, "method": TEXT, "arg": TEXT, "extras": BLOCK, "maxRows": "100$0",
                     "maxBytes": "65536$0"}
 
+# What each operation needs before it can be saved, written after the operation of a new request.
+OPERATION_SKELETONS = {
+    **{name: ',\n"intent": {\n    $0\n}' for name in INTENT_OPERATIONS},
+    "startActivity": ',\n"intent": {\n    "flags": 268435456$0\n}',
+    **{name: ',\n"uri": "content://$0"' for name in PROVIDER_OPERATIONS},
+    **{name: ',\n"uri": "content://$0",\n"values": {}' for name in ("insert", "update")},
+}
+
 
 def format_request(request):
     return json.dumps(request, indent=4, ensure_ascii=False)
@@ -197,7 +205,9 @@ def context(text, offset):
             names = OPERATIONS
         elif top.bracket == "{" and top.key == "type" and kind == "entry":
             names = TYPES
-        result["options"] = [(name, f'"{name}"$0') for name in names] or \
+        # In a request that has nothing else yet, choosing the operation also writes what it needs.
+        skeleton = names is OPERATIONS and not set(root) - {"operation"} and re.fullmatch(r'"?[ \t]*\n\s*\}\s*', text[offset:])
+        result["options"] = [(name, f'"{name}"' + (OPERATION_SKELETONS[name] if skeleton else "$0")) for name in names] or \
             ([] if result["quoted"] else [(name, name + "$0") for name in ("null", "true", "false")])
     return result
 

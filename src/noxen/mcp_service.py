@@ -209,7 +209,7 @@ class MCPService:
 
     async def list_sender_requests(self):
         return {"requests": [{"id": r["id"], "name": r["name"], "revision": r["revision"],
-                               "operation": r["request"]["operation"]} for r in self.app.db.sender_requests()]}
+                               "operation": r["request"].get("operation")} for r in self.app.db.sender_requests()]}
 
     async def get_sender_request(self, request_id):
         return self.app.sender_service.get_request(request_id)

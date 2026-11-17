@@ -127,7 +127,6 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     color: $foreground-muted;
 }
 #intercept_header #btn_intercept_filters,
-#intercept_header #btn_intercept_view,
 #intercept_header #btn_intercept_stack {
     height: 3;
     border: round $foreground-muted;
@@ -135,8 +134,6 @@ Screen, RichLog, DataTable, VerticalScroll, ScrollableContainer {
     color: $foreground;
 }
 #intercept_header #btn_intercept_filters:focus,
-#intercept_header #btn_intercept_view:focus,
-#intercept_header #btn_intercept_view:hover,
 #intercept_header #btn_intercept_stack:focus,
 #intercept_header #btn_intercept_filters:hover,
 #intercept_header #btn_intercept_stack:hover {
@@ -263,7 +260,6 @@ TabPane {
     border: round $foreground-muted;
 }
 #history_header #btn_history_filters,
-#history_header #btn_history_view,
 #history_header #btn_history_sender,
 #history_header #btn_history_stack {
     height: 3;
@@ -275,8 +271,6 @@ TabPane {
 #history_header #btn_history_stack:focus,
 #history_header #btn_history_sender:focus,
 #history_header #btn_history_sender:hover,
-#history_header #btn_history_view:focus,
-#history_header #btn_history_view:hover,
 #history_header #btn_history_filters:hover,
 #history_header #btn_history_stack:hover {
     border: round $accent;

@@ -13,7 +13,7 @@ from textual.widgets.option_list import Option
 
 from noxen.modals import ModalButton
 from noxen.monitor_ui import RecordingDialog
-from noxen.sender import SenderError, empty_request, render_sender_detail
+from noxen.sender import SenderError, render_sender_detail
 from noxen.sender_service import endpoint_for_app, sender_io
 from noxen.textual_compat import is_select_empty
 from noxen import sender_json
@@ -21,6 +21,13 @@ from noxen.sender_json_editor import JsonRequestEditor
 
 
 AUTOSAVE_DELAY = 0.8
+# A new request has no operation yet. The editor shows where to write one.
+NEW_REQUEST_TEXT = '{\n    "operation": ""\n}'
+
+
+def request_text(request):
+    """The editor text of a saved request."""
+    return NEW_REQUEST_TEXT if request == {} else sender_json.format_request(request)
 
 
 class SenderRenameModal(ModalScreen):
@@ -141,6 +148,7 @@ class SenderPane(Vertical):
         self._autosave = None         # Pending timer of the automatic save.
         self._retry_save = False      # The last save failed for a reason other than the text.
         self._result_shown = None     # What the result panel currently describes.
+        self._suggest_on_load = None  # A new request: list the operations once its text is shown.
 
     @property
     def service(self):
@@ -194,7 +202,7 @@ class SenderPane(Vertical):
         if row is None or area.read_only:
             return
         self.editor.say("Editing…" if self.editor_dirty() else
-                        "Saved")
+                        "Choose an operation" if row["request"] == {} else "Saved")
 
     def on_text_area_changed(self, event):
         """Edits are saved on their own, a moment after typing stops."""
@@ -247,7 +255,7 @@ class SenderPane(Vertical):
         self._editor_key = (saved["id"], saved["revision"])
         self._requests = [dict(r, revision=saved["revision"], request=saved["request"]) if r["id"] == saved["id"] else r
                           for r in self._requests]
-        self.editor.say("Saved")
+        self.show_editor_state()
         return self.selected()
 
     def show_request_json(self, row, run):
@@ -274,12 +282,18 @@ class SenderPane(Vertical):
                 self._editor_key, self._editor_baseline = None, self.editor.area.full_text()
             if key != self._editor_key:
                 self.stash_draft()
-                saved_text = sender_json.format_request(row["request"])
+                saved_text = request_text(row["request"])
                 # A draft keeps the revision it was written against, so a later change still conflicts.
                 text, folds, revision, baseline = self._drafts.pop(row["id"], (saved_text, {}, row["revision"], saved_text))
                 self._editor_key, self._editor_baseline = (row["id"], revision), baseline
                 area.read_only = False
                 area.load(text, folds)
+                if self._suggest_on_load == row["id"] and text == NEW_REQUEST_TEXT:
+                    area.move_cursor(area.location(NEW_REQUEST_TEXT.index('""') + 1))
+                    area.focus()
+                    self.call_after_refresh(area.show_completions, True)
+            if self._suggest_on_load == row["id"]:
+                self._suggest_on_load = None
         self.show_editor_state()
 
     def stash_draft(self):
@@ -318,11 +332,11 @@ class SenderPane(Vertical):
         row = self.selected()
         self.query_one("#sender_send", Button).disabled = (
             self._checking_activity_send or status["state"] != "ready" or status["active_run"] is not None
-            or row is None
+            or row is None or row["request"] == {}
         )
         self.query_one("#sender_cancel_run", Button).disabled = not (
             row is not None and status["active_run"] is not None and status["active_run"] in self._run_ids[:1]
-            and row["request"]["operation"] in ("query", "openFileDescriptor"))
+            and row["request"].get("operation") in ("query", "openFileDescriptor"))
         if self._retry_save and self._autosave is None:
             self._retry_save = False
             self._autosave = self.set_timer(AUTOSAVE_DELAY, self.autosave)
@@ -452,9 +466,8 @@ class SenderPane(Vertical):
         try:
             saved = self.service.save_request(name, request)
         except SenderError as error:
-            saved = self.service.save_request(name, {"operation": "sendBroadcast", "intent": {}})
-            self._drafts[saved["id"]] = (sender_json.format_request(request), {}, saved["revision"],
-                                         sender_json.format_request(saved["request"]))
+            saved = self.service.save_request(name, {})
+            self._drafts[saved["id"]] = (sender_json.format_request(request), {}, saved["revision"], NEW_REQUEST_TEXT)
             self.notify(f"{error}. It is in Sender as request {name}, unsaved: fix it there.", severity="warning")
         else:
             self.notify(f"Sent to Sender as request {name}")
@@ -551,8 +564,9 @@ class SenderPane(Vertical):
             elif button == "sender_disconnect":
                 await self.service.disconnect(self.service.token)
             elif button == "sender_new":
-                self.select_request(self.service.save_request(self.next_name(), empty_request())["id"])
-                self.editor.area.focus()
+                saved = self.service.save_request(self.next_name(), {})
+                self._suggest_on_load = saved["id"]
+                self.select_request(saved["id"])
             elif button == "sender_cancel_run":
                 status = self.service.status()
                 if status["active_run"] is not None:
@@ -563,6 +577,8 @@ class SenderPane(Vertical):
                 row = self.save_editor()  # Send what is on screen.
                 if row is None or self._checking_activity_send:
                     return
+                if row["request"] == {}:
+                    raise ValueError("Choose an operation first")
                 if row["request"]["operation"] == "startActivity":
                     self._checking_activity_send = True
                     self.send_activity(row, self.service.token)

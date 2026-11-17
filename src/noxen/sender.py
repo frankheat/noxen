@@ -222,12 +222,6 @@ def validate_request(raw):
     return value
 
 
-def empty_request(operation="sendBroadcast"):
-    if operation in INTENT_OPERATIONS:
-        return {"operation": operation, "intent": {"flags": 0x10000000 if operation == "startActivity" else 0}}
-    return {"operation": operation, "uri": "content://"}
-
-
 def render_sender_detail(record, current_revision=None):
     """Match noxen's section headings and aligned label/value details.
 

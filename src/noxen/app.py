@@ -547,9 +547,6 @@ class NoxenApp(App):
 
     def action_toggle_detail_view(self):
         self._detail_json = not self._detail_json
-        for button in ("#btn_history_view", "#btn_intercept_view"):
-            self.query_one(button, Button).label = "Details" if self._detail_json else "JSON"
-            self.query_one(button, Button).refresh(layout=True)
         self._refresh_history_detail()
         self._refresh_intercept_display()
 
@@ -1308,9 +1305,6 @@ class NoxenApp(App):
         elif event.button.id == "btn_history_sender":
             self.action_send_to_sender()
             return
-        elif event.button.id in ("btn_history_view", "btn_intercept_view"):
-            self.action_toggle_detail_view()
-            return
         elif event.button.id == "btn_history_stack":
             def _on_stack_confirm(show: bool, depth: int):
                 self._history_show_stack = show
@@ -1517,7 +1511,6 @@ class NoxenApp(App):
                     Label("", id="intercept_header_spacer"),
                     ModalButton("Filters", id="btn_intercept_filters"),
                     ModalButton("Stack", id="btn_intercept_stack"),
-                    ModalButton("JSON", id="btn_intercept_view"),
                     id="intercept_header",
                 )
                 yield Rule(classes="section_separator")
@@ -1601,7 +1594,6 @@ class NoxenApp(App):
                     yield ModalButton("Filters", id="btn_history_filters")
                     yield ModalButton("Stack", id="btn_history_stack")
                     yield ModalButton("To Sender", id="btn_history_sender")
-                    yield ModalButton("JSON", id="btn_history_view")
                     yield Label("", id="filter_bar_spacer")
                     yield Input(id="history_search", placeholder="Search", select_on_focus=False)
                     yield ModalButton("⊟", id="btn_columns")
@@ -1721,8 +1713,6 @@ class NoxenApp(App):
             "btn_history_filters",
             "btn_history_stack",
             "btn_history_sender",
-            "btn_history_view",
-            "btn_intercept_view",
             "btn_columns",
         ):
             self.query_one(f"#{btn_id}", Button).active_effect_duration = 0

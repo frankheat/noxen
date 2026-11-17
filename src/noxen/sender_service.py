@@ -171,7 +171,8 @@ class SenderService:
     def save_request(self, name, request, request_id=None, revision=0):
         if not isinstance(name, str) or not name.strip() or len(name) > 200 or not name.isprintable():
             raise SenderError("Request name must contain 1–200 printable characters")
-        valid = validate_request(request)
+        # An empty request is a new one whose operation is still to be chosen. It cannot be sent.
+        valid = {} if request == {} else validate_request(request)
         if request_id is None:
             if revision != 0:
                 raise SenderError("New requests require revision 0")
@@ -249,6 +250,8 @@ class SenderService:
         saved = self.get_request(request_id)
         if revision != saved["revision"]:
             raise SenderError("Request changed; reload it before sending")
+        if saved["request"] == {}:
+            raise SenderError("Choose an operation before sending this request")
         request = validate_request(saved["request"])
         run = dict(request_id=request_id, revision=revision, name=saved["name"], request=request,
                    sender=copy.deepcopy(self.identity), device=self.session.device_id,
