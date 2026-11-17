@@ -232,8 +232,8 @@ def render_sender_detail(record, current_revision=None):
     """Match noxen's section headings and aligned label/value details.
 
     A request shows its arguments. A run is shown result first, beside its
-    request; the request sections return only when the run used a revision
-    other than `current_revision`.
+    request; what was sent is listed only when the request has changed since
+    (the run's revision differs from `current_revision`).
     """
     from rich.text import Text
     from rich.pretty import Pretty
@@ -255,8 +255,7 @@ def render_sender_detail(record, current_revision=None):
         return text
 
     request = record["request"]
-    described = [section("REQUEST", [("Name", record["name"]), ("Operation", request["operation"]),
-                                     ("Revision", record["revision"])])]
+    described = [section("REQUEST", [("Name", record["name"]), ("Operation", request["operation"])])]
     arguments = [Text("[ARGUMENTS]", style="bold"),
                  Pretty({k: v for k, v in request.items() if k != "operation"}, expand_all=True, highlighter=lambda value: value)]
     if "sender" not in record:
@@ -288,7 +287,7 @@ def render_sender_detail(record, current_revision=None):
                                                      for p in identity["permissions"]]))
     if current_revision is None or record["revision"] == current_revision:
         return Group(*outcome, *sender)
-    note = Text(f"Sent as revision {record['revision']}; the request is now at revision {current_revision}.\n", style="dim")
+    note = Text("The request has changed since this run. It was sent as:\n", style="dim")
     return Group(*outcome, *sender, note, *described, *arguments)
 
 

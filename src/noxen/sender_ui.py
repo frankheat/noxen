@@ -20,6 +20,9 @@ from noxen import sender_json
 from noxen.sender_json_editor import JsonRequestEditor
 
 
+AUTOSAVE_DELAY = 0.8
+
+
 class SenderRenameModal(ModalScreen):
     """Rename a request. The name is what its tab shows."""
 
@@ -135,6 +138,9 @@ class SenderPane(Vertical):
         self._editor_key = None       # What the JSON editor shows: (request id, revision) or ("run", id).
         self._editor_baseline = ""    # Its text as saved, to tell edits apart.
         self._drafts = {}             # Unsaved text of requests that are not on screen.
+        self._autosave = None         # Pending timer of the automatic save.
+        self._retry_save = False      # The last save failed for a reason other than the text.
+        self._result_shown = None     # What the result panel currently describes.
 
     @property
     def service(self):
@@ -156,8 +162,6 @@ class SenderPane(Vertical):
                 with Horizontal(classes="side_header"):
                     yield ModalButton("Send", id="sender_send")
                     yield ModalButton("Cancel", id="sender_cancel_run", tooltip="Ask a running query or file read to stop")
-                    yield ModalButton("Save", id="sender_save")
-                    yield ModalButton("Revert", id="sender_revert")
                 yield JsonRequestEditor(id="sender_request_detail")
             with Vertical(classes="sender_side", id="sender_result_side"):
                 with Horizontal(classes="side_header"):
@@ -187,24 +191,38 @@ class SenderPane(Vertical):
 
     def show_editor_state(self):
         row, area = self.selected(), self.editor.area
-        dirty = self.editor_dirty()
-        self.query_one("#sender_save", Button).disabled = not dirty
-        self.query_one("#sender_revert", Button).disabled = not dirty
         if row is None or area.read_only:
             return
-        self.editor.say("Modified · Ctrl+S save" if self.editor_dirty() else
-                        f"Revision {row['revision']} · Ctrl+Space suggest · F2 fold")
+        self.editor.say("Editing…" if self.editor_dirty() else
+                        "Saved")
 
     def on_text_area_changed(self, event):
+        """Edits are saved on their own, a moment after typing stops."""
         event.stop()
         self.show_editor_state()
+        if self._autosave is not None:
+            self._autosave.stop()
+        self._autosave = self.set_timer(AUTOSAVE_DELAY, self.autosave) if self.editor_dirty() else None
 
-    def on_json_area_save(self, event):
-        event.stop()
-        self.save_editor()
+    def autosave(self):
+        self._autosave = None
+        if self.editor_dirty():
+            self.save_editor(quiet=True)
 
-    def save_editor(self):
-        """Save the JSON on screen as a new revision. Returns the saved request, or None if it is not valid."""
+    def flush_editor(self):
+        """Save typing that the automatic save has not reached yet, e.g. when noxen is closing."""
+        try:
+            if self.selected() is not None and self.editor_dirty():
+                self.save_editor(quiet=True)
+        except Exception:
+            pass  # The pane may already be coming down; an unsaved edit must not block closing.
+
+    def save_editor(self, quiet=False):
+        """Save the JSON on screen. Returns the saved request, or None if it is not valid.
+
+        `quiet` is the automatic save: text that is not valid yet is normal
+        while typing, so it is only noted, without moving the cursor.
+        """
         row, area, key = self.selected(), self.editor.area, self._editor_key
         if row is None or key is None or key[0] not in (row["id"], "run"):
             return None  # The editor has not caught up with the selected tab yet: nothing here belongs to it.
@@ -215,6 +233,11 @@ class SenderPane(Vertical):
             saved = self.service.save_request(row["name"], sender_json.parse(area.text, area.folds),
                                               row["id"], key[1])
         except (ValueError, OSError, sqlite3.Error) as error:
+            # Text that is not valid waits for the next edit; a storage failure is tried again.
+            self._retry_save = not isinstance(error, ValueError)
+            if quiet:
+                self.editor.say(f"Not saved yet · {error}")
+                return None
             self.editor.say(str(error), error=True)
             if (line := re.match(r"Line (\d+), column (\d+)", str(error))) and not area.folds:
                 area.move_cursor((int(line.group(1)) - 1, int(line.group(2)) - 1))
@@ -224,17 +247,8 @@ class SenderPane(Vertical):
         self._editor_key = (saved["id"], saved["revision"])
         self._requests = [dict(r, revision=saved["revision"], request=saved["request"]) if r["id"] == saved["id"] else r
                           for r in self._requests]
-        self.editor.say(f"Saved · revision {saved['revision']}")
-        self.query_one("#sender_save", Button).disabled = True
-        self.query_one("#sender_revert", Button).disabled = True
+        self.editor.say("Saved")
         return self.selected()
-
-    def revert_editor(self):
-        """Drop the unsaved JSON and show the saved request again."""
-        if self._editor_key is not None:
-            self._drafts.pop(self._editor_key[0], None)
-        self._editor_key, self._editor_baseline, self._signature = None, self.editor.area.full_text(), None
-        self.refresh_sender()
 
     def show_request_json(self, row, run):
         """Put the right text in the editor without discarding what the user is typing."""
@@ -251,16 +265,13 @@ class SenderPane(Vertical):
                 self._editor_key, self._editor_baseline = key, ""
                 area.read_only = True
                 area.load(sender_json.format_request(run["request"]))
-            note = f"As sent in run #{run['id']} · read only"
-            if run["revision"] != row["revision"]:
-                note += f" · the request is now at revision {row['revision']}"
-            self.editor.say(note)
+            self.editor.say(f"As sent in run #{run['id']} · read only")
         else:
             key = (row["id"], row["revision"])
-            same_request = self._editor_key is not None and self._editor_key[0] == row["id"]
-            if key != self._editor_key and same_request and self.editor_dirty():
-                self.editor.say(f"Changed elsewhere: Revert loads revision {row['revision']}", error=True)
-                return
+            if key != self._editor_key and self._editor_key is not None and self._editor_key[0] == row["id"]:
+                # Changed elsewhere (e.g. over MCP): show that. Text here that was never valid is dropped.
+                self._drafts.pop(row["id"], None)
+                self._editor_key, self._editor_baseline = None, self.editor.area.full_text()
             if key != self._editor_key:
                 self.stash_draft()
                 saved_text = sender_json.format_request(row["request"])
@@ -272,14 +283,15 @@ class SenderPane(Vertical):
         self.show_editor_state()
 
     def stash_draft(self):
-        """Keep unsaved text of the request leaving the editor, so switching tabs loses nothing."""
-        key = self._editor_key
-        if key is not None and key[0] != "run" and self.editor_dirty():
-            area = self.editor.area
+        """Keep what the automatic save cannot: text that is not valid yet, and which blocks are folded."""
+        key, area = self._editor_key, self.editor.area
+        if key is not None and key[0] != "run" and (self.editor_dirty() or area.folds):
             self._drafts[key[0]] = (area.text, dict(area.folds), key[1], self._editor_baseline)
 
     def select_request(self, request_id):
         if request_id != self._selected_id:
+            if self.selected() is not None and self.editor_dirty():
+                self.save_editor(quiet=True)  # Leave nothing valid unsaved behind; invalid text stays a draft.
             self._run_id = None
         self._selected_id = request_id
         for tab in self.query(RequestTab):
@@ -311,6 +323,9 @@ class SenderPane(Vertical):
         self.query_one("#sender_cancel_run", Button).disabled = not (
             row is not None and status["active_run"] is not None and status["active_run"] in self._run_ids[:1]
             and row["request"]["operation"] in ("query", "openFileDescriptor"))
+        if self._retry_save and self._autosave is None:
+            self._retry_save = False
+            self._autosave = self.set_timer(AUTOSAVE_DELAY, self.autosave)
         signature = (self.service.version, self._selected_id, self._run_id)
         if signature == self._signature:
             return
@@ -343,16 +358,20 @@ class SenderPane(Vertical):
             Text(f"Result · run {len(run_ids) - position} of {len(run_ids)}" if run_ids else "Result"))
         await self.show_tabs()
         row = self.selected()
-        result_log = self.query_one("#sender_run_detail", RichLog)
-        result_log.clear()
         # An earlier run is shown with the request exactly as it was sent.
         self.show_request_json(row, run)
-        if row is not None:
-            if run is None:
+        same_revision = run is not None and (self._run_id is not None or run["revision"] == row["revision"])
+        shown = (row and row["id"], run and (run["id"], run["state"], run.get("receivedAt")), same_revision)
+        if shown != self._result_shown:
+            # An automatic save alone leaves the result as it is, scroll position included.
+            self._result_shown = shown
+            result_log = self.query_one("#sender_run_detail", RichLog)
+            result_log.clear()
+            if row is not None and run is None:
                 result_log.write(Text("Not sent yet.", style="dim"))
-            else:
+            elif row is not None:
                 result_log.write(render_sender_detail(
-                    run, current_revision=run["revision"] if self._run_id is not None else row["revision"]))
+                    run, current_revision=run["revision"] if same_revision else row["revision"]))
         # A stale signature means the selection moved while this ran; read again.
         if (self.service.version, self._selected_id, self._run_id) != signature:
             self.refresh_sender()
@@ -534,10 +553,6 @@ class SenderPane(Vertical):
             elif button == "sender_new":
                 self.select_request(self.service.save_request(self.next_name(), empty_request())["id"])
                 self.editor.area.focus()
-            elif button == "sender_save":
-                self.save_editor()
-            elif button == "sender_revert":
-                self.revert_editor()
             elif button == "sender_cancel_run":
                 status = self.service.status()
                 if status["active_run"] is not None:

@@ -71,15 +71,14 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertIn('"data": null', area.text)
                 self.assertIn('"mimeType": ""', area.text)
                 self.assertNotIn("package", area.text)
-                area.load(area.text.replace('"mimeType": ""', '"mimeType": "", "package": null'))
-                await pilot.pause()
+                area.focus()
                 with patch.object(app.db, "save_sender_request", side_effect=sqlite3.OperationalError("disk full")):
-                    await pilot.click("#sender_save")
-                    await pilot.pause()
-                    self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
+                    # Edited while saving fails, so the automatic save cannot get in first.
+                    area.load(area.text.replace('"mimeType": ""', '"mimeType": "", "package": null'))
+                    await pilot.pause(1.2)
                     self.assertTrue(pane.editor_dirty())
-                await pilot.click("#sender_save")
-                await pilot.pause()
+                await pilot.pause(2.2)  # Saved on its own once it can be.
+                self.assertFalse(pane.editor_dirty())
                 self.assertEqual(app.db.sender_request(saved["id"])["request"]["intent"], {
                     "action": "one\ntwo\u0000three", "data": None, "mimeType": "", "package": None})
 
@@ -156,8 +155,7 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "login"])
                 self.assertEqual(pane.next_name(), "2")
                 self.assertFalse(pane.editor.query_one(".json_status").has_class("error"))
-                await pilot.click("#sender_save")
-                await pilot.pause(0.5)
+                await pilot.pause(1.2)
                 self.assertEqual(pane.selected()["request"]["intent"]["flags"], 16)
                 self.assertEqual(pane.selected()["name"], "login")
 
@@ -175,7 +173,7 @@ class SenderUITests(IsolatedAppTestCase):
                 # The request follows the run on screen, read only.
                 self.assertEqual(pane._editor_key, ("run", min(runs)))
                 self.assertTrue(pane.editor.area.read_only)
-                for button in ("#sender_send", "#sender_save", "#sender_cancel_run"):
+                for button in ("#sender_send", "#sender_cancel_run"):
                     widget = pane.query_one(button)  # Border and one space each side: no lopsided padding.
                     self.assertEqual(widget.region.width, len(str(widget.label)) + 4)
                 self.assertTrue(pane.query_one("#sender_run_older").disabled)
@@ -202,7 +200,6 @@ class SenderUITests(IsolatedAppTestCase):
                 area = pane.editor.area
                 self.assertEqual(area.text, '{\n    "operation": "sendBroadcast",\n    "intent": {\n'
                                             '        "action": "test.PING"\n    }\n}')
-                self.assertTrue(pane.query_one("#sender_save").disabled)
                 self.assertTrue(area._highlights[1])  # Colours do not depend on a grammar package.
 
                 # A new line, two letters, Enter: the name completes, with the comma the line above lacked.
@@ -221,7 +218,7 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.pause(0.2)
                 self.assertIn('        "action": "test.PING",\n        "extras": {\n'
                               '            "tok": {"type": "String", "value": ""}\n        }', area.text)
-                self.assertFalse(pane.query_one("#sender_save").disabled)
+                self.assertTrue(pane.editor_dirty())
 
                 # An opening brace closes itself on its own line; folding keeps the request intact.
                 area.move_cursor(area.document.end)
@@ -245,26 +242,20 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.pause(0.6)
                 self.assertEqual(sent[0]["intent"], {"action": "test.PING",
                                                      "extras": {"tok": {"type": "String", "value": ""}}})
-                self.assertEqual(service.db.sender_request(first["id"])["revision"], 2)
                 self.assertFalse(pane.editor_dirty())
 
-                # A request changed elsewhere is a conflict, not an overwrite; Revert loads the new revision.
+                # A request changed elsewhere is shown as changed; text here that never became valid is dropped.
                 area.focus()
                 area.move_cursor(area.document.end)
-                await pilot.press("space")
+                await pilot.press("x")
+                current = service.db.sender_request(first["id"])
                 service.save_request("1", {"operation": "sendBroadcast", "intent": {"action": "from.elsewhere"}},
-                                     first["id"], 2)
+                                     first["id"], current["revision"])
                 pane.refresh_sender()
-                await pilot.pause(0.6)
-                self.assertNotIn("from.elsewhere", area.text)
-                await pilot.press("ctrl+s")
-                await pilot.pause(0.2)
-                self.assertEqual(service.db.sender_request(first["id"])["request"]["intent"]["action"], "from.elsewhere")
-                self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
-                await pilot.click("#sender_revert")
                 await pilot.pause(0.6)
                 self.assertIn("from.elsewhere", area.text)
                 self.assertFalse(pane.editor_dirty())
+                self.assertEqual(service.db.sender_request(first["id"])["request"]["intent"]["action"], "from.elsewhere")
                 # While the editor still shows another request, saving or sending does nothing.
                 pane._selected_id = service.db.sender_requests()[1]["id"] if service.db.sender_requests()[1]["id"] != first["id"] \
                     else service.db.sender_requests()[0]["id"]
@@ -273,13 +264,17 @@ class SenderUITests(IsolatedAppTestCase):
                 pane.select_request(first["id"])
                 await pilot.pause(0.6)
 
-                # Invalid text is not saved.
+                # Invalid text is not saved, and Send does not send it.
+                before = service.db.sender_request(first["id"])
                 area.focus()
                 area.move_cursor(area.document.end)
-                await pilot.press("x", "ctrl+s")
-                await pilot.pause(0.2)
+                await pilot.press("x")
+                await pilot.pause(1.2)
+                self.assertEqual(service.db.sender_request(first["id"]), before)
+                await pilot.click("#sender_send")
+                await pilot.pause(0.4)
                 self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
-                self.assertEqual(service.db.sender_request(first["id"])["revision"], 3)
+                self.assertEqual(len(sent), 1)
 
     async def test_history_and_monitor_selections_are_sent_to_sender(self):
         with tempfile.TemporaryDirectory() as directory:

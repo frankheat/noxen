@@ -2791,6 +2791,7 @@ class NoxenApp(App):
                 ))
                 if exit_anyway:
                     break
+            self.query_one(SenderPane).flush_editor()
             await self.sender_service.disconnect(self.sender_service.token)
             self.sender_service.retry_save()
             while self.sender_service.unsaved:

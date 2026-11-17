@@ -5,7 +5,6 @@ from rich.text import Text
 from textual import events
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.message import Message
 from textual.widgets import Label, OptionList, TextArea
 from textual.widgets.option_list import Option
 from textual.widgets.text_area import Selection, TextAreaTheme
@@ -29,15 +28,11 @@ class CompletionList(OptionList):
 
 class JsonArea(TextArea):
     BINDINGS = [
-        Binding("ctrl+s", "save", "Save", priority=True),
         Binding("ctrl+@", "suggest", "Suggest", show=False, priority=True),
-        Binding("ctrl+space", "suggest", "Suggest", show=False, priority=True),
+        Binding("ctrl+space", "suggest", "Suggest", priority=True),
         Binding("f2", "fold", "Fold", priority=True),
         Binding("f3", "unfold_all", "Unfold all", priority=True),
     ]
-
-    class Save(Message):
-        pass
 
     def __init__(self, **kwargs):
         super().__init__("", soft_wrap=False, show_line_numbers=True, tab_behavior="indent", **kwargs)
@@ -155,9 +150,6 @@ class JsonArea(TextArea):
         offset = self.offset()
         self.set_text(self.full_text(), min(offset, len(self.full_text())))
         self.folds.clear()
-
-    def action_save(self):
-        self.post_message(self.Save())
 
     # ------------------------------------------------------------ keys
 
