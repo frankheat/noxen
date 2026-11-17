@@ -134,7 +134,7 @@ def _plain(literal):
         return literal.strip('"')
 
 
-def _kind(frames):
+def _kind(frames, root="request"):
     """What the innermost object describes: request, intent, bundle, entry, clip or item."""
     kind = None
     for index, frame in enumerate(frames):
@@ -145,7 +145,7 @@ def _kind(frames):
                 kind = None
             continue
         if parent is None:
-            kind = "request"
+            kind = root
         elif kind in ("items", "elements"):
             kind = "item" if kind == "items" else "intent"
         elif kind == "bundle":
@@ -163,7 +163,7 @@ def _kind(frames):
     return kind
 
 
-def context(text, offset):
+def context(text, offset, root="request"):
     """Describe the cursor: what is being typed, where it starts, and which names fit there."""
     before = text[:offset]
     last = None
@@ -182,7 +182,7 @@ def context(text, offset):
               "comma_at": None, "position": None}
     if top is None:
         return result
-    kind = _kind(frames)
+    kind = _kind(frames, root)
     root = frames[0].fields
     if top.bracket == "{" and top.state in ("key", "after"):
         result["position"] = "key"
@@ -219,9 +219,12 @@ def _entry_value(kind):
     return TYPE_DEFAULTS.get(kind, "0$0").replace("$0", "")
 
 
-def completions(text, offset, always=False):
-    """Matching (label, snippet) pairs, best first. Empty unless something was typed or `always`."""
-    found = context(text, offset)
+def completions(text, offset, always=False, root="request"):
+    """Matching (label, snippet) pairs, best first. Empty unless something was typed or `always`.
+
+    `root` is what the whole document is: a Sender "request", or an "intent" on its own.
+    """
+    found = context(text, offset, root)
     prefix = found["prefix"].casefold()
     if not prefix and not always:
         return found, []

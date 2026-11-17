@@ -744,124 +744,12 @@ SenderPane Select > SelectCurrent {
     color: $error;
     margin-top: 1;
 }
+/* The held Intent as JSON, in the place of the capture it edits. */
 #edit_form {
     display: none;
     height: 1fr;
     margin: 1 1;
-    background: $surface;
-    padding: 1 2;
-    overflow-y: auto;
 }
-.ef_row { height: 1; align: left middle; margin-bottom: 1; }
-.ef_label { width: 16; content-align: left middle; color: $foreground-muted; }
-.ef_row Input { padding: 0; }
-#ef_grant_row { height: auto; margin-bottom: 1; }
-#ef_grant_flags { height: auto; width: 1fr; }
-#ef_readonly_context { height: auto; display: none; }
-.ef_tree_line { height: auto; }
-.ef_tree_field { height: 1; }
-.ef_tree_label { width: auto; height: 1; }
-.ef_tree_field Input { width: 1fr; height: 1; padding: 0; }
-.ef_readonly_section { height: auto; }
-.ef_context_body { height: auto; }
-#ef_component_body, #ef_call_body { margin-bottom: 1; }
-.ef_section_header { height: 1; align: left middle; margin-bottom: 1; }
-.ef_add_header { height: 3; }
-.ef_add_header .ef_section { height: 3; content-align: left middle; }
-#ef_categories_header, #ef_extras_header { margin-bottom: 0; }
-.ef_section { width: auto; text-style: bold; color: $foreground; }
-.ef_section_meta { width: auto; margin-left: 2; color: $foreground-muted; }
-.ef_section_spacer { width: 1fr; }
-.ef_x_row { height: auto; min-height: 1; align: left top; }
-.ef_x_row Input { height: 1; }
-.ef_x_row ExtraValueInput { padding: 0 1; }
-.ef_extra_block, .ef_extra_tree { height: auto; }
-.ef_extra_tree { padding: 0 2; }
-.ef_value_cell, .ef_value_summary { width: 1fr; height: auto; }
-.ef_value_summary { padding: 0 1; }
-.ef_value_note { height: auto; padding-left: 1; color: $foreground-muted; }
-.ef_x_key_cell, .ef_x_key_input, .ef_x_key_header {
-    width: 30%; min-width: 18; max-width: 40;
-}
-.ef_x_key_cell { height: auto; }
-.ef_x_key_label {
-    width: 1fr; height: auto; min-height: 1; padding-right: 1;
-    text-wrap: wrap; text-overflow: fold;
-}
-.ef_x_key_label:focus { background: $boost; }
-.ef_x_key_label > .extra-key--ellipsis { color: $foreground-muted; }
-.ef_x_key_view {
-    width: auto; min-width: 0; height: 1; margin-top: 1;
-    padding: 0 1; border: none; background: $panel; color: $foreground-muted;
-    text-style: bold; tint: transparent; background-tint: $surface 0%;
-}
-.ef_x_key_view:hover, .ef_x_key_view:focus, .ef_x_key_view.-active {
-    color: $accent; background: $boost;
-}
-.ef_x_type_label, .ef_x_type_header, .ef_x_type_select { width: 16; }
-.ef_x_type_label { color: $foreground-muted; }
-.ef_x_columns { height: 1; color: $foreground-muted; text-style: bold; }
-.ef_x_value_header { width: 1fr; padding-left: 1; }
-.ef_x_remove_header { width: 5; margin-right: 2; }
-.ef_x_key_input { padding: 0; }
-.ef_x_type_select { height: 1; }
-.ef_x_type_select > SelectCurrent { border: none; height: 1; padding: 0 1 0 0; }
-.ef_x_type_select > SelectOverlay { width: 21; }
-.ef_x_rm {
-    width: 5;
-    height: 1;
-    border: none;
-    min-width: 5;
-    padding: 0;
-    margin-right: 2;
-    color: $foreground;
-    text-style: bold;
-    background: transparent;
-    tint: transparent;
-    background-tint: $surface 0%;
-}
-.ef_x_rm:hover, .ef_x_rm:focus, .ef_x_rm.-active {
-    color: $error;
-    text-style: bold;
-    background: transparent;
-    background-tint: $surface 0%;
-}
-#ef_extras {
-    height: auto;
-    layout: grid;
-    grid-size: 1;
-    grid-rows: auto;
-    grid-gutter: 1 0;
-}
-#ef_categories { height: auto; }
-#ef_categories.has-rows, #ef_extras.has-rows { padding: 0 0 1 0; }
-#ef_add_extra, #ef_add_cat {
-    width: auto;
-    min-width: 0;
-    height: 3;
-    border: round $foreground-muted;
-    padding: 0 1;
-    color: $foreground;
-    text-style: bold;
-    background: transparent;
-    tint: transparent;
-    background-tint: $surface 0%;
-}
-#ef_add_extra:hover, #ef_add_extra:focus,
-#ef_add_extra.-active,
-#ef_add_cat:hover, #ef_add_cat:focus, #ef_add_cat.-active {
-    color: $success;
-    text-style: bold;
-    border: round $success;
-    background: transparent;
-    background-tint: $surface 0%;
-}
-.ef_cat_row { height: 1; align: left middle; margin-top: 1; }
-.ef_cat_input { height: 1; padding: 0; }
-#edit_form Rule { margin: 1 0; }
-#edit_form Rule.ef_add_separator { margin-bottom: 0; }
-#ef_readonly_context Rule { margin: 0 0 1 0; }
-#ef_selector_body, #ef_clip_body { padding-bottom: 1; }
 #app_footer {
     dock: bottom;
     height: 1;
@@ -954,4 +842,4 @@ SenderPane #sender_new, SenderPane #sender_new:hover, SenderPane #sender_new:foc
 SenderPane #sender_new:hover, SenderPane #sender_new:focus { color: $accent; }
 
 /* Sender JSON editor: flat, like the read-only panes beside it. */
-SenderPane JsonArea, SenderPane JsonArea:focus { border: none; padding: 0; background: $background; }
+SenderPane JsonArea, SenderPane JsonArea:focus, #edit_form JsonArea, #edit_form JsonArea:focus { border: none; padding: 0; background: $background; }

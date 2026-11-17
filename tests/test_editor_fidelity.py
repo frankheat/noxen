@@ -7,13 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rich.text import Text
-from textual.widgets import Input
 
 from noxen.app import NoxenApp
 from noxen.db import ProjectDB
 from noxen.exporting import write_history_export
 from noxen.intent_mods import apply_mods_to_intent, confirmed_modification, diff_intents
-from noxen.rendering import render_edit_context, render_intent_detail
+from noxen.rendering import render_intent_detail
 from tests.ui_test_case import IsolatedAppTestCase
 
 
@@ -55,8 +54,6 @@ class FidelityTests(unittest.TestCase):
             matching = [line for line in plain.splitlines() if label in line and ":" in line]
             self.assertTrue(matching, label)
             self.assertTrue(all(line.rstrip().endswith('""') for line in matching), matching)
-        context = Text.from_markup(render_edit_context(info, {}, "getIntent")["selector"]).plain
-        self.assertIn('""', context)
         modified = {**info, "mimeType": None}
         changes = Text.from_markup(render_intent_detail({"id": 1, "intent": modified, "original_intent": info})).plain
         self.assertIn('"" → (none)', changes)
@@ -129,6 +126,12 @@ class FidelityEditorTests(IsolatedAppTestCase):
         app._enter_edit_mode()
         await pilot.pause()
 
+    def shown(self, app):
+        return json.loads(app.query_one("#edit_form").area.text)
+
+    def write(self, app, document):
+        app.query_one("#edit_form").area.load(json.dumps(document, indent=4))
+
     async def test_unchanged_categories_empty_fields_cancel_and_other_field_edits(self):
         app = self.make_app()
         categories = ["A", " A ", "   ", "", "\u00a0A\u00a0", "a\0b"]
@@ -138,12 +141,12 @@ class FidelityEditorTests(IsolatedAppTestCase):
                 app.theme = theme
                 for info in (intent(categories=categories), intent(action=None, data=None, mimeType=None, categories=categories)):
                     await self.open(app, pilot, info)
-                    self.assertEqual(app._collect_edit_draft(), info)
+                    document = self.shown(app)
+                    self.assertEqual(document["categories"], categories)  # Exact, empty and blank ones included.
                     self.assertEqual(app._collect_edit_mods(), [])
-                    app.query_one("#ef_action", Input).value = "NEW"
+                    self.write(app, {**document, "action": "NEW"})
                     self.assertEqual(app._collect_edit_mods(), [("action", "", "NEW", "")])
-                    self.assertEqual(app._collect_edit_draft()["categories"], categories)
-                    app.query_one("#ef_action", Input).value = info["action"] or ""
+                    self.write(app, document)
                     self.assertEqual(app._collect_edit_mods(), [])
                     app._exit_edit_mode()
                     await self.open(app, pilot, info)
@@ -151,24 +154,21 @@ class FidelityEditorTests(IsolatedAppTestCase):
                     self.assertEqual(app._current_intercepted_entry["intent"], info)
                     app._exit_edit_mode()
 
-    async def test_blank_new_rows_real_removal_and_exact_duplicates(self):
+    async def test_category_removal_addition_and_exact_duplicates(self):
         app = self.make_app()
         async with app.run_test(size=(120, 55)) as pilot:
             app.query_one("#main_tabs").active = "tab_intercept"
             await self.open(app, pilot, intent(categories=["", "A", " A "]))
-            app._add_edit_category_row("")
-            await pilot.pause()
-            self.assertEqual(app._collect_edit_mods(), [])
-            number = next(n for n, row in app._edit_cat_rows.items() if row["original"] == "A")
-            app.query_one(f"#ef_cv_{number}", Input).value = ""
+            document = self.shown(app)
+            self.write(app, {**document, "categories": ["", " A "]})
             self.assertEqual(app._collect_edit_mods(), [("cat_rem", "", "A", "")])
-            app._add_edit_category_row(" new ")
-            await pilot.pause()
+            self.write(app, {**document, "categories": ["", " A ", " new "]})
             self.assertIn(("cat_add", "", " new ", ""), app._collect_edit_mods())
-            app._add_edit_category_row(" A ")
-            await pilot.pause()
-            with self.assertRaisesRegex(ValueError, "Duplicate category"):
+            self.write(app, {**document, "categories": ["", "A", " A ", " A "]})
+            with self.assertRaisesRegex(ValueError, "duplicate category"):
                 app._collect_edit_mods()
+            self.write(app, {**document, "categories": ["A", " A "]})
+            self.assertEqual(app._collect_edit_mods(), [("cat_rem", "", "", "")])  # Only the empty one.
 
     async def test_commands_preserve_untouched_empty_fields_and_clear_explicitly(self):
         app = self.make_app()
@@ -176,29 +176,13 @@ class FidelityEditorTests(IsolatedAppTestCase):
             app.query_one("#main_tabs").active = "tab_intercept"
             await self.open(app, pilot, intent(categories=["A", " A "]))
             self.assertIsNone(app._apply_command_mod_to_editor(("cat_add", "", "", "")))
-            await pilot.pause()
-            self.assertEqual(app._collect_edit_draft()["categories"], ["A", " A ", ""])
+            self.assertEqual(self.shown(app)["categories"], ["A", " A ", ""])
             self.assertIsNone(app._apply_command_mod_to_editor(("cat_rem", "", " A ", "")))
-            await pilot.pause()
-            self.assertEqual(app._collect_edit_draft()["categories"], ["A", ""])
+            self.assertEqual(self.shown(app)["categories"], ["A", ""])
             self.assertIsNone(app._apply_command_mod_to_editor(("mime", "", "", "")))
-            await pilot.pause()
-            draft = app._collect_edit_draft()
-            self.assertIsNone(draft["mimeType"])
-            self.assertEqual(draft["action"], "")
-            self.assertEqual(draft["data"], "")
+            document = self.shown(app)
+            self.assertIsNone(document["mimeType"])
+            self.assertEqual(document["action"], "")
+            self.assertEqual(document["data"], "")
             self.assertIn(("mime", "", "", ""), app._collect_edit_mods())
 
-    async def test_remove_button_removes_only_the_selected_empty_category(self):
-        app = self.make_app()
-        async with app.run_test(size=(120, 55)) as pilot:
-            app.query_one("#main_tabs").active = "tab_intercept"
-            await self.open(app, pilot, intent(categories=["", "A", " A "]))
-            number = next(n for n, row in app._edit_cat_rows.items() if row["original"] == "")
-            button = app.query_one(f"#ef_crm_{number}")
-            button.scroll_visible(animate=False)
-            await pilot.pause()
-            await pilot.click(button)
-            await pilot.pause()
-            self.assertEqual(app._collect_edit_draft()["categories"], ["A", " A "])
-            self.assertEqual(app._collect_edit_mods(), [("cat_rem", "", "", "")])

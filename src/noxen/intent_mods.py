@@ -15,51 +15,12 @@ NESTED_INTENT_FIELDS = {
 }
 
 
-EXTRA_TYPE_OPTIONS = (
-    ("String", "string"),
-    ("Null string", "null"),
-    ("Boolean", "bool"),
-    ("Integer", "int"),
-    ("Long", "long"),
-    ("Float", "float"),
-    ("Double", "double"),
-    ("URI", "uri"),
-    ("Component", "component"),
-    ("Integer array", "int[]"),
-    ("Long array", "long[]"),
-    ("Float array", "float[]"),
-    ("Double array", "double[]"),
-    ("String array", "string[]"),
-    ("Integer list", "int-list"),
-    ("Long list", "long-list"),
-    ("Float list", "float-list"),
-    ("Double list", "double-list"),
-    ("String list", "string-list"),
-)
-
-EXTRA_VALUE_PLACEHOLDERS = {
-    "string": "hello",
-    "null": "not used",
-    "bool": "true",
-    "int": "5",
-    "long": "5000000000",
-    "float": "3.14",
-    "double": "3.1415926535",
-    "uri": "content://example/items/1",
-    "component": "com.example/.MainActivity",
-    "int[]": "1,2,3",
-    "long[]": "5000000000,6000000000",
-    "float[]": "1.5,2.5,3.5",
-    "double[]": "1.25,2.5,3.75",
-    "string[]": r"one,two,comma\,inside",
-    "int-list": "1,2,3",
-    "long-list": "5000000000,6000000000",
-    "float-list": "1.5,2.5,3.5",
-    "double-list": "1.25,2.5,3.75",
-    "string-list": r"one,two,comma\,inside",
-}
-
-VALID_EXTRA_TYPES = frozenset(value for _label, value in EXTRA_TYPE_OPTIONS)
+# Extra types the agent can set, as commands and the JSON editor name them.
+VALID_EXTRA_TYPES = frozenset((
+    "string", "null", "bool", "int", "long", "float", "double", "uri", "component",
+    "int[]", "long[]", "float[]", "double[]", "string[]",
+    "int-list", "long-list", "float-list", "double-list", "string-list",
+))
 
 EXTRA_TYPE_ALIASES = {
     "boolean": "bool",
@@ -126,13 +87,6 @@ _INTEGER_RANGES = {
 _FLOAT_RE = re.compile(
     r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?[fFdD]?$"
 )
-
-
-def java_type_display(java_type: str) -> str:
-    """Return a compact display name for a Java type."""
-    if not java_type:
-        return "-"
-    return java_type.replace("$", ".").rsplit(".", 1)[-1]
 
 
 def normalize_extra_type(extra_type: str) -> str | None:

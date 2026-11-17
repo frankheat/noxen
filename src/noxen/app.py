@@ -65,7 +65,6 @@ from noxen.exporting import (
     write_filter_export,
     write_history_export,
 )
-from noxen.extra_value_input import ExtraValueInput, extra_value_preview, needs_value_preview
 from noxen.filters import FilterManager
 from noxen.frida_devices import scan_devices
 from noxen.frida_session import FridaSession, SessionConfig
@@ -77,30 +76,21 @@ from noxen.sender import INTENT_OPERATIONS
 from noxen.sender_ui import SenderPane, SenderTabMenu
 from noxen.sender_capture import (capture_as_request, capture_operation, prepare_component_request,
                                   prepare_intent_request, prepare_monitor_request)
-from noxen.sender_json import format_request
-from noxen.sender_json_editor import json_text
+from noxen.sender_json import format_request, parse as parse_json
+from noxen.sender_json_editor import JsonRequestEditor, json_text
+from noxen.intercept_json import apply_mod_to_json, editable_intent, json_to_mods
 from noxen.intent_mods import (
-    EXTRA_TYPE_OPTIONS,
-    EXTRA_VALUE_PLACEHOLDERS,
-    JAVA_TYPE_TO_SIMPLE,
     NESTED_INTENT_FIELDS,
-    apply_mods_to_intent,
     confirmed_modification,
-    diff_intents,
     nested_intent_fields,
     nested_intents,
     nested_mod_path,
-    java_type_display,
-    normalize_component,
-    parse_flag_value,
     parse_intent_mod_command,
-    validate_extra_value,
 )
 from noxen.logging_ui import is_debug_log, log_debug, log_error, log_info, log_success, log_warning
 from noxen.modals import (
     ColumnSelectModal,
     CrashesModal,
-    ExtraKeyModal,
     FileBrowserModal,
     HelpModal,
     FilterModal,
@@ -112,9 +102,6 @@ from noxen.rendering import (
     history_search_text,
     payload_to_history_entry,
     render_intent_detail,
-    render_edit_context,
-    render_edit_tree,
-    format_uri_grant_flags,
 )
 from noxen.settings import DARK_THEME, LIGHT_THEME, load_settings, save_settings
 from noxen.system_server_session import SystemServerConfig, SystemServerSession
@@ -149,61 +136,6 @@ INTERCEPT_ACTION_BUTTON_CLASSES = (
     "drop-ready",
     "edit-ready",
 )
-
-
-class ExtraKeyLabel(Label):
-    """Bounded plain-text preview; the original key stays available on demand."""
-
-    BINDINGS = [("enter", "view_key", "View key")]
-    FOCUS_ON_CLICK = False
-    COMPONENT_CLASSES = {"extra-key--ellipsis"}
-    PREVIEW_LIMIT = 96
-
-    def __init__(self, key: str):
-        # Escape control characters only in the preview, never in the stored key.
-        preview = "".join(char if char.isprintable() else repr(char)[1:-1]
-                          for char in key[:self.PREVIEW_LIMIT])
-        self.truncated = len(key) > self.PREVIEW_LIMIT or len(preview) > self.PREVIEW_LIMIT
-        preview = preview[:self.PREVIEW_LIMIT]
-        self._preview = preview
-        super().__init__(Text(preview + ("…" if self.truncated else "")), classes="ef_x_key_label")
-        self._key = key
-        self.can_focus = self.truncated
-
-    def notify_style_update(self) -> None:
-        super().notify_style_update()
-        if self.is_mounted and self.truncated:
-            self.call_after_refresh(self._update_preview)
-
-    def _update_preview(self) -> None:
-        text = Text(self._preview)
-        if self.truncated:
-            text.append("…", self.get_component_rich_style("extra-key--ellipsis"))
-        self.update(text)
-
-    def on_mount(self) -> None:
-        self._update_preview()
-
-    def on_resize(self, event: events.Resize) -> None:
-        self.can_focus = self.truncated or event.size.height > 1
-        self.tooltip = "Click or press Enter to view the full key" if self.can_focus else None
-        if not self.can_focus and self.has_focus:
-            self.blur()
-
-    def action_view_key(self):
-        if self.can_focus:
-            self.app.push_screen(ExtraKeyModal(self._key))
-
-    def on_click(self, event: events.Click):
-        event.stop()
-        self.action_view_key()
-
-
-class _EditValidationError(ValueError):
-    def __init__(self, message: str, selector: str, title: str = "Invalid extra"):
-        super().__init__(message)
-        self.selector = selector
-        self.title = title
 
 
 def markup_renderable(markup: str, dark: bool = True) -> Text:
@@ -379,13 +311,8 @@ class NoxenApp(App):
         self._intent_blocked = False
         self._edit_mode = False
         self._edit_forward_pending = False
-        self._edit_extra_counter = 0
-        self._edit_path_ids = count()
-        self._edit_nested_fields = []
-        self._edit_extra_rows: dict = {}
-        self._edit_display_info: dict = {}
-        self._edit_cat_counter = 0
-        self._edit_cat_rows: dict = {}
+        self._edit_shown: dict = {}     # The Intent JSON the editor opened with.
+        self._edit_notes: list = []     # What that JSON leaves out because it was not captured in full.
         self._staged_mods: list = []
         self._active_tab = "tab_intercept"
         self._startup_messages = []
@@ -591,16 +518,26 @@ class NoxenApp(App):
         if self._current_intent_is_null():
             self.write_cmd("[red]Cannot edit: Intent is null[/red]")
             return
-        original = self._current_intercepted_entry.get("intent", {}) or {}
-        draft = apply_mods_to_intent(original, self._staged_mods)
+        shown, notes = editable_intent(self._current_intercepted_entry)
+        draft = shown
+        try:
+            # Commands staged before opening the editor are part of what it shows.
+            for mod in self._staged_mods:
+                draft = apply_mod_to_json(draft, mod)
+        except ValueError as error:
+            self.write_cmd(f"[red]Cannot open the editor: {error}. Forward, drop or remove the staged change first.[/red]")
+            return
         self._staged_mods.clear()
-        self._populate_edit_form(draft)
+        self._edit_shown = shown
+        editor = self.query_one("#edit_form", JsonRequestEditor)
+        editor.area.read_only = False
+        editor.area.load(format_request(draft))
+        self._edit_notes = notes
+        self._show_edit_state()
 
         self.query_one("#intercept_output").display = False
-        ef = self.query_one("#edit_form")
-        ef.display = True
-        ef.disabled = False
-        ef.scroll_home(animate=False)
+        editor.display = True
+        editor.disabled = False
         self._edit_mode = True
         self._edit_forward_pending = False
         forward_button = self.query_one("#btn_forward", Button)
@@ -610,149 +547,22 @@ class NoxenApp(App):
         edit_button = self.query_one("#btn_edit", Button)
         edit_button.display = False
         self.refresh_bindings()
+        editor.area.focus()
 
-    def _populate_edit_form(self, info: dict) -> None:
-        self._edit_display_info = info
-
-        for field, widget in (
-            ("component", "component"), ("action", "action"), ("data", "data"), ("mimeType", "mime"),
-        ):
-            value = info.get(field) or ""
-            preview_only = needs_value_preview(value)
-            control = self.query_one(f"#ef_{widget}", Input)
-            control.value = extra_value_preview(value) if preview_only else value
-            control.disabled = preview_only or field in info.get("truncatedFields", [])
-            control.tooltip = "Read-only captured value" if control.disabled else None
-        warnings = self.query_one("#ef_capture_errors", Static)
-        warnings.update(Text("\n".join(info.get("errors") or [])))
-        warnings.display = bool(info.get("errors"))
-
-        self.query_one("#ef_categories").remove_children()
-        self.query_one("#ef_categories").remove_class("has-rows")
-        self._edit_cat_rows = {}
-        for cat in (info.get("categories", []) or []):
-            self._add_edit_category_row(cat, is_new=False)
-
-        self.query_one("#ef_extras").remove_children()
-        self.query_one("#ef_extras").remove_class("has-rows")
-        self._edit_extra_rows = {}
-        original_extras = (
-            (self._current_intercepted_entry or {}).get("intent", {}).get("extras", {}) or {}
-        )
-        self._edit_nested_fields = []
-        editable_nodes = {
-            id(node): (path, {field: value for field, value in nested_intent_fields(node).items()
-                             if not needs_value_preview(value or "")})
-            for path, node in nested_intents(info)
-        }
-        for key, extra in (info.get("extras", {}) or {}).items():
-            java_type = extra.get("type") or ""
-            simple_type = None if extra.get("editable") is False else (
-                extra.get("noxenType") or JAVA_TYPE_TO_SIMPLE.get(java_type)
-            )
-            original_extra = original_extras.get(key)
-            original_type = None if original_extra is None else (
-                original_extra.get("noxenType")
-                or JAVA_TYPE_TO_SIMPLE.get(original_extra.get("type") or "")
-            )
-            is_new = original_extra is None or (
-                simple_type is not None and simple_type != original_type
-            )
-            structured = extra.get("structured")
-            tree = ()
-            if not is_new and simple_type is None and isinstance(structured, dict):
-                if structured.get("kind") in {"bundle", "intent", "clipdata", "array", "list"}:
-                    tree = self._edit_tree(structured, editable_nodes)
-            self._add_edit_extra_row(
-                key,
-                simple_type,
-                str(extra.get("value", "") or ""),
-                is_new=is_new,
-                java_type=java_type,
-                removable=not extra.get("keyTruncated", False),
-                tree=tree,
-            )
-
-        flags_val = info.get("flags") or 0
-        try:
-            self.query_one("#ef_flags", Input).value = hex(int(flags_val)) if flags_val else ""
-        except Exception:
-            self.query_one("#ef_flags", Input).value = ""
-
-        entry = self._current_intercepted_entry or {}
-        attack_surface = entry.get("attackSurface") or {}
-        context = render_edit_context(info, attack_surface, entry.get("method"), include_trees=False)
-        for key in ("call", "component"):
-            body = self.query_one(f"#ef_{key}_body", Static)
-            text = context.get(key, "")
-            if key == "component":
-                text = text.partition("\n")[2]  # The name is already in its editable Input.
-            body.display = bool(text)
-            body.update(self._render_markup(text))
-        self.query_one("#ef_routing_section").display = "routing" in context
-        self.query_one("#ef_routing_body", Static).update(self._render_markup(context.get("routing", "")))
-        has_tree = False
-        for key, widget in (("selector", "selector"), ("clipData", "clip")):
-            root = info.get(key)
-            visible = isinstance(root, dict) and attack_surface.get("intentPresent") is not False
-            self.query_one(f"#ef_{widget}_section").display = visible
-            body = self.query_one(f"#ef_{widget}_body", Vertical)
-            body.remove_children()
-            if visible:
-                has_tree = True
-                body.mount(*self._edit_tree(root, editable_nodes,
-                                           attack_surface=attack_surface if key == "selector" else None))
-        self.query_one("#ef_readonly_context").display = has_tree
-        self._update_edit_grant_flags()
-
-    def _edit_tree(self, root, editable_nodes, *, attack_surface=None):
-        widgets = []
-        rows = render_edit_tree(root, editable_nodes, attack_surface=attack_surface)
-        for markup, label, path, field, captured in rows:
-            text = self._render_markup(markup)
-            if field is None:
-                widgets.append(Static(text, classes="ef_tree_line", markup=False))
-                continue
-            control_id = f"ef_path_{next(self._edit_path_ids)}"
-            self._edit_nested_fields.append((path, field, captured, control_id))
-            text.append(label, style="dim")
-            text.pad_right(max(0, 16 - len(label)))
-            widgets.append(Horizontal(
-                Static(text, classes="ef_tree_label", markup=False),
-                ExtraValueInput(value=captured or "", placeholder="(none)", id=control_id,
-                                classes=f"ef_nested_{field}"),
-                classes="ef_tree_field",
-            ))
-        return widgets
-
-    def _update_edit_component_context(self) -> None:
-        value = self.query_one("#ef_component", Input).value.strip()
-        text = ""
-        try:
-            normalize_component(value)
-        except ValueError:
-            pass  # Do not show stale permissions while an incomplete name is typed.
+    def _show_edit_state(self, error: str | None = None) -> None:
+        """The editor's status line: an error, or what the JSON leaves out and keeps as it is."""
+        editor = self.query_one("#edit_form", JsonRequestEditor)
+        if error:
+            editor.say(error, error=True)
+            return
+        notes = self._edit_notes
+        if not notes:
+            editor.say("Changes apply when you forward")
+        elif len(notes) == 1:
+            editor.say(f"Not captured in full, so left out here and kept as it is: {notes[0]}")
         else:
-            entry = self._current_intercepted_entry or {}
-            # Only this field is changing; do not re-render nested trees per keypress.
-            info = {"component": value or None}
-            context = render_edit_context(info, entry.get("attackSurface") or {}, entry.get("method"),
-                                          include_trees=False)
-            text = context.get("component", "").partition("\n")[2]
-        body = self.query_one("#ef_component_body", Static)
-        body.display = bool(text)
-        body.update(self._render_markup(text))
-
-    def _update_edit_grant_flags(self) -> None:
-        text = self.query_one("#ef_flags", Input).value.strip()
-        flags = parse_flag_value(text) if text else 0
-        hint = self.query_one("#ef_grant_flags", Static)
-        has_context = any(isinstance(self._edit_display_info.get(key), dict) for key in ("selector", "clipData"))
-        self.query_one("#ef_grant_row").display = has_context or flags is None or bool(flags & 0xC3)
-        if flags is None:
-            hint.update("unavailable (invalid 32-bit Flags value)")
-        else:
-            hint.update(self._render_markup(f"{format_uri_grant_flags(flags)} [dim](requested)[/dim]"))
+            editor.say(f"{len(notes)} values not captured in full are left out here and kept as they are: "
+                       + "; ".join(notes))
 
     def _exit_edit_mode(self):
         if not self._edit_mode:
@@ -764,7 +574,8 @@ class NoxenApp(App):
         self._edit_mode = False
         self._edit_forward_pending = False
         self._staged_mods.clear()
-        self._edit_display_info = {}
+        self._edit_shown = {}
+        self._edit_notes = []
         forward_button = self.query_one("#btn_forward", Button)
         forward_button.label = "Forward"
         forward_button.remove_class("apply-forward")
@@ -799,13 +610,6 @@ class NoxenApp(App):
         self._set_edit_forward_pending(False)
         self.notify(message, title="Apply & Forward failed", severity="error")
 
-    def _show_edit_validation_error(self, error: _EditValidationError) -> None:
-        self.notify(str(error), title=error.title, severity="error")
-        try:
-            self.query_one(error.selector).focus()
-        except Exception:
-            pass
-
     def _mod_safety_error(self, mod: tuple) -> str | None:
         if self._current_intent_is_null():
             return "Cannot modify: Intent is null"
@@ -827,242 +631,53 @@ class NoxenApp(App):
 
     def _apply_command_mod_to_editor(self, mod: tuple) -> str | None:
         if not self._edit_mode:
-            return "The visual Intent editor is no longer active"
+            return "The Intent editor is no longer active"
         if self._edit_forward_pending:
             return "Apply & Forward is already in progress"
         if error := self._mod_safety_error(mod):
             return error
+        area = self.query_one("#edit_form", JsonRequestEditor).area
         try:
-            draft = self._collect_edit_draft(mod)
-        except _EditValidationError as error:
-            self._show_edit_validation_error(error)
-            return f"Command not applied: {error}"
-        self._populate_edit_form(draft)
+            doc = parse_json(area.text, area.folds)
+        except ValueError as error:
+            return f"Fix the JSON before applying a command: {error}"
+        try:
+            doc = apply_mod_to_json(doc, mod)
+        except ValueError as error:
+            return str(error)
+        area.load(format_request(doc))
+        self._show_edit_state()
         return None
 
-    def _add_edit_category_row(self, value: str, *, is_new: bool = True):
-        self._edit_cat_counter += 1
-        n = self._edit_cat_counter
-        preview_only = needs_value_preview(value)
-        self._edit_cat_rows[n] = {"original": value, "read_only": preview_only, "is_new": is_new}
-        row = Horizontal(
-            ExtraValueInput(id=f"ef_cv_{n}", value=extra_value_preview(value) if preview_only else value,
-                  disabled=preview_only,
-                  placeholder='"" (empty category)' if not is_new and value == "" else "e.g. android.intent.category.DEFAULT",
-                  classes="ef_cat_input"),
-            Button(Text("[×]"), id=f"ef_crm_{n}", classes="ef_x_rm"),
-            id=f"ef_cat_{n}", classes="ef_cat_row",
-        )
-        self.query_one("#ef_categories").mount(row)
-        self.query_one("#ef_categories").add_class("has-rows")
-
-    def _add_edit_extra_row(
-        self,
-        key: str,
-        simple_type,
-        value: str,
-        is_new: bool,
-        java_type: str = "",
-        removable: bool = True,
-        tree=(),
-    ):
-        self._edit_extra_counter += 1
-        n = self._edit_extra_counter
-        self._edit_extra_rows[n] = {
-            "key": key, "is_new": is_new, "type": simple_type or "string", "is_tree": bool(tree),
-        }
-        if simple_type == "null":
-            value = ""
-        preview_only = needs_value_preview(value)
-        self._edit_extra_rows[n]["value_read_only"] = preview_only
-        if tree:
-            summary = extra_value_preview(value) if preview_only else value
-            value_cell = Static(Text(summary), id=f"ef_xv_{n}", classes="ef_value_summary")
-        else:
-            value_input = ExtraValueInput(
-                id=f"ef_xv_{n}",
-                value=extra_value_preview(value) if preview_only else value,
-                disabled=preview_only or (simple_type is None and not is_new) or simple_type == "null",
-                placeholder=EXTRA_VALUE_PLACEHOLDERS.get(simple_type or "string", "value") if is_new else "",
-            )
-            value_cell = Vertical(
-                value_input,
-                Label("Read-only · escaped value", classes="ef_value_note"),
-                classes="ef_value_cell",
-            ) if preview_only else value_input
-        if is_new:
-            selected_type = simple_type or "string"
-            row = Horizontal(
-                Input(id=f"ef_xk_{n}", value=key, placeholder="key", classes="ef_x_key_input", disabled=preview_only),
-                Select(EXTRA_TYPE_OPTIONS, id=f"ef_xt_{n}", value=selected_type,
-                       allow_blank=False, classes="ef_x_type_select", disabled=preview_only),
-                value_cell,
-                Button(Text("[×]"), id=f"ef_xrm_{n}", classes="ef_x_rm"),
-                id=None if tree else f"ef_x_{n}", classes="ef_x_row",
-            )
-        else:
-            type_label = simple_type or java_type_display(java_type)
-            key_label = ExtraKeyLabel(key)
-            key_widgets = [key_label]
-            if key_label.truncated:
-                key_widgets.append(ModalButton("View full key", id=f"ef_xview_{n}", classes="ef_x_key_view"))
-            row = Horizontal(
-                Vertical(*key_widgets, classes="ef_x_key_cell"),
-                Label(type_label, classes="ef_x_type_label"),
-                value_cell,
-                Button(Text("[×]"), id=f"ef_xrm_{n}", classes="ef_x_rm", disabled=not removable),
-                id=None if tree else f"ef_x_{n}", classes="ef_x_row",
-            )
-
-        if tree:
-            row = Vertical(row, Vertical(*tree, classes="ef_extra_tree"),
-                           id=f"ef_x_{n}", classes="ef_extra_block")
-        self.query_one("#ef_extras").mount(row)
-        self.query_one("#ef_extras").add_class("has-rows")
-
-    def _collect_edit_draft(self, pending_mod: tuple | None = None) -> dict:
-        """Validate the resulting draft, including an optional command, before publishing it."""
-        mod_type, mod_key, mod_value, mod_extra_type = pending_mod or ("", "", "", "")
-        original = (self._current_intercepted_entry or {}).get("intent", {}) or {}
-        draft = apply_mods_to_intent(original, [])
-        component_input = self.query_one("#ef_component", Input)
-        component = mod_value if mod_type == "component" else component_input.value
-        try:
-            if component_input.disabled and mod_type != "component":
-                draft["component"] = self._edit_display_info.get("component")
-            else:
-                draft["component"] = normalize_component(component) or None
-        except ValueError as error:
-            raise _EditValidationError(str(error), "#ef_component", title="Invalid component") from None
-        for field, widget in (("action", "action"), ("data", "data"), ("mimeType", "mime")):
-            control = self.query_one(f"#ef_{widget}", Input)
-            captured = self._edit_display_info.get(field)
-            if control.disabled or control.value == (captured or ""):
-                draft[field] = captured
-            else:
-                draft[field] = control.value or None
-
-        categories = []
-        for n, category_info in self._edit_cat_rows.items():
-            value = (
-                category_info["original"] if category_info.get("read_only")
-                else self.query_one(f"#ef_cv_{n}", Input).value
-            )
-            unchanged = not category_info.get("is_new") and value == category_info["original"]
-            if (value == "" and not unchanged) or (mod_type == "cat_rem" and value == mod_value):
-                continue
-            if value in categories:
-                raise _EditValidationError(
-                    f"Duplicate category: {value}",
-                    f"#ef_cv_{n}",
-                    title="Invalid category",
-                )
-            categories.append(value)
-        draft["categories"] = categories
-
-        extras = {}
-        displayed_extras = self._edit_display_info.get("extras", {}) or {}
-        for n, row_info in self._edit_extra_rows.items():
-            if row_info["is_new"]:
-                key = self.query_one(f"#ef_xk_{n}", Input).value.strip()
-                extra_type = str(self.query_one(f"#ef_xt_{n}", Select).value)
-                value = self.query_one(f"#ef_xv_{n}", Input).value
-                if not key:
-                    if value:
-                        raise _EditValidationError(
-                            "Extra key is required",
-                            f"#ef_xk_{n}",
-                        )
-                    continue
-            else:
-                key = row_info["key"]
-                extra_type = row_info["type"]
-                control = self.query_one(f"#ef_xv_{n}")
-                value = control.value if isinstance(control, Input) else ""
-
-            # The command removes/replaces every row with this key, so its old
-            # invalid values or duplicates are not part of the resulting draft.
-            if mod_type in {"extra_add", "extra_rem"} and key == mod_key:
-                if mod_type == "extra_add":
-                    extras.setdefault(key, {})  # Preserve the first row's position until replacement.
-                continue
-
-            if key in extras:
-                raise _EditValidationError(
-                    f"Duplicate extra key: {key}",
-                    f"#ef_xk_{n}" if row_info["is_new"] else f"#ef_xv_{n}",
-                )
-
-            snapshot = displayed_extras.get(key)
-            if snapshot is not None and (
-                snapshot.get("editable") is False or row_info.get("value_read_only") or row_info["is_tree"]
-            ):
-                extras[key] = copy.deepcopy(snapshot)
-                continue
-
-            displayed_value = "" if snapshot is None else str(snapshot.get("value", "") or "")
-            if not row_info["is_new"] and snapshot is not None and value == displayed_value:
-                extras[key] = copy.deepcopy(snapshot)
-                continue
-
-            error = validate_extra_value(extra_type, value)
-            if error:
-                raise _EditValidationError(
-                    f"{key}: {error}",
-                    f"#ef_xv_{n}",
-                )
-            rebuild_mods = []
-            if snapshot is not None:
-                rebuild_mods.append(("extra_rem", key, "", ""))
-            rebuild_mods.append(("extra_add", key, value, extra_type))
-            rebuilt = apply_mods_to_intent(
-                {"extras": {key: snapshot} if snapshot is not None else {}},
-                rebuild_mods,
-            )
-            extras[key] = rebuilt["extras"][key]
-        draft["extras"] = extras
-        nodes = dict(nested_intents(draft))
-        for path, field, captured, control_id in self._edit_nested_fields:
-            if path not in nodes:
-                continue
-            selector = f"#{control_id}"
-            entered = self.query_one(selector, Input).value
-            if entered != (captured or ""):
-                try:
-                    nodes[path][field] = (normalize_component(entered) if field == "component" else entered) or None
-                except ValueError as error:
-                    raise _EditValidationError(str(error), selector, title="Invalid component") from None
-
-        flags_text = self.query_one("#ef_flags", Input).value.strip()
-        flags = parse_flag_value(flags_text) if flags_text else 0
-        if flags is None:
-            raise _EditValidationError(
-                "Flags must be a 32-bit integer or bit mask, for example 0x10000000",
-                "#ef_flags",
-                title="Invalid flags",
-            )
-        draft["flags"] = flags
-        if mod_type == "extra_add":
-            error = validate_extra_value(mod_extra_type, mod_value)
-            if error:
-                raise _EditValidationError(f"{mod_key}: {error}", "#ef_add_extra")
-        return apply_mods_to_intent(draft, [pending_mod]) if pending_mod else draft
-
     def _collect_edit_mods(self) -> list:
-        original = (self._current_intercepted_entry or {}).get("intent", {}) or {}
-        return diff_intents(original, self._collect_edit_draft())
+        """The changes typed in the JSON editor, as staged modifications. Raises ValueError when invalid."""
+        area = self.query_one("#edit_form", JsonRequestEditor).area
+        edited = parse_json(area.text, area.folds)
+        captured = (self._current_intercepted_entry or {}).get("intent", {}) or {}
+        mods = json_to_mods(captured, self._edit_shown, edited)
+        for mod in mods:
+            if error := self._mod_safety_error(mod):
+                raise ValueError(error)
+        return mods
 
     def _forward_from_edit_mode(self):
-        """Validate the form and keep it open until Frida confirms forwarding."""
+        """Apply the JSON and keep the editor open until Frida confirms forwarding."""
         if not self._edit_mode or self._edit_forward_pending:
             return
         try:
             mods = self._collect_edit_mods()
-        except _EditValidationError as error:
-            self._show_edit_validation_error(error)
+        except ValueError as error:
+            self._show_edit_error(error)
             return
         self._set_edit_forward_pending(True)
         self._apply_mods_and_forward_worker(mods)
+
+    def _show_edit_error(self, error: ValueError) -> None:
+        self._show_edit_state(str(error))
+        area = self.query_one("#edit_form", JsonRequestEditor).area
+        if (line := re.match(r"Line (\d+), column (\d+)", str(error))) and not area.folds:
+            area.move_cursor((int(line.group(1)) - 1, int(line.group(2)) - 1))
+        area.focus()
 
     @work(thread=True)
     def _apply_mods_and_forward_worker(self, mods: list):
@@ -1225,34 +840,6 @@ class NoxenApp(App):
             return
         elif event.button.id == "btn_cancel_edit":
             self._exit_edit_mode()
-            return
-        elif event.button.id == "ef_add_extra":
-            self._add_edit_extra_row("", None, "", is_new=True)
-            return
-        elif event.button.id == "ef_add_cat":
-            self._add_edit_category_row("", is_new=True)
-            return
-        elif (event.button.id or "").startswith("ef_xview_"):
-            n = int(event.button.id.split("_")[-1])
-            self.app.push_screen(ExtraKeyModal(self._edit_extra_rows[n]["key"]))
-            return
-        elif (event.button.id or "").startswith("ef_crm_"):
-            n = int(event.button.id.split("_")[-1])
-            self._edit_cat_rows.pop(n, None)
-            self.query_one("#ef_categories").set_class(bool(self._edit_cat_rows), "has-rows")
-            try:
-                self.query_one(f"#ef_cat_{n}").remove()
-            except Exception:
-                pass
-            return
-        elif (event.button.id or "").startswith("ef_xrm_"):
-            n = int(event.button.id.split("_")[-1])
-            self._edit_extra_rows.pop(n, None)
-            self.query_one("#ef_extras").set_class(bool(self._edit_extra_rows), "has-rows")
-            try:
-                self.query_one(f"#ef_x_{n}").remove()
-            except Exception:
-                pass
             return
         elif event.button.id == "btn_intercept_filters":
             self.push_screen(FilterModal(
@@ -1507,64 +1094,7 @@ class NoxenApp(App):
                 )
                 yield Rule(classes="section_separator")
                 yield RichLog(id="intercept_output", markup=True, highlight=False, auto_scroll=False)
-                with VerticalScroll(id="edit_form"):
-                    with Vertical(id="ef_routing_section", classes="ef_readonly_section"):
-                        with Horizontal(classes="ef_section_header"):
-                            yield Label("Routing", classes="ef_section")
-                            yield Label("Derived from capture", classes="ef_section_meta")
-                        yield Static(id="ef_routing_body", classes="ef_context_body", markup=False)
-                        yield Rule(classes="section_separator")
-                    yield Static(id="ef_call_body", classes="ef_context_body", markup=False)
-                    with Horizontal(classes="ef_section_header"):
-                        yield Label("Base Intent", id="ef_mode_label", classes="ef_section")
-                    yield Static(id="ef_capture_errors", classes="ef_context_body", markup=False)
-                    with Horizontal(classes="ef_row"):
-                        yield Label("Component", classes="ef_label")
-                        yield ExtraValueInput(id="ef_component", placeholder="e.g. com.example/.MainActivity")
-                    yield Static(id="ef_component_body", classes="ef_context_body", markup=False)
-                    with Horizontal(classes="ef_row"):
-                        yield Label("Action", classes="ef_label")
-                        yield ExtraValueInput(id="ef_action", placeholder="e.g. android.intent.action.VIEW")
-                    with Horizontal(classes="ef_row"):
-                        yield Label("Data URI", classes="ef_label")
-                        yield ExtraValueInput(id="ef_data", placeholder="e.g. https://example.com")
-                    with Horizontal(classes="ef_row"):
-                        yield Label("MIME Type", classes="ef_label")
-                        yield ExtraValueInput(id="ef_mime", placeholder="e.g. application/pdf")
-                    with Horizontal(classes="ef_row"):
-                        yield Label("Flags", classes="ef_label")
-                        yield Input(id="ef_flags", placeholder="e.g. 0x10000000")
-                    with Horizontal(id="ef_grant_row"):
-                        yield Label("URI grants", classes="ef_label")
-                        yield Static(id="ef_grant_flags", markup=False)
-                    yield Rule(classes="section_separator ef_add_separator")
-                    with Horizontal(id="ef_categories_header", classes="ef_section_header ef_add_header"):
-                        yield Label("Categories", classes="ef_section")
-                        yield Label("", classes="ef_section_spacer")
-                        yield Button("+ Add", id="ef_add_cat")
-                    yield Vertical(id="ef_categories")
-                    yield Rule(classes="section_separator ef_add_separator")
-                    with Horizontal(id="ef_extras_header", classes="ef_section_header ef_add_header"):
-                        yield Label("Extras", classes="ef_section")
-                        yield Label("", classes="ef_section_spacer")
-                        yield Button("+ Add", id="ef_add_extra")
-                    with Horizontal(classes="ef_x_columns"):
-                        yield Label("Key", classes="ef_x_key_header")
-                        yield Label("Type", classes="ef_x_type_header")
-                        yield Label("Value", classes="ef_x_value_header")
-                        yield Label("", classes="ef_x_remove_header")
-                    yield Vertical(id="ef_extras")
-                    with Vertical(id="ef_readonly_context"):
-                        with Vertical(id="ef_selector_section", classes="ef_readonly_section"):
-                            yield Rule(classes="section_separator")
-                            with Horizontal(classes="ef_section_header"):
-                                yield Label("Selector", classes="ef_section")
-                            yield Vertical(id="ef_selector_body", classes="ef_context_body")
-                        with Vertical(id="ef_clip_section", classes="ef_readonly_section"):
-                            yield Rule(classes="section_separator")
-                            with Horizontal(classes="ef_section_header"):
-                                yield Label("ClipData", classes="ef_section")
-                            yield Vertical(id="ef_clip_body", classes="ef_context_body")
+                yield JsonRequestEditor(id="edit_form", root="intent", escape_leaves=False)
                 yield Rule(classes="section_separator")
                 yield RichLog(id="intercept_cmd_output", markup=True, highlight=False)
                 yield OptionList(id="intercept_cmd_suggestions")
@@ -1833,18 +1363,6 @@ class NoxenApp(App):
             self._refresh_info_permissions()
         elif event.select.id == "info_comp_type":
             self._refresh_info_components()
-        elif (event.select.id or "").startswith("ef_xt_"):
-            n = event.select.id.rsplit("_", 1)[-1]
-            try:
-                value_input = self.query_one(f"#ef_xv_{n}", Input)
-                extra_type = str(event.value)
-                is_null = extra_type == "null"
-                value_input.disabled = is_null or self._edit_extra_rows.get(int(n), {}).get("value_read_only", False)
-                value_input.placeholder = EXTRA_VALUE_PLACEHOLDERS.get(extra_type, "value")
-                if is_null:
-                    value_input.value = ""
-            except Exception:
-                pass
 
     def on_device_selected(self, device_id, *, open_intercept=True):
         if not device_id:
@@ -2893,6 +2411,8 @@ class NoxenApp(App):
         if action == "info_refresh":
             return self._active_tab == "tab_info"
         if action == "toggle_detail_view":
+            if self._active_tab == "tab_intercept" and self._edit_mode:
+                return False  # The editor is already JSON.
             return self._active_tab in ("tab_history", "tab_intercept") and not self.screen.is_modal
         if action == "send_to_sender":
             if self._monitor_events_active():
@@ -3267,12 +2787,6 @@ class NoxenApp(App):
     def on_input_changed(self, event: Input.Changed):
         inp_id = event.input.id
         text = event.value.strip()
-        if inp_id == "ef_component":
-            self._update_edit_component_context()
-            return
-        if inp_id == "ef_flags":
-            self._update_edit_grant_flags()
-            return
         if inp_id == "history_search":
             self._history_search_text = text
             self._refresh_rows_only()
@@ -3564,8 +3078,8 @@ class NoxenApp(App):
             if self._edit_mode:
                 try:
                     mods = self.call_from_thread(self._collect_edit_mods)
-                except _EditValidationError as error:
-                    self.call_from_thread(self._show_edit_validation_error, error)
+                except ValueError as error:
+                    self.call_from_thread(self._show_edit_error, error)
                     write_fn(f"[red]{error}[/red]")
                     return
             else:

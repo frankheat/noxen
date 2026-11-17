@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from textual.widgets import Input
 from noxen.history_table import HistoryTable
 
 from tests.ui_test_case import IsolatedAppTestCase, SettingsIsolationMixin
@@ -239,7 +238,8 @@ class HistoryStorageFailureUITests(IsolatedAppTestCase):
                     if decision == "edit-current":
                         app._enter_edit_mode()
                         await pilot.pause()
-                        app.query_one("#ef_action", Input).value = "EDITED"
+                        area = app.query_one("#edit_form").area
+                        area.load(area.text.replace('"CURRENT"', '"EDITED"'))
                         with patch.object(app, "call_from_thread", side_effect=lambda callback, *args: callback(*args)), patch.object(
                             app, "_apply_mods_and_forward_worker",
                             side_effect=lambda mods: NoxenApp._apply_mods_and_forward_worker.__wrapped__(app, mods),

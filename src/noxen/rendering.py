@@ -691,8 +691,6 @@ def _payload_lines(info: dict, *, component_details=None, show_component=False, 
 _EXTRA_RENDER_MAX_DEPTH = 12
 _EXTRA_RENDER_MAX_LINES = 400
 _EXTRA_RENDER_MAX_TEXT = 2048
-_INTENT_TREE_FIELDS = {"Component": "component", "Action": "action",
-                       "Data (URI)": "data", "MIME Type": "mimeType"}
 
 _ARRAY_DISPLAY_TYPES = {
     "[Z": "boolean[]",
@@ -820,7 +818,7 @@ def _extra_node_children(node: dict) -> list[tuple[str | None, dict]]:
     return children
 
 
-def _extra_node_header(label: str | None, node: dict, *, field_row=None) -> str:
+def _extra_node_header(label: str | None, node: dict) -> str:
     kind = node.get("kind")
     label_text = f"[bold]{_markup(label)}[/bold]" if label is not None else ""
     if kind == "status":
@@ -829,8 +827,6 @@ def _extra_node_header(label: str | None, node: dict, *, field_row=None) -> str:
         value = node.get("markup") if node.get("markup") is not None else (
             '""' if node.get("value") == "" else _extra_display_text(node.get("value"))
         )
-        if field_row is not None:
-            return field_row(label, value)
         return f"[dim]{_markup(label or ''):<13} :[/dim] {value}"
 
     type_name = _extra_type_name(node)
@@ -873,30 +869,21 @@ def _render_extra_node(
     is_last: bool,
     context: dict,
     depth: int,
-    parent: dict | None = None,
 ) -> None:
     if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
         return
     branch = _extra_tree_prefix(prefix, is_last)
     continuation = prefix + ("   " if is_last else "│  ")
-    emit = context.get("emit")
     if depth > _EXTRA_RENDER_MAX_DEPTH or id(node) in context["active"]:
         reason = "rendering depth limit reached" if depth > _EXTRA_RENDER_MAX_DEPTH else "invalid recursive model"
-        status = {"kind": "status", "value": reason}
-        if emit is None:
-            lines.append(branch + _extra_node_header(None, status))
-        else:
-            emit(branch, label, status, parent, continuation)
+        lines.append(branch + _extra_node_header(None, {"kind": "status", "value": reason}))
         context["lines"] += 1
         return
     if not isinstance(node, dict):
         node = {"kind": "error", "reason": "invalid structured value"}
 
     node_id = id(node)
-    if emit is None:
-        lines.append(branch + _extra_node_header(label, node))
-    else:
-        emit(branch, label, node, parent, continuation)
+    lines.append(branch + _extra_node_header(label, node))
     context["lines"] += 1
     if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
         return
@@ -913,48 +900,11 @@ def _render_extra_node(
                 index == len(children) - 1,
                 context,
                 depth + 1,
-                node,
             )
             if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
                 break
     finally:
         context["active"].discard(node_id)
-
-
-def render_edit_tree(root, editable_nodes, *, attack_surface=None):
-    """Render the capture tree with editable fields in their original positions."""
-    rows = []
-    selector_details = None
-    if attack_surface is not None and root.get("kind") == "intent":
-        selector_details = _captured_component_info(root.get("component"), attack_surface, "selector")
-
-    def emit(branch, label, node, parent, continuation):
-        field = _INTENT_TREE_FIELDS.get(label) if node.get("kind") == "field" else None
-        target = editable_nodes.get(id(parent))
-        if field is not None and target is not None and field in target[1]:
-            path, fields = target
-            rows.append((branch, "Data URI" if label == "Data (URI)" else label, path, field, fields[field]))
-        else:
-            text = _extra_node_header(label, node, field_row=_edit_context_row)
-            rows.append((branch + text, None, None, None, None))
-        if field == "component" and parent is root and selector_details:
-            # These details describe the captured component.
-            indent = f"[dim]{_markup(continuation)}[/dim]"
-            rows.extend((line, None, None, None, None) for line in
-                        _component_lines(root.get("component"), selector_details, indent=indent)[1:])
-
-    context = {"lines": 0, "active": {id(root)}, "emit": emit}
-    children = _extra_node_children(root)
-    if root.get("kind") == "clipdata" and isinstance(root.get("count"), int):
-        children.insert(0, ("Items", {"kind": "field", "value": root["count"]}))
-    if not children:
-        return [(_extra_node_header(None, root), None, None, None, None)]
-    for index, (label, node) in enumerate(children):
-        _render_extra_node([], label, node, "", index == len(children) - 1, context, 0, root)
-        if context["lines"] >= _EXTRA_RENDER_MAX_LINES:
-            rows.append(("[dim]… rendering limit reached[/dim]", None, None, None, None))
-            break
-    return rows
 
 
 def _extras_lines(extras: dict, metadata: dict | None = None) -> list[str]:
@@ -1108,49 +1058,6 @@ def _selector_lines(selector: dict | None, *, row=_row, indent="  ", component_d
             lines.append("  [dim]… selector rendering limit reached[/dim]")
             break
     return lines
-
-
-def _edit_context_row(label: str, value: str) -> str:
-    # Match the editor's .ef_label width, without detail-view indentation or colons.
-    if label == "Data (URI)":
-        label = "Data URI"
-    return f"[dim]{label:<16}[/dim]{value}"
-
-
-def render_edit_context(info: dict, attack_surface: dict, method=None, *, include_trees=True) -> dict[str, str]:
-    """Reuse bounded, read-only trees; editable outer grant flags live in the form."""
-    if attack_surface.get("intentPresent") is False:
-        return {}
-    named_components = _is_component_event(method, attack_surface)
-    routing = _routing_lines(info, attack_surface, method=method, row=_edit_context_row, include_target=False)
-    sections = {}
-    call = _broadcast_call_lines(method, attack_surface, row=_edit_context_row)
-    if call:
-        sections["call"] = "\n".join(call)
-    if named_components and (info.get("component") or _has_component_metadata(attack_surface)):
-        sections["component"] = "\n".join(_component_lines(
-            info.get("component"), _captured_component_info(info.get("component"), attack_surface, "base"),
-            row=_edit_context_row, indent=" " * 16,
-        ))
-    if routing:
-        sections["routing"] = "\n".join(routing[1:])
-    if include_trees:
-        selector_info = info.get("selector")
-        selector_details = _captured_component_info(
-            selector_info.get("component"), attack_surface, "selector",
-        ) if named_components and isinstance(selector_info, dict) else None
-        selector = _selector_lines(
-            selector_info, row=_edit_context_row, indent="", component_details=selector_details,
-            component_indent=" " * 16,
-        )
-        clip = info.get("clipData")
-        clip_lines = _clip_data_lines(clip, None, include_grant_flags=False, row=_edit_context_row, indent="")
-        if clip_lines and clip.get("kind") == "clipdata" and isinstance(clip.get("count"), int):
-            clip_lines.insert(1, _edit_context_row("Items", str(clip["count"])))
-        for key, lines in (("selector", selector), ("clipData", clip_lines)):
-            if lines:
-                sections[key] = "\n".join(lines[1:])
-    return sections
 
 
 def _stack_lines(trace: list, stack_depth: int, show_empty: bool = False) -> list[str]:

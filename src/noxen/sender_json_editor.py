@@ -42,8 +42,11 @@ class JsonArea(TextArea):
         Binding("ctrl+n", "unfold_all", "Unfold all", priority=True),
     ]
 
-    def __init__(self, **kwargs):
+    def __init__(self, root="request", escape_leaves=True, **kwargs):
         super().__init__("", soft_wrap=False, show_line_numbers=True, tab_behavior="indent", **kwargs)
+        self.root = root  # What the document is: a Sender "request", or an "intent".
+        # Escape moves focus out of the editor, or is left to the app (Intercept cancels the edit with it).
+        self.escape_leaves = escape_leaves
         self.indent_width = 4
         self.folds = {}
         self._found = None
@@ -104,7 +107,7 @@ class JsonArea(TextArea):
     def show_completions(self, always=False):
         if self.read_only:
             return
-        self._found, self._matches = sender_json.completions(self.text, self.offset(), always)
+        self._found, self._matches = sender_json.completions(self.text, self.offset(), always, self.root)
         popup = self.popup
         if not self._matches:
             popup.display = False
@@ -140,7 +143,7 @@ class JsonArea(TextArea):
                                 self._value_has_choices() else False)
 
     def _value_has_choices(self):
-        found, matches = sender_json.completions(self.text, self.offset(), True)
+        found, matches = sender_json.completions(self.text, self.offset(), True, self.root)
         return found["position"] == "value" and found["quoted"] and bool(matches)
 
     def action_suggest(self):
@@ -178,6 +181,8 @@ class JsonArea(TextArea):
                 step = 1 if event.key == "down" else -1
                 popup.highlighted = (popup.highlighted + step) % popup.option_count
             return
+        if event.key == "escape" and not self.escape_leaves:
+            return  # Not handled here: the app's binding gets it.
         if self.selection.start == self.selection.end and self._edit_pair(event):
             event.stop()
             event.prevent_default()
@@ -241,8 +246,12 @@ class JsonRequestEditor(Vertical):
     JsonRequestEditor > .json_status.error { color: $error; }
     """
 
+    def __init__(self, root="request", escape_leaves=True, **kwargs):
+        super().__init__(**kwargs)
+        self.root, self.escape_leaves = root, escape_leaves
+
     def compose(self):
-        yield JsonArea()
+        yield JsonArea(root=self.root, escape_leaves=self.escape_leaves)
         yield CompletionList()
         yield Label("", classes="json_status", markup=False)
 

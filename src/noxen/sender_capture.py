@@ -125,10 +125,13 @@ def _intent(info, path, nested=False, notes=None):
         return {}
     # A partial Intent keeps what was captured and leaves out the fields the agent reported as cut or unread.
     dropped = set()
-    if not _complete(info, path, notes):
+    gaps = None if notes is None else []
+    if not _complete(info, path, gaps):  # Strict conversion has already refused here.
         dropped = {*(info.get("truncatedFields") or ()), *(info.get("unreadableFields") or ())}
         if info.get("categoriesReadError"):
             dropped.add("categories")
+        # Name the fields that are left out, rather than only saying the Intent is incomplete.
+        _fail(notes, f"{path}: {', '.join(sorted(dropped))} not captured in full" if dropped else gaps[0])
     result = {}
     for key in ("component", "action", "data", "mimeType", "package", "flags", "categories", "selector", "clipData"):
         if key not in info:

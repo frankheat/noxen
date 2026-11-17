@@ -1,13 +1,11 @@
 import unittest
 
 from noxen.intent_mods import (
-    EXTRA_TYPE_OPTIONS,
-    EXTRA_VALUE_PLACEHOLDERS,
+    VALID_EXTRA_TYPES,
     apply_mods_to_entry,
     confirmed_modification,
     apply_mods_to_intent,
     diff_intents,
-    java_type_display,
     normalize_extra_type,
     parse_flag_value,
     parse_intent_mod_command,
@@ -153,11 +151,6 @@ class IntentModsTests(unittest.TestCase):
         changed = {"categories": [], "extras": {"secret": {**opaque, "value": "changed"}}, "flags": 0}
         self.assertEqual(diff_intents(original, changed), [])
 
-    def test_java_type_display(self):
-        self.assertEqual(java_type_display("java.lang.String"), "String")
-        self.assertEqual(java_type_display("android.content.Context$BindServiceFlags"), "BindServiceFlags")
-        self.assertEqual(java_type_display(""), "-")
-
     def test_parse_flag_value(self):
         self.assertEqual(parse_flag_value("16"), 16)
         self.assertEqual(parse_flag_value("0x10"), 16)
@@ -203,12 +196,7 @@ class IntentModsTests(unittest.TestCase):
             "long-list": "1,2", "float-list": "1.0,2.0",
             "double-list": "1.0,2.0", "string-list": r"one,two\,three",
         }
-        self.assertEqual({value for _label, value in EXTRA_TYPE_OPTIONS}, set(types_with_values) | {"null"})
-        self.assertEqual(set(EXTRA_VALUE_PLACEHOLDERS), set(types_with_values) | {"null"})
-        self.assertTrue(all("--" not in label for label, _value in EXTRA_TYPE_OPTIONS))
-        for extra_type, placeholder in EXTRA_VALUE_PLACEHOLDERS.items():
-            with self.subTest(placeholder_for=extra_type):
-                self.assertIsNone(validate_extra_value(extra_type, placeholder))
+        self.assertEqual(VALID_EXTRA_TYPES, set(types_with_values) | {"null"})
         for extra_type, value in types_with_values.items():
             with self.subTest(extra_type=extra_type):
                 self.assertEqual(

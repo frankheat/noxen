@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rich.text import Text
-from textual.widgets import Input, Static
 
 from noxen.app import NoxenApp
 from noxen.db import ProjectDB
@@ -70,7 +69,7 @@ class CaptureStringTests(unittest.TestCase):
 
 
 class CaptureStringEditorTests(IsolatedAppTestCase):
-    async def test_previews_do_not_become_edits_and_commands_replace_raw_fields(self):
+    async def test_control_characters_round_trip_exactly_and_commands_edit_the_json(self):
         app = NoxenApp(SimpleNamespace(project=None,
             new_project=str(self.settings_path.parent / "strings.noxen"), skip_device_scan=True))
         self.addCleanup(app.db.close)
@@ -80,28 +79,24 @@ class CaptureStringEditorTests(IsolatedAppTestCase):
             app._current_intercepted_entry = {"id": 1, "method": "getIntent", "intent": copy.deepcopy(info)}
             app._enter_edit_mode()
             await pilot.pause()
-            for widget in ("#ef_action", "#ef_data", ".ef_cat_input"):
-                control = app.query_one(widget, Input)
-                self.assertTrue(control.disabled)
-                self.assertNotIn("\0", control.value)
-                self.assertIn(r"\u0000", control.value)
-            self.assertTrue(app.query_one("#ef_capture_errors", Static).display)
+            editor = app.query_one("#edit_form")
+            # JSON escapes control characters, so they are shown and read back exactly.
+            self.assertNotIn("\0", editor.area.text)
+            self.assertIn(r"before\u0000after", editor.area.text)
+            self.assertIn("package", str(editor.query_one(".json_status").content))  # Not captured: kept.
             self.assertEqual(app._collect_edit_mods(), [])
-            self.assertEqual(app._collect_edit_draft(), info)
-            app.query_one("#ef_mime", Input).value = "text/html"
+            editor.area.load(editor.area.text.replace('"text/plain"', '"text/html"'))
             self.assertEqual(app._collect_edit_mods(), [("mime", "", "text/html", "")])
             self.assertIsNone(app._apply_command_mod_to_editor(("action", "", "NEW", "")))
-            await pilot.pause()
-            self.assertFalse(app.query_one("#ef_action", Input).disabled)
-            self.assertEqual(app._collect_edit_draft()["action"], "NEW")
-            self.assertEqual(app._collect_edit_draft()["data"], info["data"])
+            self.assertIn('"action": "NEW"', editor.area.text)
+            self.assertIn(r"content://host/a\u0000b", editor.area.text)
             self.assertIsNone(app._apply_command_mod_to_editor(("extra_rem", "key\0tail", "", "")))
-            await pilot.pause()
-            self.assertEqual(app._collect_edit_draft()["extras"], {})
+            self.assertEqual(app._collect_edit_mods(), [
+                ("action", "", "NEW", ""), ("mime", "", "text/html", ""), ("extra_rem", "key\0tail", "", "")])
             app._exit_edit_mode()
             self.assertEqual(app._current_intercepted_entry["intent"], info)
 
-    async def test_truncated_field_is_readonly_and_is_not_rewritten_on_forward(self):
+    async def test_truncated_field_is_left_out_and_is_not_rewritten_on_forward(self):
         app = NoxenApp(SimpleNamespace(project=None,
             new_project=str(self.settings_path.parent / "truncated.noxen"), skip_device_scan=True))
         self.addCleanup(app.db.close)
@@ -110,5 +105,6 @@ class CaptureStringEditorTests(IsolatedAppTestCase):
             app._current_intercepted_entry = {"id": 1, "method": "getIntent", "intent": copy.deepcopy(info)}
             app._enter_edit_mode()
             await pilot.pause()
-            self.assertTrue(app.query_one("#ef_action", Input).disabled)
+            self.assertNotIn('"action"', app.query_one("#edit_form").area.text)
             self.assertEqual(app._collect_edit_mods(), [])
+

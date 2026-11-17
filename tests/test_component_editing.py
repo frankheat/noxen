@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rich.text import Text
-from textual.widgets import Input, Static
 
 from noxen.app import NoxenApp
 from noxen.commands import INTERCEPT_COMPLETIONS, parse_intent_command
@@ -122,7 +121,7 @@ class ComponentModificationTests(unittest.TestCase):
 
 
 class ComponentEditorTests(IsolatedAppTestCase):
-    async def test_editor_commands_validation_metadata_and_cancel_in_both_themes(self):
+    async def test_json_editor_component_commands_validation_and_cancel_in_both_themes(self):
         app = NoxenApp(SimpleNamespace(project=None,
             new_project=str(self.settings_path.parent / "editor.noxen"), skip_device_scan=True))
         self.addCleanup(app.db.close)
@@ -133,28 +132,19 @@ class ComponentEditorTests(IsolatedAppTestCase):
                 for method in ("startActivity", "getIntent", "onReceive", "getActivity", "onStartCommand"):
                     with self.subTest(theme=theme, method=method):
                         app._current_intercepted_entry = {"id": 1, "method": method, "intent": intent(),
-                            "attackSurface": {"activityComponents": {"base": {
-                                "component": "example/example.Old", "exported": True,
-                                "permission": {"name": "OLD.PERMISSION", "level": "signature"}}}}}
+                                                          "attackSurface": {}}
                         app._enter_edit_mode()
                         await pilot.pause()
-                        field = app.query_one("#ef_component", Input)
-                        details = app.query_one("#ef_component_body", Static)
-                        self.assertEqual(field.value, "example/example.Old")
-                        self.assertIn("OLD.PERMISSION", str(details.render()))
-                        field.value = "other/.Target"
-                        await pilot.pause()
-                        self.assertNotIn("OLD.PERMISSION", str(details.render()))
-                        self.assertIn("unavailable", str(details.render()))
-                        draft = app._collect_edit_draft()
-                        self.assertEqual(draft["component"], "other/other.Target")
-                        self.assertEqual(draft["selector"], intent()["selector"])
+                        area = app.query_one("#edit_form").area
+                        self.assertIn('"component": "example/example.Old"', area.text)
+                        area.load(area.text.replace('"example/example.Old"', '"other/.Target"'))
+                        # The short form is expanded; selector and package are not touched.
+                        self.assertEqual(app._collect_edit_mods(), [("component", "", "other/other.Target", "")])
                         mod, _ = parse_intent_mod_command(["component", "clear"])
                         self.assertIsNone(app._apply_command_mod_to_editor(mod))
-                        await pilot.pause()
-                        self.assertEqual(field.value, "")
-                        self.assertIsNone(app._collect_edit_draft()["component"])
-                        field.value = "bad name"
+                        self.assertIn('"component": null', area.text)
+                        self.assertEqual(app._collect_edit_mods(), [("component", "", "", "")])
+                        area.load(area.text.replace('"component": null', '"component": "bad name"'))
                         with self.assertRaisesRegex(ValueError, "package/class"):
                             app._collect_edit_mods()
                         app._exit_edit_mode()

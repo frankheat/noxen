@@ -1,4 +1,3 @@
-import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,11 +9,10 @@ from textual.widgets import Button
 from tests.ui_test_case import IsolatedAppTestCase
 
 from noxen.app import NoxenApp
-from noxen.db import ProjectDB
 from noxen.frida_session import FridaSession
 from noxen.rendering import (
     entry_to_filter_context, history_search_matches, payload_to_filter_context,
-    payload_to_history_entry, render_edit_context, render_intercept_block, render_intent_detail,
+    payload_to_history_entry, render_intercept_block, render_intent_detail,
 )
 
 
@@ -57,32 +55,6 @@ class NullIntentTests(unittest.TestCase):
         event = payload(False)
         event["infoIntent"] = {"action": "contradictory"}
         self.assertFalse(FridaSession._valid_intent_event(event))
-
-    def test_null_cannot_generate_readonly_editor_context_even_with_stale_fields(self):
-        info = {"component": "example/.Stale", "selector": {"kind": "intent"}}
-        original = copy.deepcopy(info)
-        self.assertEqual(render_edit_context(info, {"intentPresent": False}, "startService"), {})
-        self.assertEqual(info, original)
-
-    def test_database_roundtrip_keeps_null_present_and_legacy_distinct(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "nulls.noxen")
-            db = ProjectDB(path)
-            db.create("nulls")
-            expected = []
-            for present in (False, True, None):
-                entry = payload_to_history_entry(payload(present))
-                entry["id"] = db.save_intent(entry)
-                expected.append(Text.from_markup(render_intent_detail(entry)).plain)
-            db.close()
-            for _ in range(2):
-                db = ProjectDB(path)
-                entries = db.open_existing()
-                db.close()
-                self.assertEqual([entry["attackSurface"].get("intentPresent") for entry in entries],
-                                 [False, True, None])
-                self.assertEqual([Text.from_markup(render_intent_detail(entry)).plain for entry in entries], expected)
-                self.assertNotIn("intentPresent", entries[-1]["attackSurface"])
 
 
 class NullIntentUITests(IsolatedAppTestCase):

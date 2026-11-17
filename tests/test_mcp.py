@@ -59,9 +59,11 @@ class MCPServiceTests(MCPAppTestCase):
         bundle = {"kind": "bundle", "type": "android.os.Bundle", "items": [{"key": "next", "value": child}]}
         original = {
             "component": None, "action": "OUTER", "data": None, "mimeType": None, "flags": 0, "categories": [],
-            "extras": {key: {"structured": json.loads(json.dumps(bundle))} for key in ("left", "right")},
+            "extras": {key: {"structuredVersion": 1, "structured": json.loads(json.dumps(bundle))}
+                       for key in ("left", "right")},
             "selector": dict(child),
-            "clipData": {"kind": "clipdata", "items": [{"kind": "clipitem", "intent": dict(child)}]},
+            "clipData": {"kind": "clipdata", "count": 1, "mimeTypes": ["text/plain"], "items": [
+                {"kind": "clipitem", "text": None, "html": None, "uri": None, "intent": dict(child)}]},
         }
         event_id = self.app._on_history_intent({"infoIntent": original}, 1)
         self.app._on_intercept_display("", event_id, "paths")
@@ -90,27 +92,15 @@ class MCPServiceTests(MCPAppTestCase):
         self.app.query_one("#main_tabs").active = "tab_intercept"
         self.app._enter_edit_mode()
         await self.pilot.pause()
-        controls = {}
-        for row_id, row in self.app._edit_extra_rows.items():
-            panel = self.app.query_one(f"#ef_x_{row_id}")
-            self.assertIn("└─ next", str(panel.query_one(".ef_tree_line").render()))
-            path = ("extras", row["key"], "next")
-            control_id = next(control for target, field, _, control in self.app._edit_nested_fields
-                              if target == path and field == "action")
-            control = panel.query_one(f"#{control_id}", Input)
-            self.assertEqual(control.value, "OLD")
-            self.assertLess(control.region.x, panel.query_one(f"#ef_xv_{row_id}").region.x)
-            controls[row["key"]] = control
-        selector = self.app.query_one("#ef_selector_body")
-        clip = self.app.query_one("#ef_clip_body")
-        self.assertEqual(selector.query_one(".ef_nested_action", Input).value, "OLD")
-        self.assertEqual(clip.query_one(".ef_nested_action", Input).value, "OLD")
-        self.assertEqual(sum("Item 0" in str(label.render()) for label in clip.query(".ef_tree_line")), 1)
-        self.assertFalse(any("OLD" in str(label.render()) for label in clip.query(".ef_tree_line")))
+        area = self.app.query_one("#edit_form").area
+        document = json.loads(area.text)
+        nested = (document["extras"]["left"]["value"]["next"]["value"], document["extras"]["right"]["value"]["next"]["value"],
+                  document["selector"], document["clipData"]["items"][0]["intent"])
+        self.assertTrue(all(intent["action"] == "OLD" for intent in nested))
         self.assertEqual(self.app._collect_edit_mods(), [])
-        controls["right"].value = "NEW"
-        selector.query_one(".ef_nested_action", Input).value = "NEW"
-        clip.query_one(".ef_nested_action", Input).value = "NEW"
+        for intent in nested[1:]:  # Equal keys in separate branches: "left" is not touched.
+            intent["action"] = "NEW"
+        area.load(json.dumps(document, indent=4))
         self.assertCountEqual(self.app._collect_edit_mods(), mods)
         self.app.db.update_modified_intent(event_id, original, draft)
         reopened = ProjectDB(self.app.db.path)
@@ -125,11 +115,13 @@ class MCPServiceTests(MCPAppTestCase):
 
     @with_app
     async def test_nested_component_edit_is_shared_by_tui_and_mcp(self):
+        from noxen.intent_mods import apply_mods_to_intent
         from noxen.rendering import render_intent_detail
 
         entry_id = self.app._on_history_intent({
             "infoIntent": {"extras": {"next": {
                 "type": "android.content.Intent", "value": "Intent (0 extras)", "editable": False,
+                "structuredVersion": 1,
                 "structured": {"kind": "intent", "type": "android.content.Intent", "component": "pkg/pkg.One",
                                "action": "OLD", "data": "https://example.org/old", "mimeType": "text/plain"},
             }}},
@@ -149,15 +141,15 @@ class MCPServiceTests(MCPAppTestCase):
             self.service._intent_modifications([requested, {"type": "extra_rem", "key": "next"}])
         self.app._enter_edit_mode()
         await self.pilot.pause()
-        control = self.app.query_one(".ef_nested_component", Input)
-        control.value = "pkg/.Two"
-        self.app.query_one(".ef_nested_action", Input).value = "NEW"
-        self.app.query_one(".ef_nested_data", Input).value = "https://example.org/new"
-        self.app.query_one(".ef_nested_mimeType", Input).value = ""
+        area = self.app.query_one("#edit_form").area
+        document = json.loads(area.text)
+        document["extras"]["next"]["value"].update(
+            component="pkg/.Two", action="NEW", data="https://example.org/new", mimeType="")
+        area.load(json.dumps(document, indent=4))
         self.assertEqual(self.app._collect_edit_mods(), mods)
         entry = self.app._current_intercepted_entry
         rendered = render_intent_detail({**entry, "original_intent": entry["intent"],
-                                         "intent": self.app._collect_edit_draft()})
+                                         "intent": apply_mods_to_intent(entry["intent"], mods)})
         changes = rendered.split("CHANGES", 1)[1]
         self.assertIn("pkg/pkg.One", changes)
         self.assertIn("pkg/pkg.Two", changes)
