@@ -194,6 +194,53 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.pause(0.6)
                 self.assertIsNone(pane._run_id)  # Back on the latest run, which later sends keep following.
 
+    async def test_tab_menu_closes_other_tabs_and_tabs_to_one_side(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
+            async with app.run_test(size=(130, 40)) as pilot:
+                service = app.sender_service
+                for name in "ABCDE":
+                    service.save_request(name, {})
+                app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
+                await pilot.pause(0.6)
+                pane = app.query_one(SenderPane)
+                names = lambda: [str(tab.label) for tab in pane.query(RequestTab)]
+                tab = lambda name: next(t for t in pane.query(RequestTab) if str(t.label) == name)
+
+                async def close(name, label, confirm=True):
+                    await pilot.click(tab(name), button=3)
+                    await pilot.pause()
+                    menu = app.screen.query_one("OptionList")
+                    labels = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)]
+                    menu.highlighted = labels.index(label)
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, RecordingDialog)  # Requests are deleted: confirmed first.
+                    await pilot.click("#recording_confirm" if confirm else "#recording_cancel")
+                    await pilot.pause(0.6)
+                    return labels
+
+                # Only the directions that have tabs are offered.
+                await pilot.click(tab("A"), button=3)
+                await pilot.pause()
+                menu = app.screen.query_one("OptionList")
+                labels = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)]
+                self.assertIn("Close tabs to the right", labels)
+                self.assertNotIn("Close tabs to the left", labels)
+                await pilot.press("escape")
+                await pilot.pause()
+
+                await close("C", "Close tabs to the right", confirm=False)
+                self.assertEqual(names(), list("ABCDE"))  # Cancelled: nothing removed.
+                await close("C", "Close tabs to the right")
+                self.assertEqual(names(), list("ABC"))
+                await close("B", "Close tabs to the left")
+                self.assertEqual(names(), list("BC"))
+                await close("C", "Close other tabs")
+                self.assertEqual(names(), ["C"])
+                self.assertEqual([row["name"] for row in app.db.sender_requests()], ["C"])
+                self.assertEqual(pane.selected()["name"], "C")
+
     async def test_request_json_is_edited_in_place_with_completion_and_sent(self):
         with tempfile.TemporaryDirectory() as directory:
             app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
@@ -428,7 +475,7 @@ class SenderUITests(IsolatedAppTestCase):
                     self.assertLess(request.region.right, result.region.x)
                     await pilot.click(tabs[0], button=3)
                     await pilot.pause()
-                    await pilot.press("down", "down", "enter")  # Remove
+                    await pilot.press("down", "down", "enter")  # Close
                     await pilot.pause(0.5)
                     self.assertEqual([row["id"] for row in app.db.sender_requests()], [pane.selected()["id"]])
                     self.assertNotEqual(pane.selected()["id"], first["id"])

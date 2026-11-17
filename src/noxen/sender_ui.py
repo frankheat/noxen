@@ -68,7 +68,7 @@ class SenderTabMenu(ModalScreen):
     SenderTabMenu OptionList { width: auto; height: auto; border: round $foreground-muted; background: $surface; }
     """
 
-    def __init__(self, x, y, options=(("Rename", "rename"), ("Duplicate", "duplicate"), ("Remove", "remove"))):
+    def __init__(self, x, y, options=(("Rename", "rename"), ("Duplicate", "duplicate"), ("Close", "close"))):
         super().__init__()
         self.position, self.options = (x, y), options
 
@@ -532,15 +532,47 @@ class SenderPane(Vertical):
                 elif action == "duplicate":
                     name = self.next_name() if row["name"].isdecimal() else (row["name"] + " copy")[:200]
                     self.select_request(self.service.save_request(name, row["request"])["id"])
-                elif action == "remove":
-                    self.service.remove_request(row["id"], row["revision"])
-                    self._drafts.pop(request_id, None)
-                    if self._editor_key is not None and self._editor_key[0] == request_id:
-                        self._editor_key, self._editor_baseline = None, self.editor.area.full_text()
+                elif action == "close":
+                    self.remove_requests([row])
+                elif action in closing:
+                    self.confirm_remove(closing[action])
                 self.refresh_sender()
             except Exception as error:
                 self.notify(str(error), severity="error")
-        self.app.push_screen(SenderTabMenu(x, y), chosen)
+        order = [row["id"] for row in self._requests]
+        position = order.index(request_id) if request_id in order else 0
+        closing = {"close_other": order[:position] + order[position + 1:],
+                   "close_left": order[:position], "close_right": order[position + 1:]}
+        options = [("Rename", "rename"), ("Duplicate", "duplicate"), ("Close", "close")]
+        options += [(label, key) for label, key in (("Close other tabs", "close_other"),
+                    ("Close tabs to the left", "close_left"), ("Close tabs to the right", "close_right"))
+                    if closing[key]]
+        self.app.push_screen(SenderTabMenu(x, y, options), chosen)
+
+    def remove_requests(self, rows):
+        """Remove saved requests, with any unsaved text of theirs."""
+        for row in rows:
+            self.service.remove_request(row["id"], row["revision"])
+            self._drafts.pop(row["id"], None)
+            if self._editor_key is not None and self._editor_key[0] == row["id"]:
+                self._editor_key, self._editor_baseline = None, self.editor.area.full_text()
+
+    def confirm_remove(self, request_ids):
+        """Closing several tabs deletes their requests, so it is confirmed first."""
+        names = [row["name"] for row in self._requests if row["id"] in request_ids]
+        shown = ", ".join(names[:8]) + (f" and {len(names) - 8} more" if len(names) > 8 else "")
+        def answered(confirmed):
+            if not confirmed:
+                return
+            try:
+                # Read again: a request may have been saved since the menu opened.
+                self.remove_requests([row for row in self.service.db.sender_requests() if row["id"] in request_ids])
+            except Exception as error:
+                self.notify(str(error), severity="error")
+            self.refresh_sender()
+        message = (f"Close tab {shown}?\n\nIts request is deleted." if len(names) == 1 else
+                   f"Close {len(names)} tabs: {shown}?\n\nTheir requests are deleted.")
+        self.app.push_screen(RecordingDialog(message + " This cannot be undone.", "Close"), answered)
 
     async def on_button_pressed(self, event):
         event.stop()
