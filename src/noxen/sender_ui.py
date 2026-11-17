@@ -149,6 +149,7 @@ class SenderPane(Vertical):
         self._retry_save = False      # The last save failed for a reason other than the text.
         self._result_shown = None     # What the result panel currently describes.
         self._suggest_on_load = None  # A new request: list the operations once its text is shown.
+        self._rows_loaded = False     # The tabs reflect the saved requests at least once.
 
     @property
     def service(self):
@@ -340,6 +341,8 @@ class SenderPane(Vertical):
         if self._retry_save and self._autosave is None:
             self._retry_save = False
             self._autosave = self.set_timer(AUTOSAVE_DELAY, self.autosave)
+        if self._rows_loaded and not self._requests and self.is_on_screen:
+            self.ensure_request()  # Shown with nothing to edit, e.g. a new project or after MCP removed the last one.
         signature = (self.service.version, self._selected_id, self._run_id)
         if signature == self._signature:
             return
@@ -362,7 +365,7 @@ class SenderPane(Vertical):
             return
         if self._signature != signature or not self.query("#sender_run_older"):
             return  # Superseded, or the pane was closed while the records were read.
-        self._requests, self._run_ids = requests, run_ids
+        self._requests, self._run_ids, self._rows_loaded = requests, run_ids, True
         if self._run_id not in run_ids:
             self._run_id = None
         position = run_ids.index(run_id) if run_ids else 0
@@ -550,12 +553,23 @@ class SenderPane(Vertical):
         self.app.push_screen(SenderTabMenu(x, y, options), chosen)
 
     def remove_requests(self, rows):
-        """Remove saved requests, with any unsaved text of theirs."""
+        """Remove saved requests, with any unsaved text of theirs. Closing the last one leaves a new empty one."""
         for row in rows:
             self.service.remove_request(row["id"], row["revision"])
             self._drafts.pop(row["id"], None)
             if self._editor_key is not None and self._editor_key[0] == row["id"]:
                 self._editor_key, self._editor_baseline = None, self.editor.area.full_text()
+        if not self.service.db.sender_requests():
+            self._suggest_on_load = self.ensure_request()["id"]
+            self.select_request(self._suggest_on_load)
+
+    def ensure_request(self):
+        """There is always a request on screen: an empty one is created when none is left."""
+        current = self.service.db.sender_requests()  # Read again: one may have been saved meanwhile.
+        if not current:
+            self.service.save_request(self.next_name(), {})
+            current = self.service.db.sender_requests()
+        return min(current, key=lambda row: row["number"])
 
     def confirm_remove(self, request_ids):
         """Closing several tabs deletes their requests, so it is confirmed first."""

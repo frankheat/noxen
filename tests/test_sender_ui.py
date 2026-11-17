@@ -137,7 +137,10 @@ class SenderUITests(IsolatedAppTestCase):
                 pane.refresh_sender()
                 self.assertFalse(pane.query_one("#sender_disconnect").disabled)
                 area = pane.editor.area
-                for expected in ("1", "2"):
+                # A new project already has one empty request, so there is always something to edit.
+                self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1"])
+                self.assertEqual(pane.selected()["request"], {})
+                for expected in ("2", "3"):
                     await pilot.click("#sender_new")  # Created at once, empty, ready to edit as JSON.
                     await pilot.pause(0.5)
                     self.assertEqual(pane.selected()["name"], expected)
@@ -147,7 +150,7 @@ class SenderUITests(IsolatedAppTestCase):
                     self.assertEqual(area._matches[0][0], "startActivity")
                     self.assertTrue(pane.query_one("#sender_send").disabled)
                     self.assertEqual(str(pane.editor.query_one(".json_status").content), "Choose an operation")
-                self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "2"])
+                self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "2", "3"])
                 self.assertIs(app.focused, area)
                 # Choosing the operation also writes what it needs, and the request is saved.
                 await pilot.press("down", "enter")
@@ -157,7 +160,7 @@ class SenderUITests(IsolatedAppTestCase):
                 # The name is the tab label: renaming the request renames its tab, and keeps text being typed.
                 area.load('{\n    "operation": "sendBroadcast",\n    "intent": {"flags": 16}\n}')
                 await pilot.pause()
-                await pilot.click(list(pane.query(RequestTab))[1], button=3)
+                await pilot.click(list(pane.query(RequestTab))[2], button=3)
                 await pilot.pause()
                 await pilot.press("enter")  # Rename is the first entry of the tab menu.
                 await pilot.pause()
@@ -165,8 +168,8 @@ class SenderUITests(IsolatedAppTestCase):
                 app.screen.query_one("#sender_rename", Input).value = "login"
                 await pilot.press("enter")
                 await pilot.pause(0.5)
-                self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "login"])
-                self.assertEqual(pane.next_name(), "2")
+                self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "2", "login"])
+                self.assertEqual(pane.next_name(), "3")
                 self.assertFalse(pane.editor.query_one(".json_status").has_class("error"))
                 await pilot.pause(1.2)
                 self.assertEqual(pane.selected()["request"]["intent"]["flags"], 16)
@@ -240,6 +243,24 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual(names(), ["C"])
                 self.assertEqual([row["name"] for row in app.db.sender_requests()], ["C"])
                 self.assertEqual(pane.selected()["name"], "C")
+
+                # Closing the last tab leaves a new empty request, ready to edit.
+                await pilot.click(tab("C"), button=3)
+                await pilot.pause()
+                menu = app.screen.query_one("OptionList")
+                menu.highlighted = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)].index("Close")
+                await pilot.press("enter")
+                await pilot.pause(0.6)
+                self.assertEqual(names(), ["1"])
+                self.assertEqual(pane.selected()["request"], {})
+                self.assertEqual(pane.editor.area.text, NEW_REQUEST_TEXT)
+                self.assertIs(app.focused, pane.editor.area)  # Like +: the operations are listed.
+                # Removed elsewhere (e.g. over MCP), the last request is replaced too.
+                row = app.db.sender_requests()[0]
+                service.remove_request(row["id"], row["revision"])
+                await pilot.pause(0.8)
+                self.assertEqual(names(), ["1"])
+                self.assertEqual(len(app.db.sender_requests()), 1)
 
     async def test_request_json_is_edited_in_place_with_completion_and_sent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -482,13 +503,14 @@ class SenderUITests(IsolatedAppTestCase):
                 app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
                 async with app.run_test(size=(120, 40)) as pilot:
                     app.theme = theme
+                    # Saved before Sender is shown: no empty request is added next to them.
+                    first = app.sender_service.save_request("B", {"operation": "sendBroadcast", "intent": {}})
+                    app.sender_service.save_request("A", {"operation": "sendBroadcast", "intent": {}})
                     app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
                     await pilot.pause()
                     pane = app.query_one(SenderPane)
                     for identifier in ("sender_connect", "sender_disconnect", "sender_send", "sender_new"):
                         self.assertLessEqual(pane.query_one(f"#{identifier}").region.right, pane.region.right)
-                    first = app.sender_service.save_request("B", {"operation": "sendBroadcast", "intent": {}})
-                    app.sender_service.save_request("A", {"operation": "sendBroadcast", "intent": {}})
                     pane.refresh_sender()
                     await pilot.pause(0.5)
                     # Tabs follow creation order and are labelled with the request names.
@@ -508,7 +530,10 @@ class SenderUITests(IsolatedAppTestCase):
                     await pilot.click(tabs[0], button=3)
                     await pilot.pause()
                     await pilot.press("down", "down", "enter")  # Close
-                    await pilot.pause(0.5)
+                    for _ in range(30):  # The tabs are rebuilt by a worker: slower when the machine is busy.
+                        await pilot.pause(0.1)
+                        if [str(tab.label) for tab in pane.query(RequestTab)] == ["A"]:
+                            break
                     self.assertEqual([row["id"] for row in app.db.sender_requests()], [pane.selected()["id"]])
                     self.assertNotEqual(pane.selected()["id"], first["id"])
                     self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["A"])
