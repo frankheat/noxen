@@ -300,7 +300,8 @@ class SenderService:
         if token != self.token or run["id"] != self.active_run:
             return
         try:
-            result = await sender_io(endpoint.execute, copy.deepcopy(run["request"]), run["execution_key"])
+            request = validate_request(run["request"], for_execution=True)
+            result = await sender_io(endpoint.execute, request, run["execution_key"])
             run.update(result)
         except Exception as error:
             run.update(state="unknown", error=str(error))

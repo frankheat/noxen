@@ -45,6 +45,7 @@ class JsonArea(TextArea):
     def __init__(self, root="request", escape_leaves=True, **kwargs):
         super().__init__("", soft_wrap=False, show_line_numbers=True, tab_behavior="indent", **kwargs)
         self.root = root  # What the document is: a Sender "request", or an "intent".
+        self.operation = None  # Optional outer Intent context for Intercept suggestions.
         # Escape moves focus out of the editor, or is left to the app (Intercept cancels the edit with it).
         self.escape_leaves = escape_leaves
         self.indent_width = 4
@@ -107,15 +108,18 @@ class JsonArea(TextArea):
     def show_completions(self, always=False):
         if self.read_only:
             return
-        self._found, self._matches = sender_json.completions(self.text, self.offset(), always, self.root)
+        self._found, self._matches = sender_json.completions(self.text, self.offset(), always, self.root, self.operation)
         popup = self.popup
         if not self._matches:
             popup.display = False
             return
+        flag_choices = self._found.get("flag_choices")
         popup.clear_options()
-        popup.add_options([Option(Text(label)) for label, _ in self._matches[:40]])
+        options = self._matches if flag_choices else self._matches[:40]
+        popup.add_options([Option(Text(label)) for label, _ in options])
         popup.highlighted = 0
-        width = min(40, max(len(label) for label, _ in self._matches) + 4)
+        max_width = min(self.parent.region.width, 64) if flag_choices else 40
+        width = min(max_width, max(len(label) for label, _ in options) + 4)
         height = min(8, len(self._matches)) + 2
         origin = self.parent.region.offset
         cursor = self.cursor_screen_offset
@@ -143,7 +147,7 @@ class JsonArea(TextArea):
                                 self._value_has_choices() else False)
 
     def _value_has_choices(self):
-        found, matches = sender_json.completions(self.text, self.offset(), True, self.root)
+        found, matches = sender_json.completions(self.text, self.offset(), True, self.root, self.operation)
         return found["position"] == "value" and found["quoted"] and bool(matches)
 
     def action_suggest(self):

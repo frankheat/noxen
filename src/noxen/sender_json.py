@@ -7,7 +7,7 @@ stays authoritative for what a request may contain.
 import json
 import re
 
-from noxen.sender import INTENT_OPERATIONS, OPERATIONS, PROVIDER_OPERATIONS
+from noxen.sender import INTENT_OPERATIONS, NAMED_INTENT_FLAGS, OPERATIONS, PROVIDER_OPERATIONS, intent_flag_family
 
 INDENT = "    "
 SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
@@ -25,11 +25,11 @@ TYPES = ("String", "boolean", "byte", "short", "int", "long", "float", "double",
          "String[]", "boolean[]", "byte[]", "short[]", "int[]", "long[]", "float[]", "double[]", "char[]", "Intent[]")
 TYPE_DEFAULTS = {"String": '"$0"', "char": '"$0"', "Uri": '"$0"', "boolean": "false$0", "long": '"0$0"',
                  "float": "0.0$0", "double": "0.0$0", "Bundle": "{$0}", "Intent": "{$0}"}
-INTENT_SNIPPET = ('{\n    "component": ${null},\n    "action": null,\n    "data": null,\n    "flags": 0,\n'
+INTENT_SNIPPET = ('{\n    "component": ${null},\n    "action": null,\n    "data": null,\n    "flags": [],\n'
                   '    "categories": [],\n    "extras": {}\n}')
 TEXT, NUMBER, LIST, BLOCK = '"$0"', "$0", "[$0]", "{\n    $0\n}"
 KEYS = {
-    "intent": {"component": TEXT, "package": TEXT, "action": TEXT, "data": TEXT, "mimeType": TEXT, "flags": "0$0",
+    "intent": {"component": TEXT, "package": TEXT, "action": TEXT, "data": TEXT, "mimeType": TEXT, "flags": '["$0"]',
                "categories": LIST, "extras": BLOCK, "selector": INTENT_SNIPPET,
                "clipData": '{\n    "label": null,\n    "mimeTypes": ["text/plain"],\n    "items": [\n        {"text": "$0"}\n    ]\n}'},
     "clip": {"label": TEXT, "mimeTypes": '["$0"]', "items": '[\n    {"text": "$0"}\n]'},
@@ -50,7 +50,7 @@ REQUEST_SNIPPETS = {"operation": TEXT, "intent": INTENT_SNIPPET, "receiverPermis
 # What each operation needs before it can be saved, written after the operation of a new request.
 OPERATION_SKELETONS = {
     **{name: ',\n"intent": {\n    $0\n}' for name in INTENT_OPERATIONS},
-    "startActivity": ',\n"intent": {\n    "flags": 268435456$0\n}',
+    "startActivity": ',\n"intent": {\n    "flags": ["FLAG_ACTIVITY_NEW_TASK"]$0\n}',
     **{name: ',\n"uri": "content://$0"' for name in PROVIDER_OPERATIONS},
     **{name: ',\n"uri": "content://$0",\n"values": {}' for name in ("insert", "update")},
 }
@@ -94,6 +94,7 @@ class Frame:
         self.key = None            # Key whose value is being written.
         self.state = "key" if bracket == "{" else "value"
         self.fields = {}           # Keys seen so far; text values are kept for `type` and `operation`.
+        self.values = set()        # String members already written in this array.
         self.last_end = start + 1  # Where a missing comma would go.
 
 
@@ -123,6 +124,8 @@ def _scan(text):
         else:
             if top.bracket == "{" and top.key is not None and kind == "string":
                 top.fields[top.key] = _plain(value)
+            elif top.bracket == "[" and kind == "string":
+                top.values.add(_plain(value))
             top.state, top.last_end = "after", end
     return frames
 
@@ -140,7 +143,8 @@ def _kind(frames, root="request"):
     for index, frame in enumerate(frames):
         parent = frames[index - 1] if index else None
         if frame.bracket == "[":
-            kind = {"clip:items": "items", "entry:value": "elements"}.get(f"{kind}:{parent.key if parent else ''}")
+            kind = {"clip:items": "items", "entry:value": "elements", "intent:flags": "flags"}.get(
+                f"{kind}:{parent.key if parent else ''}")
             if kind == "elements" and (parent.fields.get("type") or "") != "Intent[]":
                 kind = None
             continue
@@ -163,7 +167,15 @@ def _kind(frames, root="request"):
     return kind
 
 
-def context(text, offset, root="request"):
+def _flag_names(operation, root_intent):
+    """Put the relevant family first without hiding aliases or other known names."""
+    family = intent_flag_family(operation) if root_intent else None
+    return sorted(NAMED_INTENT_FLAGS, key=lambda name: (
+        not (family == "FLAG_ACTIVITY_" and name == "FLAG_ACTIVITY_NEW_TASK"),
+        not (family and name.startswith(family)), not name.startswith("FLAG_GRANT_"), name))
+
+
+def context(text, offset, root="request", operation=None):
     """Describe the cursor: what is being typed, where it starts, and which names fit there."""
     before = text[:offset]
     last = None
@@ -182,6 +194,7 @@ def context(text, offset, root="request"):
               "comma_at": None, "position": None}
     if top is None:
         return result
+    outer_intent_depth = 2 if root == "request" else 1
     kind = _kind(frames, root)
     root = frames[0].fields
     if top.bracket == "{" and top.state in ("key", "after"):
@@ -205,6 +218,15 @@ def context(text, offset, root="request"):
             names = OPERATIONS
         elif top.bracket == "{" and top.key == "type" and kind == "entry":
             names = TYPES
+        elif kind == "flags" or (kind == "intent" and top.key == "flags"):
+            in_array = kind == "flags"
+            names = _flag_names(root.get("operation") or operation, len(frames) == outer_intent_depth + in_array)
+            result["flag_choices"] = True
+            result["options"] = [
+                (name, f'"{name}"$0' if in_array else f'["{name}"$0]')
+                for name in names if name not in top.values
+            ]
+            return result
         # In a request that has nothing else yet, choosing the operation also writes what it needs.
         skeleton = names is OPERATIONS and not set(root) - {"operation"} and re.fullmatch(r'"?[ \t]*\n\s*\}\s*', text[offset:])
         result["options"] = [(name, f'"{name}"' + (OPERATION_SKELETONS[name] if skeleton else "$0")) for name in names] or \
@@ -219,21 +241,24 @@ def _entry_value(kind):
     return TYPE_DEFAULTS.get(kind, "0$0").replace("$0", "")
 
 
-def completions(text, offset, always=False, root="request"):
+def completions(text, offset, always=False, root="request", operation=None):
     """Matching (label, snippet) pairs, best first. Empty unless something was typed or `always`.
 
     `root` is what the whole document is: a Sender "request", or an "intent" on its own.
     """
-    found = context(text, offset, root)
+    found = context(text, offset, root, operation)
     prefix = found["prefix"].casefold()
-    if not prefix and not always:
+    if not prefix and not always and not (
+        found.get("flag_choices") and (found["quoted"] or text[:offset].rstrip().endswith(("[", ",")))
+    ):
         return found, []
     exact = [option for option in found["options"] if option[0].startswith(found["prefix"])]
     starts = [option for option in found["options"] if option[0].casefold().startswith(prefix) and option not in exact]
     contains = [option for option in found["options"]
                 if prefix in option[0].casefold() and option not in exact and option not in starts]
     matches = exact + starts + contains
-    if len(matches) == 1 and matches[0][0] == found["prefix"] and found["position"] == "value":
+    if (len(matches) == 1 and matches[0][0] == found["prefix"] and found["position"] == "value"
+            and not found.get("flag_choices")):
         return found, []  # Already written in full.
     return found, matches
 

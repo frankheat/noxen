@@ -110,6 +110,18 @@ class InterceptJsonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "flags"):
             self.mods(lambda e: e["extras"]["inner"]["value"].update(flags=False))
 
+    def test_named_flags_stage_numeric_mods_at_the_root_and_in_nested_intents(self):
+        self.assertEqual(self.shown["flags"], ["FLAG_EXCLUDE_STOPPED_PACKAGES"])
+        self.assertEqual(self.mods(lambda e: e.update(flags=16)), [])
+        self.assertEqual(self.mods(lambda e: e["extras"]["inner"]["value"].update(flags=0)), [])
+        self.assertEqual(self.mods(lambda e: e.update(flags=["FLAG_ACTIVITY_NEW_TASK"])),
+                         [("flag_rem", "", "16", ""), ("flag_add", "", "268435456", "")])
+        nested = self.mods(lambda e: e["extras"]["inner"]["value"].update(
+            flags=["FLAG_GRANT_READ_URI_PERMISSION"]))
+        self.assertEqual(json.loads(nested[0][2])["value"]["flags"], 1)
+        with self.assertRaisesRegex(ValueError, "unknown Intent flag"):
+            self.mods(lambda e: e.update(flags=["FLAG_TYPO"]))
+
     def test_clipdata_that_would_shift_indices_is_hidden_and_preserved(self):
         clip = clip_data(self.captured, skip_first=True)
         self.captured["clipData"] = clip
@@ -178,7 +190,8 @@ class InterceptJsonTests(unittest.TestCase):
                          {"type": "boolean", "value": True})
         self.assertEqual(apply_mod_to_json(self.shown, ("nested_action", "inner", "Q", ""))
                          ["extras"]["inner"]["value"]["action"], "Q")
-        self.assertEqual(apply_mod_to_json(self.shown, ("flag_add", "", "0x1", ""))["flags"], 0x11)
+        self.assertEqual(apply_mod_to_json(self.shown, ("flag_add", "", "0x1", ""))["flags"],
+                         ["FLAG_EXCLUDE_STOPPED_PACKAGES", "FLAG_GRANT_READ_URI_PERMISSION"])
         self.assertEqual(apply_mod_to_json(self.shown, ("cat_rem", "", "c1", ""))["categories"], [])
         with self.assertRaisesRegex(ValueError, "cannot be shown in the JSON editor"):
             apply_mod_to_json(self.shown, ("extra_add", "z", "a/b", "component"))
@@ -202,6 +215,7 @@ class InterceptJsonEditorTests(IsolatedAppTestCase):
             self.assertFalse(app.query_one("#intercept_output").display)
             self.assertIs(app.focused, editor.area)
             self.assertEqual(json.loads(editor.area.text)["action"], "test.PING")
+            self.assertEqual(json.loads(editor.area.text)["flags"], ["FLAG_EXCLUDE_STOPPED_PACKAGES"])
             self.assertIn("test.Custom", str(editor.query_one(".json_status").content))
             self.assertFalse(app.check_action("toggle_detail_view", ()))  # Already JSON.
 
@@ -220,10 +234,11 @@ class InterceptJsonEditorTests(IsolatedAppTestCase):
                 await pilot.pause()
                 self.assertIn("intent.extras", str(status.content))
                 self.assertEqual(sent, [])
-                editor.area.load(json.dumps({**original, "action": "EDITED"}))
+                editor.area.load(json.dumps({**original, "action": "EDITED", "flags": ["FLAG_GRANT_READ_URI_PERMISSION"]}))
                 app._forward_from_edit_mode()
                 await pilot.pause()
-            self.assertEqual(sent, [[("action", "", "EDITED", "")]])
+            self.assertEqual(sent, [[("action", "", "EDITED", ""), ("flag_rem", "", "16", ""),
+                                     ("flag_add", "", "1", "")]])
 
             app._exit_edit_mode()
             app._intent_blocked = True  # Held, so the edit bindings apply.

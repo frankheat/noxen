@@ -17,6 +17,30 @@ from noxen.frida_session import SessionConfig
 
 
 class ValidationTests(unittest.TestCase):
+    def test_named_flags_are_preserved_and_resolved_recursively_for_execution(self):
+        flags = ["FLAG_ACTIVITY_NEW_TASK", "FLAG_GRANT_READ_URI_PERMISSION"]
+        child = {"flags": ["FLAG_RECEIVER_OFFLOAD"]}
+        request = {"operation": "startActivity", "intent": {
+            "flags": flags, "selector": copy.deepcopy(child),
+            "extras": {"next": {"type": "Intent[]", "value": [copy.deepcopy(child)]}},
+            "clipData": {"mimeTypes": ["text/plain"], "items": [{"intent": copy.deepcopy(child)}]},
+        }}
+        self.assertEqual(validate_request(request), request)
+        resolved = validate_request(request, for_execution=True)["intent"]
+        self.assertEqual(resolved["flags"], 0x10000001)
+        self.assertEqual(resolved["selector"]["flags"], 0x80000000)
+        self.assertEqual(resolved["extras"]["next"]["value"][0]["flags"], 0x80000000)
+        self.assertEqual(resolved["clipData"]["items"][0]["intent"]["flags"], 0x80000000)
+        self.assertEqual(request["intent"]["flags"], flags)
+
+    def test_missing_flag_errors_suggest_the_right_representation(self):
+        for value, hint in ((9, "268435465"), ([], 'add "FLAG_ACTIVITY_NEW_TASK"')):
+            with self.assertRaisesRegex(SenderError, hint):
+                validate_request({"operation": "startActivity", "intent": {"flags": value}})
+        for value in (["FLAG_TYPO"], [9], "0x9", True, -1, 1 << 32):
+            with self.subTest(value=value), self.assertRaisesRegex(SenderError, "intent.flags"):
+                validate_request({"operation": "sendBroadcast", "intent": {"flags": value}})
+
     def test_comparison_ignores_observation_time_but_keeps_permission_changes(self):
         left = {"id": 1, "sender": {"observedAt": 10, "permissions": [{"name": "test", "granted": True}]}}
         right = copy.deepcopy(left)
@@ -90,6 +114,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def execute(self, key="one"):
         return self.service.execute(self.request["id"], self.request["revision"], self.service.token, key)
+
+    async def test_execution_sends_the_mask_without_overwriting_authored_names(self):
+        request = {"operation": "sendBroadcast", "intent": {"flags": ["FLAG_RECEIVER_FOREGROUND"]}}
+        self.request = self.service.save_request("Named flags", request)
+        with patch.object(self.endpoint, "execute", return_value={"state": "returned"}) as execute:
+            run = self.execute()
+            self.assertEqual((await self.service.wait(run["id"]))["request"], request)
+            execute.assert_called_once_with(
+                {"operation": "sendBroadcast", "intent": {"flags": 0x10000000}}, run["execution_key"])
+        self.assertEqual(self.service.get_request(self.request["id"])["request"], request)
 
     async def test_idempotency_revision_and_one_inflight(self):
         run = self.execute()
@@ -354,11 +388,23 @@ class CaptureTests(unittest.TestCase):
         entry = self.capture()
         original = copy.deepcopy(entry)
         request = prepare_intent_request(entry, "sendBroadcast")
-        self.assertEqual(request["intent"]["flags"], 0x80000000)
+        self.assertEqual(request["intent"]["flags"], ["FLAG_RECEIVER_OFFLOAD"])
+        self.assertEqual(validate_request(request, for_execution=True)["intent"]["flags"], 0x80000000)
         self.assertEqual(request["intent"]["action"], "")
         self.assertIsNone(request["intent"]["data"])
         self.assertEqual(entry, original)
         validate_request(request)
+
+    def test_json_capture_uses_contextual_flag_names_or_keeps_ambiguous_mask(self):
+        entry = self.capture()
+        entry["intent"]["flags"] = 0x10000001
+        for method, expected in (
+            ("startActivityForResult", ["FLAG_GRANT_READ_URI_PERMISSION", "FLAG_ACTIVITY_NEW_TASK"]),
+            ("onReceive", ["FLAG_GRANT_READ_URI_PERMISSION", "FLAG_RECEIVER_FOREGROUND"]),
+            ("unknown", 0x10000001),
+        ):
+            self.assertEqual(capture_as_request(dict(entry, method=method))["intent"]["flags"], expected)
+        self.assertEqual(entry["intent"]["flags"], 0x10000001)
 
     def test_unknown_or_incomplete_fields_cannot_be_replayed_as_empty(self):
         for change in (lambda i: i.pop("selector"),

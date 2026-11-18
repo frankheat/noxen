@@ -26,8 +26,8 @@ from noxen.intent_mods import (
     split_extra_values,
     validate_extra_value,
 )
-from noxen.sender import SenderError, fields, string, typed_values, validate_intent
-from noxen.sender_capture import _intent
+from noxen.sender import SenderError, fields, intent_flag_mask, intent_flags_for_json, string, typed_values, validate_intent
+from noxen.sender_capture import _intent, capture_operation
 
 SCALARS = ("component", "action", "data", "mimeType")
 INTENT_KEYS = ("component", "package", "action", "data", "mimeType", "flags", "categories", "extras",
@@ -44,7 +44,8 @@ def editable_intent(entry):
     """The held Intent as Sender-format JSON, and notes on what could not be captured."""
     notes = []
     try:
-        intent = _intent((entry or {}).get("intent"), "intent", notes=notes, preserve_clip_positions=True)
+        intent = _intent((entry or {}).get("intent"), "intent", notes=notes, preserve_clip_positions=True,
+                         operation=capture_operation(entry))
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return {}, ["This capture is malformed and could not be read in full"]
     return intent, notes
@@ -101,9 +102,7 @@ def _json_to_mods(captured, shown, edited):
             and package is not None and selector is not None:
         raise ValueError("intent: package and selector cannot both be set (Android refuses it)")
     if "flags" in edited and not _same_json(shown.get("flags"), edited["flags"]):
-        if type(edited["flags"]) is not int or not 0 <= edited["flags"] <= 0xFFFFFFFF:
-            raise ValueError("intent.flags: expected unsigned 32-bit integer")
-        draft["flags"] = edited["flags"]
+        draft["flags"] = intent_flag_mask(edited["flags"], "intent.flags", allow_names=True)
     if "categories" in edited and edited["categories"] != shown.get("categories"):
         categories = edited["categories"]
         if not isinstance(categories, list) or not all(isinstance(value, str) for value in categories):
@@ -124,7 +123,9 @@ def _json_to_mods(captured, shown, edited):
                     raise ValueError(f"{refusal}; {key} holds values not captured in full, "
                                      "so it cannot be replaced as a whole") from None
                 if after is not None:
-                    validate_intent(copy.deepcopy({key: after}), "intent")
+                    spec = copy.deepcopy({key: after})
+                    validate_intent(spec, "intent", flag_mode="mask")
+                    after = spec[key]
                 whole.append((kind, "", json.dumps(after, ensure_ascii=False), ""))
     mods = diff_intents(captured or {}, draft)
     # Clear the package before a selector is set, and set it after one is removed: Android forbids both.
@@ -166,7 +167,8 @@ def _extras(draft, shown, edited, captured, notes, whole):
                 if not complete:
                     raise ValueError(f"{refusal}; extras.{key} holds values not captured in full, "
                                      "so it cannot be replaced as a whole") from None
-        typed_values({key: item}, "intent.extras")
+        item = copy.deepcopy(item)
+        typed_values({key: item}, "intent.extras", flag_mode="mask")
         try:
             extra_type, value = _agent_extra(key, item)
         except ValueError:
@@ -264,6 +266,11 @@ def _nested_intent(draft, before, after, path):
     for key in sorted(others - set(NESTED_FIELDS)):
         if _same_json(before.get(key), after.get(key)):
             continue
+        if key == "flags" and key in before and key in after:
+            path_label = f"{_label(path)}.flags"
+            if intent_flag_mask(before[key], path_label, allow_names=True) == intent_flag_mask(
+                    after[key], path_label, allow_names=True):
+                continue
         if key == "extras" and before.get(key) is not None and after.get(key) is not None:
             _nested_value(draft, {"type": "Bundle", "value": before[key]}, {"type": "Bundle", "value": after[key]},
                           (*path, "extras"))
@@ -288,7 +295,7 @@ def _label(path):
     return ".".join(str(part) for part in path)
 
 
-def apply_mod_to_json(intent, mod, captured=None):
+def apply_mod_to_json(intent, mod, captured=None, *, operation=None):
     """A command typed while the editor is open, applied to the JSON. Raises ValueError when it cannot be shown.
 
     `captured` is the held Intent: an extra that was not captured in full is not in the JSON,
@@ -305,8 +312,17 @@ def apply_mod_to_json(intent, mod, captured=None):
         intent["categories"] = categories + [value] if kind == "cat_add" else categories
     elif kind in ("flag_add", "flag_rem"):
         flag = parse_flag_value(value) & 0xFFFFFFFF
-        flags = intent.get("flags") or 0
-        intent["flags"] = flags | flag if kind == "flag_add" else flags & ~flag
+        previous = intent.get("flags", [])
+        flags = intent_flag_mask(previous, "intent.flags", allow_names=True)
+        mask = flags | flag if kind == "flag_add" else flags & ~flag
+        if isinstance(previous, list) and kind == "flag_rem":
+            intent["flags"] = [name for name in previous
+                               if not intent_flag_mask([name], "intent.flags", allow_names=True) & flag]
+        elif isinstance(previous, list):
+            added = intent_flags_for_json(flag & ~flags, operation)
+            intent["flags"] = previous + added if isinstance(added, list) else mask
+        else:
+            intent["flags"] = mask
     elif kind == "extra_rem":
         if key not in (intent.get("extras") or {}) and key in ((captured or {}).get("extras") or {}):
             raise ValueError(f"Extra {key!r} was not captured in full, so it is not in the JSON; "

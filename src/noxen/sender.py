@@ -5,6 +5,7 @@ import json
 import math
 
 from noxen.intent_mods import normalize_component
+from noxen.rendering import INTENT_FLAGS
 
 INTENT_OPERATIONS = (
     "startActivity", "sendBroadcast", "sendOrderedBroadcast", "startService", "startForegroundService", "stopService",
@@ -12,6 +13,31 @@ INTENT_OPERATIONS = (
 PROVIDER_OPERATIONS = ("query", "getType", "insert", "update", "delete", "call", "openFileDescriptor")
 OPERATIONS = INTENT_OPERATIONS + PROVIDER_OPERATIONS
 MAX_REQUEST_BYTES = 256 * 1024
+NAMED_INTENT_FLAGS = {name: bit for bit, names in INTENT_FLAGS for name in names}
+
+
+def intent_flag_family(operation):
+    if operation == "startActivity":
+        return "FLAG_ACTIVITY_"
+    if operation in ("sendBroadcast", "sendOrderedBroadcast"):
+        return "FLAG_RECEIVER_"
+    return None
+
+
+def intent_flags_for_json(mask, operation=None):
+    """Name a captured mask only when every bit has an unambiguous name."""
+    family = intent_flag_family(operation)
+    remaining = mask
+    names = []
+    for bit, aliases in INTENT_FLAGS:
+        if not mask & bit:
+            continue
+        choices = aliases if len(aliases) == 1 else [name for name in aliases if family and name.startswith(family)]
+        if len(choices) != 1:
+            return mask
+        names.append(choices[0])
+        remaining &= ~bit
+    return mask if remaining else names
 
 
 class SenderError(ValueError):
@@ -37,7 +63,21 @@ def string(value, path, nullable=False):
         raise SenderError(f"{path}: unpaired UTF-16 surrogate is not supported") from None
 
 
-def typed_values(values, path, depth=0):
+def intent_flag_mask(value, path, *, allow_names=False):
+    if type(value) is int and 0 <= value <= 0xFFFFFFFF:
+        return value
+    if allow_names and isinstance(value, list):
+        mask = 0
+        for index, name in enumerate(value):
+            if not isinstance(name, str) or name not in NAMED_INTENT_FLAGS:
+                raise SenderError(f"{path}[{index}]: unknown Intent flag {name!r}")
+            mask |= NAMED_INTENT_FLAGS[name]
+        return mask
+    expected = "unsigned 32-bit integer or list of Intent flag names" if allow_names else "unsigned 32-bit integer"
+    raise SenderError(f"{path}: expected {expected}")
+
+
+def typed_values(values, path, depth=0, *, flag_mode=None):
     if depth > 8:
         raise SenderError(f"{path}: nesting exceeds 8 levels")
     if not isinstance(values, dict):
@@ -86,10 +126,10 @@ def typed_values(values, path, depth=0):
                 raise SenderError(f"{path}.{key}: expected one UTF-16 character")
         elif kind == "Bundle":
             if value is not None:
-                typed_values(value, f"{path}.{key}", depth + 1)
+                typed_values(value, f"{path}.{key}", depth + 1, flag_mode=flag_mode)
         elif kind == "Intent":
             if value is not None:
-                validate_intent(value, f"{path}.{key}", depth + 1)
+                validate_intent(value, f"{path}.{key}", depth + 1, flag_mode=flag_mode)
         elif kind == "Uri":
             string(value, f"{path}.{key}", nullable=True)
         elif kind in ("String[]", "boolean[]", "byte[]", "short[]", "int[]", "long[]", "float[]", "double[]", "char[]", "Intent[]"):
@@ -97,12 +137,13 @@ def typed_values(values, path, depth=0):
                 if not isinstance(value, list):
                     raise SenderError(f"{path}.{key}: expected list")
                 for index, element in enumerate(value):
-                    typed_values({str(index): {"type": kind[:-2], "value": element}}, f"{path}.{key}", depth + 1)
+                    typed_values({str(index): {"type": kind[:-2], "value": element}}, f"{path}.{key}", depth + 1,
+                                 flag_mode=flag_mode)
         else:
             raise SenderError(f"{path}.{key}: unsupported type {kind!r}")
 
 
-def validate_intent(intent, path="intent", depth=0):
+def validate_intent(intent, path="intent", depth=0, *, flag_mode=None):
     if depth > 8:
         raise SenderError(f"{path}: nesting exceeds 8 levels")
     fields(intent, ("component", "package", "action", "data", "mimeType", "flags",
@@ -120,9 +161,9 @@ def validate_intent(intent, path="intent", depth=0):
     if intent.get("package") is not None and intent.get("selector") is not None:
         raise SenderError(f"{path}: package and selector cannot both be set")
     if "flags" in intent:
-        value = intent["flags"]
-        if type(value) is not int or not 0 <= value <= 0xffffffff:
-            raise SenderError(f"{path}.flags: expected unsigned 32-bit integer")
+        mask = intent_flag_mask(intent["flags"], f"{path}.flags", allow_names=flag_mode is not None)
+        if flag_mode == "mask":
+            intent["flags"] = mask
     categories = intent.get("categories", [])
     if not isinstance(categories, list) or not all(isinstance(v, str) for v in categories):
         raise SenderError(f"{path}.categories: expected list of strings")
@@ -130,9 +171,9 @@ def validate_intent(intent, path="intent", depth=0):
         # Android keeps categories in a set: a repeated one would be dropped on the device.
         raise SenderError(f"{path}.categories: duplicate category")
     if intent.get("extras") is not None:
-        typed_values(intent["extras"], f"{path}.extras", depth)
+        typed_values(intent["extras"], f"{path}.extras", depth, flag_mode=flag_mode)
     if intent.get("selector") is not None:
-        validate_intent(intent["selector"], f"{path}.selector", depth + 1)
+        validate_intent(intent["selector"], f"{path}.selector", depth + 1, flag_mode=flag_mode)
     clip = intent.get("clipData")
     if clip is not None:
         fields(clip, ("label", "mimeTypes", "items"), f"{path}.clipData")
@@ -148,10 +189,12 @@ def validate_intent(intent, path="intent", depth=0):
                 if key in item:
                     string(item[key], path, nullable=True)
             if item.get("intent") is not None:
-                validate_intent(item["intent"], path, depth + 1)
+                validate_intent(item["intent"], path, depth + 1, flag_mode=flag_mode)
 
 
-def validate_request(raw):
+def validate_request(raw, *, for_execution=False):
+    """Keep authored flag names for storage; resolve them only for the agent."""
+    flag_mode = "mask" if for_execution else "preserve"
     def check_strings(value, depth=0):
         if depth > 32:
             raise SenderError("Request nesting exceeds 32 levels")
@@ -180,13 +223,19 @@ def validate_request(raw):
         raise SenderError("Unsupported Sender operation")
     if operation in INTENT_OPERATIONS:
         fields(value, ("operation", "intent", "receiverPermission"), "request")
-        validate_intent(value.get("intent"))
+        validate_intent(value.get("intent"), flag_mode=flag_mode)
         if "receiverPermission" in value:
             if operation not in ("sendBroadcast", "sendOrderedBroadcast"):
                 raise SenderError("receiverPermission applies only to broadcasts")
             string(value["receiverPermission"], "receiverPermission", nullable=True)
-        if operation == "startActivity" and not value["intent"].get("flags", 0) & 0x10000000:
-            raise SenderError("startActivity requires FLAG_ACTIVITY_NEW_TASK (0x10000000) from the sender application context")
+        if operation == "startActivity":
+            flags = value["intent"].get("flags", 0)
+            mask = intent_flag_mask(flags, "intent.flags", allow_names=True)
+            new_task = NAMED_INTENT_FLAGS["FLAG_ACTIVITY_NEW_TASK"]
+            if not mask & new_task:
+                hint = ('add "FLAG_ACTIVITY_NEW_TASK" to the list' if isinstance(flags, list)
+                        else f"use {mask | new_task} to keep the existing bits")
+                raise SenderError(f"startActivity requires FLAG_ACTIVITY_NEW_TASK from the sender application context; {hint}")
     else:
         allowed = {
             "query": ("projection", "selection", "selectionArgs", "sortOrder", "maxRows", "maxBytes"),
@@ -212,7 +261,7 @@ def validate_request(raw):
         if operation == "call":
             string(value.get("method"), "method")
             if value.get("extras") is not None:
-                typed_values(value["extras"], "extras")
+                typed_values(value["extras"], "extras", flag_mode=flag_mode)
         if operation in ("query", "openFileDescriptor"):
             limits = (("maxRows", 100, 1000), ("maxBytes", 262144, 262144)) if operation == "query" else (("maxBytes", 65536, 262144),)
             for key, default, maximum in limits:

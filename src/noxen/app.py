@@ -527,17 +527,19 @@ class NoxenApp(App):
             self.write_cmd("[red]Cannot edit: Intent is null[/red]")
             return
         shown, notes = editable_intent(self._current_intercepted_entry)
+        operation = capture_operation(self._current_intercepted_entry)
         draft = shown
         try:
             # Commands staged before opening the editor are part of what it shows.
             for mod in self._staged_mods:
-                draft = apply_mod_to_json(draft, mod, self._current_intercepted_entry.get("intent"))
+                draft = apply_mod_to_json(draft, mod, self._current_intercepted_entry.get("intent"), operation=operation)
         except ValueError as error:
             self.write_cmd(f"[red]Cannot open the editor: {error}. Forward, drop or remove the staged change first.[/red]")
             return
         self._staged_mods.clear()
         self._edit_shown = shown
         editor = self.query_one("#edit_form", JsonRequestEditor)
+        editor.area.operation = operation
         editor.area.read_only = False
         editor.area.load(format_request(draft))
         self._edit_notes = notes
@@ -650,7 +652,8 @@ class NoxenApp(App):
         except ValueError as error:
             return f"Fix the JSON before applying a command: {error}"
         try:
-            doc = apply_mod_to_json(doc, mod, (self._current_intercepted_entry or {}).get("intent"))
+            doc = apply_mod_to_json(doc, mod, (self._current_intercepted_entry or {}).get("intent"),
+                                    operation=area.operation)
         except ValueError as error:
             return str(error)
         area.load(format_request(doc))

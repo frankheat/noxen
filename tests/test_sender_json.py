@@ -1,8 +1,11 @@
 import unittest
 
+from textual.app import App
+
 from noxen.sender import validate_request
 from noxen.sender_json import (apply_completion, completions, expand, format_request, highlights, parse,
                                toggle_fold)
+from noxen.sender_json_editor import JsonRequestEditor
 
 
 def complete(marked, pick=None, always=False):
@@ -37,7 +40,7 @@ class SenderJsonTests(unittest.TestCase):
     def test_accepting_a_name_writes_its_structure(self):
         self.assertEqual(complete('{\n    "operation": "sendBroadcast",\n    in|\n}', "intent"),
                          '{\n    "operation": "sendBroadcast",\n    "intent": {\n        "component": |null,\n'
-                         '        "action": null,\n        "data": null,\n        "flags": 0,\n'
+                         '        "action": null,\n        "data": null,\n        "flags": [],\n'
                          '        "categories": [],\n        "extras": {}\n    }\n}')
         # A missing comma after the previous member is added; a typed quote pair is consumed.
         self.assertEqual(complete('{\n    "intent": {\n        "action": "x"\n        "ca|"\n    }\n}', "categories"),
@@ -55,7 +58,31 @@ class SenderJsonTests(unittest.TestCase):
 
     def test_snippets_produce_requests_that_validate(self):
         text = complete('{\n    "operation": "sendBroadcast",\n    in|\n}', "intent").replace("|", "")
-        self.assertEqual(validate_request(parse(text))["intent"]["flags"], 0)
+        self.assertEqual(validate_request(parse(text))["intent"]["flags"], [])
+        text = complete('{\n    "operation": "|"\n}', "startActivity", always=True).replace("|", "")
+        self.assertEqual(validate_request(parse(text))["intent"]["flags"], ["FLAG_ACTIVITY_NEW_TASK"])
+
+    def test_flag_choices_complete_inside_arrays_and_at_the_value(self):
+        activity = '{"operation": "startActivity", "intent": {"flags": [|]}}'
+        broadcast = activity.replace("startActivity", "sendBroadcast")
+        self.assertTrue(complete(activity)[0].startswith("FLAG_ACTIVITY_"))
+        self.assertTrue(complete(broadcast)[0].startswith("FLAG_RECEIVER_"))
+        typed = activity.replace('[|]', '["new_t|"]')
+        result = complete(typed, "FLAG_ACTIVITY_NEW_TASK").replace("|", "")
+        self.assertEqual(validate_request(parse(result))["intent"]["flags"], ["FLAG_ACTIVITY_NEW_TASK"])
+        self.assertNotIn("FLAG_ACTIVITY_NEW_TASK",
+                         complete(activity.replace("[|]", '["FLAG_ACTIVITY_NEW_TASK", |]')))
+        typed = activity.replace('[|]', '|')
+        result = complete(typed, "FLAG_ACTIVITY_NEW_TASK", always=True).replace("|", "")
+        self.assertEqual(validate_request(parse(result))["intent"]["flags"], ["FLAG_ACTIVITY_NEW_TASK"])
+        nested = activity.replace('"flags": [|]', '"selector": {"flags": [|]}')
+        self.assertTrue(complete(nested)[0].startswith("FLAG_GRANT_"))
+        text = '{"flags": ["NEW_T"]}'
+        _, options = completions(text, text.index('T"') + 1, root="intent")
+        self.assertEqual([name for name, _ in options], ["FLAG_ACTIVITY_NEW_TASK"])
+        text = '{"flags": []}'
+        _, options = completions(text, text.index("[") + 1, root="intent", operation="sendBroadcast")
+        self.assertTrue(options[0][0].startswith("FLAG_RECEIVER_"))
 
     def test_folding_hides_blocks_without_changing_the_request(self):
         request = {"operation": "sendBroadcast", "intent": {"action": "a", "extras": {
@@ -93,6 +120,26 @@ class SenderJsonTests(unittest.TestCase):
         self.assertEqual(spans[1][0], (2, 9, "json.key"))        # € is three bytes.
         self.assertEqual(spans[1][2], (11, 14, "json.string"))
         self.assertEqual([name for _, _, name in spans[1]][-3:], ["json.constant", "json.punct", "json.fold"])
+
+
+class SenderFlagEditorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_flag_picker_completes_a_json_string_with_the_keyboard(self):
+        class EditorApp(App):
+            def compose(self):
+                yield JsonRequestEditor()
+
+        app = EditorApp()
+        async with app.run_test(size=(100, 30)) as pilot:
+            editor = app.query_one(JsonRequestEditor).area
+            text = '{"operation":"startActivity","intent":{"flags":["new_t"]}}'
+            editor.load(text)
+            editor.focus()
+            editor.move_cursor((0, text.index("new_t") + len("new_t")))
+            await pilot.press("ctrl+space")
+            self.assertTrue(editor.popup.display)
+            self.assertEqual(editor._matches[0][0], "FLAG_ACTIVITY_NEW_TASK")
+            await pilot.press("enter")
+            self.assertEqual(parse(editor.text)["intent"]["flags"], ["FLAG_ACTIVITY_NEW_TASK"])
 
 
 if __name__ == "__main__":

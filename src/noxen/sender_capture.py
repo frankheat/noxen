@@ -2,7 +2,7 @@
 
 from functools import wraps
 
-from noxen.sender import SenderError
+from noxen.sender import SenderError, intent_flags_for_json
 
 
 def refuses_malformed(function):
@@ -123,7 +123,7 @@ def _value(node, path, notes=None, *, preserve_clip_positions=False):
     return SKIP
 
 
-def _intent(info, path, nested=False, notes=None, *, preserve_clip_positions=False):
+def _intent(info, path, nested=False, notes=None, *, preserve_clip_positions=False, operation=None):
     if not isinstance(info, dict):
         _fail(notes, f"{path}: no structured capture is available")
         return {}
@@ -183,7 +183,7 @@ def _intent(info, path, nested=False, notes=None, *, preserve_clip_positions=Fal
         else:
             result[key] = info[key]
     if "flags" in result:
-        result["flags"] = int(result["flags"]) & 0xffffffff
+        result["flags"] = intent_flags_for_json(int(result["flags"]) & 0xffffffff, operation)
     if nested:
         if "extras" not in info:
             _fail(notes, f"{path}.extras: not captured")
@@ -229,7 +229,8 @@ def prepare_intent_request(entry, operation, notes=None):
     from noxen.sender import INTENT_OPERATIONS
     if operation not in INTENT_OPERATIONS:
         raise SenderError("Choose an Intent sending operation")
-    request = {"operation": operation, "intent": _intent(entry.get("intent"), "intent", notes=notes)}
+    request = {"operation": operation, "intent": _intent(entry.get("intent"), "intent", notes=notes,
+                                                        operation=operation)}
     if operation in ("sendBroadcast", "sendOrderedBroadcast"):
         _receiver_permission(entry, request, notes)
     # Do not add NEW_TASK or change any captured field. The editor can repair a
@@ -249,7 +250,7 @@ def prepare_component_request(package, component):
     if operation is None or not package or not component.get("name"):
         raise SenderError("This component cannot be prepared as a Sender request")
     return {"operation": operation, "intent": {"component": package + "/" + component["name"],
-            "flags": 0x10000000 if operation == "startActivity" else 0}}
+            "flags": ["FLAG_ACTIVITY_NEW_TASK"] if operation == "startActivity" else []}}
 
 
 # Hooked methods whose captured Intent maps to one sending operation. Receiving
@@ -283,7 +284,8 @@ def capture_as_request(entry):
         operation = method if method in INTENT_OPERATIONS else None
         if operation is not None:
             request["operation"] = operation
-        request["intent"] = _intent(entry.get("intent") if isinstance(entry, dict) else None, "intent", notes=notes)
+        request["intent"] = _intent(entry.get("intent") if isinstance(entry, dict) else None, "intent", notes=notes,
+                                    operation=capture_operation(entry) or operation)
         if operation in ("sendBroadcast", "sendOrderedBroadcast"):
             _receiver_permission(entry, request, notes)
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
