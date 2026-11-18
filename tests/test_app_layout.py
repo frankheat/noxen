@@ -12,6 +12,7 @@ from tests.ui_test_case import IsolatedAppTestCase
 
 from noxen.app import (
     HISTORY_COMMAND_OUTPUT_HEIGHT,
+    HomeLogo,
     INTERCEPT_COMMAND_OUTPUT_HEIGHT,
     MAX_COMMAND_OUTPUT_HEIGHT,
     MIN_PANEL_HEIGHT,
@@ -61,6 +62,14 @@ class AppLayoutTests(unittest.TestCase):
         width = css_property("#home_anr_bypass_label", "width")
         if width != "auto":
             self.assertGreaterEqual(int(width), len(label))
+
+    def test_home_logo_keeps_its_half_blocks_at_every_scale(self):
+        self.assertEqual([cells[0] for cells in HomeLogo.brand_lines(1)], HomeLogo._ART)
+        # The top-right notch of "n" fills only the lower half of its cell.
+        n_top = [line[:10] for line in HomeLogo.brand_lines(2)[0]]
+        self.assertEqual(n_top, ["████████  ", "██████████"])
+        n_top = [line[:15] for line in HomeLogo.brand_lines(3)[0]]
+        self.assertEqual(n_top, ["████████████   ", "████████████▄▄▄", "███████████████"])
 
     def test_clamp_height_applies_minimum_and_optional_maximum(self):
         self.assertEqual(clamp_height(1, minimum=3), 3)

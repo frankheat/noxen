@@ -182,33 +182,40 @@ class HomeLogo(Static):
     def on_resize(self) -> None:
         self._render_brand()
 
-    def _lerp_color(self, t: float) -> str:
-        colors = semantic_colors(self.app.current_theme.dark)
-        start = colors.brand_start
-        end = colors.brand_end
-        r = int(int(start[1:3], 16) + (int(end[1:3], 16) - int(start[1:3], 16)) * t)
-        g = int(int(start[3:5], 16) + (int(end[3:5], 16) - int(start[3:5], 16)) * t)
-        b = int(int(start[5:7], 16) + (int(end[5:7], 16) - int(start[5:7], 16)) * t)
-        return f"#{r:02x}{g:02x}{b:02x}"
+    # One colour per row, as in assets/logo.svg.
+    _COLORS = ("#D75F87", "#767676", "#00AF5F")
+    # Each character is two pixels stacked: (top, bottom).
+    _PIXELS = {"█": (True, True), "▄": (False, True), "▀": (True, False)}
+    _CELLS = {(True, True): "█", (False, True): "▄", (True, False): "▀", (False, False): " "}
+
+    @classmethod
+    def brand_lines(cls, scale: int) -> list[list[str]]:
+        """Return the logo scaled by ``scale`` as cell rows for each logo row.
+
+        A row of the logo is ``scale`` cells tall and holds two pixel rows of
+        ``scale`` half cells each, so half blocks keep their shape at any scale.
+        """
+        rows = []
+        for row in cls._ART:
+            pixels = [cls._PIXELS.get(c, (False, False)) for c in row]
+            cells = []
+            for sub in range(scale):
+                halves = (2 * sub < scale, 2 * sub + 1 < scale)
+                cells.append("".join(
+                    cls._CELLS[(top if halves[0] else bottom, top if halves[1] else bottom)] * scale
+                    for top, bottom in pixels
+                ))
+            rows.append(cells)
+        return rows
 
     def _render_brand(self) -> None:
         panel_w = self.size.width
         scale = max(1, panel_w // (len(self._ART[0]) + 4))
         top_pad = self.app.size.height // 4
-        n = len(self._ART)
 
         lines = [""] * top_pad
-        for i, row in enumerate(self._ART):
-            color = self._lerp_color(i / max(1, n - 1))
-            for sub in range(scale):
-                scaled = ''.join(
-                    '█' * scale if c == '█'
-                    else ('█' if sub == scale - 1 else ' ') * scale if c == '▄'
-                    else ('█' if sub == 0 else ' ') * scale if c == '▀'
-                    else c * scale
-                    for c in row
-                )
-                lines.append(f"[bold {color}]{scaled}[/bold {color}]")
+        for color, cells in zip(self._COLORS, self.brand_lines(scale)):
+            lines.extend(f"[bold {color}]{line}[/bold {color}]" for line in cells)
         self.update("\n".join(lines))
 
 

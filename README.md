@@ -2,159 +2,99 @@
   <img src="assets/logo.svg" width="400">
 </p>
 
-Android runtime interception for security research. noxen uses **Frida** to hook Java
-methods in a running Android process and map how app components communicate at
-runtime. It captures attack-surface events such as `android.content.Intent` objects,
-then lets you inspect, modify, forward, or drop them from a terminal UI.
+noxen is a tool for inspecting how the components of an Android app communicate at
+runtime. It uses [Frida](https://frida.re) to hook Java methods in the target process,
+so you can see each Intent as it is sent or received, change it before the app
+continues, or drop it.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![License](https://img.shields.io/badge/license-GPLv3-green)
 
 ![noxen Home tab](assets/screenshots/home.png)
 
-## What It Does
+## What you can do
 
-- Helps map component communication and attack-surface behavior at runtime.
-- Intercepts common Android runtime entry points such as `getIntent`, `startActivity`,
-  `sendBroadcast`, `startService`, and `PendingIntent` creation paths.
-- Shows action, component, data URI, MIME type, selector, ClipData, flags, categories,
-  structured extras, PendingIntent flags,
-  and optional Java stack traces in a plain, section-based detail layout.
-- Attaches each exposed component's `Exported` flag and required permission (with its
-  protection level) to the component that matters: the hooked Class for receiving events or
-  each explicitly named Component in the base Intent or selector for supported
-  Activity, broadcast, and service events. It does not predict implicit targets or
-  classify a selector as active or ignored. It also shows the captured broadcast
-  `receiverPermission` argument separately.
-- Shows an **Info app** tab: a snapshot of the hooked app (identity, build flags, signing,
-  permissions, and a searchable roster of all components with their exported flag,
-  required permission, and access class classified as `open`, `weak`, or `protected`).
-- Lets you modify or clear the base Intent's component, and edit action, data,
-  MIME type, categories, flags, and supported extras before forwarding. Selector
-  and ClipData remain read-only.
-- Lets you drop intercepted intents.
-- Stores captured history, outcomes, filters, columns, and modified intent snapshots
-  in `.noxen` project files.
-- Provides independent Intercept and History filters.
-- Provides an optional Home-tab `Input ANR bypass (experimental)` for rooted test devices,
-  focused on input-dispatch ANRs while noxen intentionally holds a target thread.
-- Uses a structured Log tab with aligned source/level columns and optional
-  `Verbose logs` for detailed hook and bypass diagnostics.
-- Optionally analyzes APKs with androguard to generate additional receiver and
-  service hooks; custom hooks complement rather than replace the bundled defaults.
+- **Hold and edit Intents.** Stop an Intent at a hook, inspect its action, data and
+  extras, change any field and let the app continue.
+- **Review every capture.** Search all captured Intents, including those that were
+  never held.
+- **Follow a value.** Record related Java calls, such as SQL queries, file opens and
+  WebView loads, without stopping them.
+- **Send your own requests.** Start activities, send broadcasts and call content
+  providers from an app already running on the device.
+- **Inspect the app.** Review its signers, permissions and exported components.
+- **Drive noxen from an AI client.** Share the session with an MCP client.
 
-## Quick Start
+Captures, filters and requests are saved in a `.noxen` project file.
 
-> **Windows:** [Windows Terminal](https://apps.microsoft.com/detail/9n0dx20hk701) is required. The classic console host (cmd.exe, old PowerShell window) does not support true color or the Unicode characters used by the TUI.
+## Installation
 
-Clone the repository:
+You need Python 3.10 or later, a terminal with true color and Unicode support, and an
+Android device or emulator running `frida-server`. On Windows, use
+[Windows Terminal](https://apps.microsoft.com/detail/9n0dx20hk701).
 
-```bash
-git clone https://github.com/frankheat/noxen.git
-cd noxen
-```
-
-Install the Frida Python package that matches the `frida-server` version you run on
-the Android device. For example:
+Install the Frida Python package with the same version as `frida-server` on the
+device, then install noxen:
 
 ```bash
 pip install frida==17.7.3
-```
-
-Then install noxen:
-
-```bash
+git clone https://github.com/frankheat/noxen.git
+cd noxen
 pip install .
 ```
 
-Launch noxen:
+noxen has been tested with Frida 16.6.6 and 17.7.3. To also install `noxen-analyze`,
+which generates hooks from an APK, add the analysis extra:
+
+```bash
+pip install ".[analyze]"
+```
+
+## Usage
 
 ```bash
 noxen
 ```
 
-Select the device, mode, and target app from the Home tab. Use `noxen --project session.noxen`
-to open an existing project or `noxen --new-project session` to create one.
-Without either option, noxen creates a persistent timestamped `.noxen` project in
-the current working directory.
-
-If you also want the `noxen-analyze` command for generating app-specific hook
-definitions from an APK, install the optional analysis extra:
-
-```bash
-pip install ".[analyze]"
-noxen-analyze app.apk -o hooks.json
-```
-
-Use an editable install only when developing noxen itself:
-
-```bash
-pip install -e .
-```
-
-Regular installs include the default hook configuration and the packaged Frida
-JavaScript runtime bundles, so noxen does not need to be launched from the source
-checkout after installation.
-
-See the full documentation at **https://frankheat.github.io/noxen-docs/** for all
-options, commands, filters, and project management.
-
-## Interface Preview
+In **Home**, select the device, a mode and the target app, then choose **Connect**.
+noxen opens a new project in the current directory; `noxen --project session.noxen`
+reopens one, and `noxen --new-project session` creates a named one.
 
 ![Intercept tab](assets/screenshots/intercept.png)
 
 ![History tab](assets/screenshots/history.png)
 
-## Playground App
+## Documentation
 
-The companion Android target app lives in the [noxen-playground](https://github.com/frankheat/noxen-playground) repository.
-It is named `noxen playground` on device and uses the package
-`dev.noxen.playground`.
+The full documentation is at **https://frankheat.github.io/noxen-docs/**:
 
-Use it to validate common runtime flows while developing noxen:
+- [Quick start](https://frankheat.github.io/noxen-docs/quick-start/)
+- [Commands](https://frankheat.github.io/noxen-docs/commands/) and
+  [keyboard shortcuts](https://frankheat.github.io/noxen-docs/keyboard-shortcuts/)
+- [Troubleshooting](https://frankheat.github.io/noxen-docs/troubleshooting/)
 
-```bash
-cd ../noxen-playground
-./gradlew assembleDebug
-```
-
-Open `noxen-playground/` directly in Android Studio rather than the workspace parent
-directory.
+[noxen playground](https://github.com/frankheat/noxen-playground) is a companion
+Android app for controlled tests.
 
 ## Development
 
-The Python package uses a `src` layout: importable code lives in `src/noxen/`. This
-keeps the repository root separate from the installed package and avoids shell
-ambiguity between the `noxen` command and a local package directory.
+Install noxen in editable mode with `pip install -e .`. Importable code lives in
+`src/noxen/`.
 
-After changing Python code, run the unit tests. When validating Frida compatibility,
-repeat the same checks with the Frida environments you support.
-
-UI tests use a fresh temporary settings file for each test. They exercise real
-settings loading and saving without reading or changing your personal noxen
-preferences. The temporary settings and path override are cleaned up even when a
-test fails; platform-specific config-path tests remain separate.
-
-For example, this repository is commonly tested with local Frida 16 and Frida 17
-virtual environments:
+Run the tests with each Frida version you support:
 
 ```bash
-../frida-16.6.6/bin/python -m compileall -q src/noxen
-PYTHONPATH=src ../frida-16.6.6/bin/python -m unittest discover -s tests
-../frida-17.7.3/bin/python -m compileall -q src/noxen
-PYTHONPATH=src ../frida-17.7.3/bin/python -m unittest discover -s tests
+python -m compileall -q src/noxen
+PYTHONPATH=src python -m unittest discover -s tests
 ```
 
-After changing `agent/script.js` or `agent/system_server.js`, rebuild the committed
-Frida bundles and packaged runtime copies:
+After changing `agent/script.js` or `agent/system_server.js`, rebuild the Frida bundles
+and the packaged runtime copies, and commit them with the source:
 
 ```bash
 npm install
 npm run build
 ```
-
-Commit the changed source script, its matching `*_bundle.js` file, and the synced
-`src/noxen/runtime/` copy. Do not commit `node_modules/`.
 
 ## License
 
