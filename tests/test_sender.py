@@ -115,6 +115,21 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     def execute(self, key="one"):
         return self.service.execute(self.request["id"], self.request["revision"], self.service.token, key)
 
+    async def test_drafts_follow_rename_but_not_replacement_or_deletion(self):
+        row = self.request
+        self.db.save_sender_draft(row["id"], row["revision"], "{", "Incomplete JSON")
+        renamed = self.service.save_request("Renamed", row["request"], row["id"], row["revision"], preserve_draft=True)
+        self.assertEqual(self.db.sender_draft(row["id"], renamed["revision"]), ("{", "Incomplete JSON"))
+        with self.assertRaisesRegex(ValueError, "Request changed"):
+            self.db.save_sender_draft(row["id"], row["revision"], "stale", "error")
+        changed = self.service.save_request("Renamed", {"operation": "sendBroadcast", "intent": {"action": "new"}},
+                                            row["id"], renamed["revision"])
+        self.assertIsNone(self.db.sender_draft(row["id"], renamed["revision"]))
+        self.assertIsNone(self.db.sender_draft(row["id"], changed["revision"]))
+        self.db.save_sender_draft(row["id"], changed["revision"], "{", "Incomplete JSON")
+        self.service.remove_request(row["id"], changed["revision"])
+        self.assertIsNone(self.db.sender_draft(row["id"], changed["revision"]))
+
     async def test_execution_sends_the_mask_without_overwriting_authored_names(self):
         request = {"operation": "sendBroadcast", "intent": {"flags": ["FLAG_RECEIVER_FOREGROUND"]}}
         self.request = self.service.save_request("Named flags", request)

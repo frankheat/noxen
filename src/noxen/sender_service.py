@@ -168,7 +168,7 @@ class SenderService:
             if error:
                 self.error = f"Sender detach failed: {error}"
 
-    def save_request(self, name, request, request_id=None, revision=0):
+    def save_request(self, name, request, request_id=None, revision=0, *, preserve_draft=False):
         if not isinstance(name, str) or not name.strip() or len(name) > 200 or not name.isprintable():
             raise SenderError("Request name must contain 1–200 printable characters")
         # An empty request is a new one whose operation is still to be chosen. It cannot be sent.
@@ -180,7 +180,7 @@ class SenderService:
         elif type(revision) is not int or revision < 1:
             raise SenderError("Existing requests require their current revision")
         try:
-            revision = self.db.save_sender_request(request_id, revision, name, valid)
+            revision = self.db.save_sender_request(request_id, revision, name, valid, preserve_draft=preserve_draft)
         except ValueError as error:
             raise SenderError(str(error)) from None
         self.version += 1

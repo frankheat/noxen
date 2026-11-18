@@ -143,6 +143,8 @@ class SenderPane(Vertical):
         self._editor_key = None       # What the JSON editor shows: (request id, revision) or ("run", id).
         self._editor_baseline = ""    # Its text as saved, to tell edits apart.
         self._drafts = {}             # Unsaved text of requests that are not on screen.
+        self._saved_draft = None      # (full text, validation error), for the current editor revision.
+        self._editor_write_error = None
         self._autosave = None         # Pending timer of the automatic save.
         self._retry_save = False      # The last save failed for a reason other than the text.
         self._result_shown = None     # What the result panel currently describes.
@@ -200,29 +202,48 @@ class SenderPane(Vertical):
         row, area = self.selected(), self.editor.area
         if row is None or area.read_only:
             return
-        self.editor.say("Editing…" if self.editor_dirty() else
-                        "Choose an operation" if row["request"] == {} else "Saved")
+        if self._saved_draft is not None and self._saved_draft[0] == area.full_text():
+            self.editor.say(self._saved_draft[1], error=True)
+        else:
+            self.editor.say("")
+
+    def editor_needs_save(self):
+        return self.editor_dirty() or (not self.editor.area.read_only and self._saved_draft is not None)
+
+    def update_send_button(self, status=None):
+        status = self.service.status() if status is None else status
+        row = self.selected()
+        self.query_one("#sender_send", Button).disabled = (
+            self._checking_activity_send or status["state"] != "ready" or status["active_run"] is not None
+            or row is None or not row["request"] or self._editor_key != (row["id"], row["revision"])
+            or self.editor.area.read_only or self.editor_needs_save()
+        )
 
     def on_text_area_changed(self, event):
         """Edits are saved on their own, a moment after typing stops."""
         event.stop()
         self.show_editor_state()
+        self.update_send_button()
         if self._autosave is not None:
             self._autosave.stop()
-        self._autosave = self.set_timer(AUTOSAVE_DELAY, self.autosave) if self.editor_dirty() else None
+        self._autosave = self.set_timer(AUTOSAVE_DELAY, self.autosave) if self.editor_needs_save() else None
 
     def autosave(self):
         self._autosave = None
-        if self.editor_dirty():
+        if self.editor_needs_save():
             self.save_editor(quiet=True)
 
     def flush_editor(self):
         """Save typing that the automatic save has not reached yet, e.g. when noxen is closing."""
-        try:
-            if self.selected() is not None and self.editor_dirty():
-                self.save_editor(quiet=True)
-        except Exception:
-            pass  # The pane may already be coming down; an unsaved edit must not block closing.
+        self._editor_write_error = None
+        if self.selected() is not None and self.editor_needs_save():
+            self.save_editor(quiet=True)
+        return self._editor_write_error
+
+    def _editor_write_failed(self, error):
+        self._editor_write_error = str(error)
+        self._retry_save = isinstance(error, (OSError, sqlite3.Error))
+        self.editor.say(f"Could not save draft: {error}", error=True)
 
     def save_editor(self, quiet=False):
         """Save the JSON on screen. Returns the saved request, or None if it is not valid.
@@ -231,30 +252,52 @@ class SenderPane(Vertical):
         while typing, so it is only noted, without moving the cursor.
         """
         row, area, key = self.selected(), self.editor.area, self._editor_key
-        if row is None or key is None or key[0] not in (row["id"], "run"):
+        self._editor_write_error = None
+        if row is None or key is None or key[0] != row["id"] or area.read_only:
             return None  # The editor has not caught up with the selected tab yet: nothing here belongs to it.
-        if area.read_only or not self.editor_dirty():
+        text = area.full_text()
+        db = self.service.db
+        if text == self._editor_baseline:
+            if self._saved_draft is not None:
+                try:
+                    db.clear_sender_draft(*key)
+                except (OSError, sqlite3.Error) as error:
+                    self._editor_write_failed(error)
+                    return None
+                self._saved_draft = None
+                self.show_editor_state()
+                self.update_send_button()
             return row
+        if self._saved_draft is not None and self._saved_draft[0] == text:
+            return None
         try:
             # Based on the revision the text was loaded from, so a change made elsewhere is a conflict.
             saved = self.service.save_request(row["name"], sender_json.parse(area.text, area.folds),
                                               row["id"], key[1])
-        except (ValueError, OSError, sqlite3.Error) as error:
-            # Text that is not valid waits for the next edit; a storage failure is tried again.
-            self._retry_save = not isinstance(error, ValueError)
-            if quiet:
-                self.editor.say(f"Not saved yet · {error}")
-                return None
-            self.editor.say(str(error), error=True)
-            if (line := re.match(r"Line (\d+), column (\d+)", str(error))) and not area.folds:
-                area.move_cursor((int(line.group(1)) - 1, int(line.group(2)) - 1))
-            area.focus()
+        except ValueError as error:
+            try:
+                db.save_sender_draft(*key, text, str(error))
+            except (ValueError, OSError, sqlite3.Error) as write_error:
+                self._editor_write_failed(write_error)
+            else:
+                self._saved_draft = (text, str(error))
+                self.show_editor_state()
+            self.update_send_button()
+            if not quiet:
+                if (line := re.match(r"Line (\d+), column (\d+)", str(error))) and not area.folds:
+                    area.move_cursor((int(line.group(1)) - 1, int(line.group(2)) - 1))
+                area.focus()
             return None
-        self._editor_baseline = area.full_text()
+        except (OSError, sqlite3.Error) as error:
+            self._editor_write_failed(error)
+            return None
+        self._saved_draft = None  # Cleared in the same transaction as the valid revision.
+        self._editor_baseline = text
         self._editor_key = (saved["id"], saved["revision"])
         self._requests = [dict(r, revision=saved["revision"], request=saved["request"]) if r["id"] == saved["id"] else r
                           for r in self._requests]
         self.show_editor_state()
+        self.update_send_button()
         return self.selected()
 
     def show_request_json(self, row, run):
@@ -262,6 +305,7 @@ class SenderPane(Vertical):
         area = self.editor.area
         if row is None:
             self._editor_key, self._editor_baseline = None, ""
+            self._saved_draft = None
             area.read_only = True
             area.load("")
             self.editor.say("No requests yet. Press + to create one.")
@@ -270,6 +314,7 @@ class SenderPane(Vertical):
             if key != self._editor_key:
                 self.stash_draft()
                 self._editor_key, self._editor_baseline = key, ""
+                self._saved_draft = None
                 area.read_only = True
                 area.load(sender_json.format_request(run["request"]))
             self.editor.say(f"As sent in run #{run['id']} · read only")
@@ -282,8 +327,11 @@ class SenderPane(Vertical):
             if key != self._editor_key:
                 self.stash_draft()
                 saved_text = request_text(row["request"])
-                # A draft keeps the revision it was written against, so a later change still conflicts.
-                text, folds, revision, baseline = self._drafts.pop(row["id"], (saved_text, {}, row["revision"], saved_text))
+                self._saved_draft = self.service.db.sender_draft(*key)
+                draft_text = self._saved_draft[0] if self._saved_draft is not None else saved_text
+                cached = self._drafts.pop(row["id"], None)
+                text, folds, revision, baseline = cached if cached and cached[2] == row["revision"] else (
+                    draft_text, {}, row["revision"], saved_text)
                 self._editor_key, self._editor_baseline = (row["id"], revision), baseline
                 area.read_only = False
                 area.load(text, folds)
@@ -294,6 +342,7 @@ class SenderPane(Vertical):
             if self._suggest_on_load == row["id"]:
                 self._suggest_on_load = None
         self.show_editor_state()
+        self.update_send_button()
 
     def stash_draft(self):
         """Keep what the automatic save cannot: text that is not valid yet, and which blocks are folded."""
@@ -303,8 +352,10 @@ class SenderPane(Vertical):
 
     def select_request(self, request_id):
         if request_id != self._selected_id:
-            if self.selected() is not None and self.editor_dirty():
-                self.save_editor(quiet=True)  # Leave nothing valid unsaved behind; invalid text stays a draft.
+            if self.selected() is not None and self.editor_needs_save():
+                self.save_editor(quiet=True)
+                if self._editor_write_error:
+                    return  # Keep the unsaved editor visible until storage can be retried.
             self._run_id = None
         self._selected_id = request_id
         for tab in self.query(RequestTab):
@@ -335,10 +386,7 @@ class SenderPane(Vertical):
         self.query_one("#sender_state", Label).update(Text(label))
         self.query_one("#sender_disconnect", Button).disabled = status["state"] == "disconnected"
         row = self.selected()
-        self.query_one("#sender_send", Button).disabled = (
-            self._checking_activity_send or status["state"] != "ready" or status["active_run"] is not None
-            or row is None or row["request"] == {}
-        )
+        self.update_send_button(status)
         self.query_one("#sender_cancel_run", Button).disabled = not (
             row is not None and status["active_run"] is not None and status["active_run"] in self._run_ids[:1]
             and row["request"].get("operation") in ("query", "openFileDescriptor"))
@@ -469,16 +517,22 @@ class SenderPane(Vertical):
     def receive_request(self, request):
         """Add a request prepared in another tab and select it, named with the next number like +.
 
-        One that is not valid as captured is still shown, as unsaved text over
-        an empty request, so it can be repaired here instead of being altered.
+        One that is not valid as captured is saved as a draft over an empty
+        request, so it can be repaired here instead of being altered.
         """
         name = self.next_name()
         try:
             saved = self.service.save_request(name, request)
         except SenderError as error:
             saved = self.service.save_request(name, {})
-            self._drafts[saved["id"]] = (sender_json.format_request(request), {}, saved["revision"], NEW_REQUEST_TEXT)
-            self.notify(f"{error}. It is in Sender as request {name}, unsaved: fix it there.", severity="warning")
+            text = sender_json.format_request(request)
+            try:
+                self.service.db.save_sender_draft(saved["id"], saved["revision"], text, str(error))
+            except (ValueError, OSError, sqlite3.Error) as write_error:
+                self._drafts[saved["id"]] = (text, {}, saved["revision"], NEW_REQUEST_TEXT)
+                self.notify(f"Could not save draft {name}: {write_error}", severity="error")
+            else:
+                self.notify(f"Sender request {name}: {error}", severity="warning")
         else:
             self.notify(f"Sent to Sender as request {name}")
         self.select_request(saved["id"])
@@ -487,6 +541,10 @@ class SenderPane(Vertical):
         if self._run_ids:
             current = self._run_ids.index(self._run_id) if self._run_id in self._run_ids else 0
             target = max(0, min(len(self._run_ids) - 1, current + step))
+            if current != target and self.editor_needs_save():
+                self.save_editor(quiet=True)
+                if self._editor_write_error:
+                    return
             self._run_id = None if target == 0 else self._run_ids[target]
 
     def dispatch_request(self, row, token):
@@ -528,10 +586,15 @@ class SenderPane(Vertical):
                             return
                         try:
                             current = self.service.db.sender_request(request_id)
-                            saved = self.service.save_request(name, current["request"], request_id, current["revision"])
+                            saved = self.service.save_request(name, current["request"], request_id, current["revision"],
+                                                              preserve_draft=True)
                             # Only the name changed: text being typed is still based on the same request.
                             if self._editor_key == (request_id, current["revision"]):
                                 self._editor_key = (request_id, saved["revision"])
+                            self._requests = [
+                                dict(item, revision=saved["revision"], name=saved["name"])
+                                if item["id"] == request_id else item for item in self._requests
+                            ]
                             draft = self._drafts.get(request_id)
                             if draft is not None and draft[2] == current["revision"]:
                                 self._drafts[request_id] = (draft[0], draft[1], saved["revision"], draft[3])

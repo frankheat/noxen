@@ -25,6 +25,76 @@ async def settle(pilot, condition, timeout=5.0):
 
 
 class SenderUITests(IsolatedAppTestCase):
+    async def test_invalid_drafts_survive_autosave_quit_and_reopen_without_becoming_sendable(self):
+        path = self.settings_path.parent / "drafts.noxen"
+        app = NoxenApp(SimpleNamespace(project=None, new_project=str(path), skip_device_scan=True))
+        valid = {"operation": "sendBroadcast", "intent": {"action": "before"}}
+        invalid_json = '{\n    "operation": "sendBroadcast",'
+        invalid_request = '{"operation":"startActivity","intent":{"flags":[]}}'
+        async with app.run_test(size=(120, 42)) as pilot:
+            service = app.sender_service
+            first = service.save_request("1", valid)
+            second = service.save_request("2", {})
+            app.query_one("#main_tabs").active = "tab_sender"
+            pane = app.query_one(SenderPane)
+            await settle(pilot, lambda: pane._editor_key == (first["id"], first["revision"]))
+            pane.editor.area.load(invalid_json)
+            await settle(pilot, lambda: app.db.sender_draft(first["id"], first["revision"]) is not None)
+            status = pane.editor.query_one(".json_status")
+            self.assertTrue(status.has_class("error"))
+            self.assertEqual(str(status.content), app.db.sender_draft(first["id"], first["revision"])[1])
+            self.assertEqual(app.db.sender_request(first["id"]), first)
+            pane.select_request(second["id"])
+            await settle(pilot, lambda: pane._editor_key == (second["id"], second["revision"]))
+            pane.editor.area.load(invalid_request)
+            with patch.object(app.db, "save_sender_draft", side_effect=sqlite3.OperationalError("disk full")):
+                await pilot.press("ctrl+q")  # Flush even if the debounce has not fired yet.
+                await settle(pilot, lambda: isinstance(app.screen, RecordingDialog))
+                warning = str(app.screen.query_one("#recording_message").render())
+                self.assertIn("Could not save draft", warning)
+                self.assertIn("disk full", warning)
+            app.screen.dismiss(False)  # Retry once storage is available again.
+            await pilot.pause()
+
+        reopened = NoxenApp(SimpleNamespace(project=str(path), new_project=None, skip_device_scan=True))
+        async with reopened.run_test(size=(120, 42)) as pilot:
+            service = reopened.sender_service
+            sent = []
+            endpoint = SimpleNamespace(device_id="emulator", is_ready=lambda: True, close=lambda: None,
+                                       connect=lambda package: {"package": package, "pid": 1, "uid": 10001},
+                                       execute=lambda *args: sent.append(args))
+            await service.connect(endpoint, "test.app", service.token)
+            reopened.query_one("#main_tabs").active = "tab_sender"
+            pane = reopened.query_one(SenderPane)
+            await settle(pilot, lambda: pane.editor.area.text == invalid_json)
+            self.assertEqual(pane.editor.area.text, invalid_json)
+            status = pane.editor.query_one(".json_status")
+            self.assertTrue(status.has_class("error"))
+            self.assertEqual(str(status.content), reopened.db.sender_draft(first["id"], first["revision"])[1])
+            self.assertTrue(pane.query_one("#sender_send").disabled)
+            await pilot.click("#sender_send")
+            self.assertEqual(sent, [])
+            pane.select_request(second["id"])
+            await settle(pilot, lambda: pane.editor.area.text == invalid_request)
+            self.assertEqual(pane.editor.area.text, invalid_request)
+            self.assertIn("FLAG_ACTIVITY_NEW_TASK", str(pane.editor.query_one(".json_status").content))
+            self.assertEqual(reopened.db.sender_request(second["id"]), second)
+            pane.editor.area.load(NEW_REQUEST_TEXT)
+            await settle(pilot, lambda: reopened.db.sender_draft(second["id"], second["revision"]) is None)
+            self.assertIsNone(reopened.db.sender_draft(second["id"], second["revision"]))
+            self.assertEqual(reopened.db.sender_request(second["id"]), second)
+            pane.select_request(first["id"])
+            await settle(pilot, lambda: pane.editor.area.text == invalid_json)
+            pane.editor.area.load('{"operation":"sendBroadcast","intent":{"action":"fixed"}}')
+            await settle(pilot, lambda: not pane.query_one("#sender_send").disabled)
+            self.assertFalse(pane.query_one("#sender_send").disabled)
+            self.assertEqual(str(status.content), "")
+            self.assertFalse(status.has_class("error"))
+            repaired = reopened.db.sender_request(first["id"])
+            self.assertEqual(repaired["request"]["intent"]["action"], "fixed")
+            self.assertIsNone(reopened.db.sender_draft(first["id"], first["revision"]))
+            self.assertIsNone(reopened.db.sender_draft(first["id"], repaired["revision"]))
+
     async def test_background_launch_can_be_cancelled_or_sent_without_claiming_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
             app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
@@ -89,6 +159,7 @@ class SenderUITests(IsolatedAppTestCase):
                     area.load(area.text.replace('"mimeType": ""', '"mimeType": "", "package": null'))
                     await pilot.pause(1.2)
                     self.assertTrue(pane.editor_dirty())
+                    self.assertIn("Could not save draft: disk full", str(pane.editor.query_one(".json_status").content))
                 await pilot.pause(2.2)  # Saved on its own once it can be.
                 self.assertFalse(pane.editor_dirty())
                 self.assertEqual(app.db.sender_request(saved["id"])["request"]["intent"], {
@@ -163,7 +234,7 @@ class SenderUITests(IsolatedAppTestCase):
                     self.assertTrue(pane.editor.query_one(CompletionList).display)  # ...the choices are listed.
                     self.assertEqual(area._matches[0][0], "startActivity")
                     self.assertTrue(pane.query_one("#sender_send").disabled)
-                    self.assertEqual(str(pane.editor.query_one(".json_status").content), "Choose an operation")
+                    self.assertEqual(str(pane.editor.query_one(".json_status").content), "")
                 self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1", "2", "3"])
                 self.assertIs(app.focused, area)
                 # Choosing the operation also writes what it needs, and the request is saved.
@@ -387,7 +458,7 @@ class SenderUITests(IsolatedAppTestCase):
                 pane.select_request(first["id"])
                 await pilot.pause(0.6)
 
-                # Invalid text is not saved, and Send does not send it.
+                # Invalid text is saved only as a draft, and Send does not send it.
                 before = service.db.sender_request(first["id"])
                 area.focus()
                 area.move_cursor(area.document.end)
@@ -476,7 +547,7 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.pause()
                 self.assertEqual(app.db.sender_request(pane._selected_id)["request"]["operation"], "sendBroadcast")
 
-                # startActivity without NEW_TASK cannot be saved as captured: it arrives as unsaved text to repair.
+                # startActivity without NEW_TASK arrives as a draft to repair.
                 app._history_selected_entry = {"id": 9, "method": "startActivity", "intent": intent}
                 await pilot.press("ctrl+r")
                 await pilot.pause(0.6)
@@ -485,6 +556,8 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertIn('"operation": "startActivity"', pane.editor.area.text)
                 self.assertIn('"action": "test.PING"', pane.editor.area.text)
                 self.assertTrue(pane.editor_dirty())
+                row = app.db.sender_request(pane._selected_id)
+                self.assertIn("FLAG_ACTIVITY_NEW_TASK", app.db.sender_draft(row["id"], row["revision"])[1])
 
                 await pilot.click("#--content-tab-tab_monitor")
                 await pilot.pause(0.3)

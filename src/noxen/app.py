@@ -2365,7 +2365,14 @@ class NoxenApp(App):
                 ))
                 if exit_anyway:
                     break
-            self.query_one(SenderPane).flush_editor()
+            sender = self.query_one(SenderPane)
+            while error := sender.flush_editor():
+                exit_anyway = await self.push_screen_wait(RecordingDialog(
+                    f"Could not save draft.\n\n{error}",
+                    "Exit anyway", "Retry",
+                ))
+                if exit_anyway:
+                    break
             await self.sender_service.disconnect(self.sender_service.token)
             self.sender_service.retry_save()
             while self.sender_service.unsaved:

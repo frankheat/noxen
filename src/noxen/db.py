@@ -296,6 +296,12 @@ class ProjectDB:
                 name TEXT NOT NULL,
                 payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sender_drafts (
+                request_id TEXT PRIMARY KEY REFERENCES sender_requests(id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                error TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS sender_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 execution_key TEXT NOT NULL UNIQUE,
@@ -363,7 +369,29 @@ class ProjectDB:
             ).fetchone()
         return dict(id=row[0], revision=row[1], name=row[2], request=json.loads(row[3])) if row else None
 
-    def save_sender_request(self, request_id, revision, name, request):
+    def sender_draft(self, request_id, revision):
+        with self._lock:
+            row = self._require_connection().execute(
+                "SELECT text, error FROM sender_drafts WHERE request_id=? AND revision=?",
+                (request_id, revision),
+            ).fetchone()
+        return tuple(row) if row else None
+
+    def save_sender_draft(self, request_id, revision, text, error):
+        with self._lock, self._require_connection() as conn:
+            if conn.execute(
+                """INSERT INTO sender_drafts (request_id, revision, text, error)
+                   SELECT id, revision, ?, ? FROM sender_requests WHERE id=? AND revision=?
+                   ON CONFLICT(request_id) DO UPDATE SET revision=excluded.revision, text=excluded.text, error=excluded.error""",
+                (text, error, request_id, revision),
+            ).rowcount != 1:
+                raise ValueError("Request changed; reload it before saving the draft")
+
+    def clear_sender_draft(self, request_id, revision):
+        with self._lock, self._require_connection() as conn:
+            conn.execute("DELETE FROM sender_drafts WHERE request_id=? AND revision=?", (request_id, revision))
+
+    def save_sender_request(self, request_id, revision, name, request, *, preserve_draft=False):
         with self._lock, self._require_connection() as conn:
             if revision == 0:
                 conn.execute("INSERT INTO sender_requests VALUES (?, 1, ?, ?)",
@@ -373,6 +401,11 @@ class ProjectDB:
                 (name, json.dumps(request, ensure_ascii=False), request_id, revision),
             ).rowcount != 1:
                 raise ValueError("Request changed; reload it before saving")
+            if preserve_draft:
+                conn.execute("UPDATE sender_drafts SET revision=? WHERE request_id=? AND revision=?",
+                             (revision + 1, request_id, revision))
+            else:
+                conn.execute("DELETE FROM sender_drafts WHERE request_id=?", (request_id,))
         return revision + 1
 
     def remove_sender_request(self, request_id, revision):
