@@ -55,7 +55,7 @@ def _complete(node, path, notes=None):
     return True
 
 
-def _bundle(node, path, notes=None):
+def _bundle(node, path, notes=None, *, preserve_clip_positions=False):
     if node is None:
         return {}
     if not isinstance(node, dict):
@@ -71,13 +71,14 @@ def _bundle(node, path, notes=None):
         if item.get("keyTruncated") or item["key"] in result:
             _fail(notes, f"{path}: a key was truncated or duplicated")
             continue
-        value = _value(item["value"], f"{path}.{item['key']}", notes)
+        value = _value(item["value"], f"{path}.{item['key']}", notes,
+                       preserve_clip_positions=preserve_clip_positions)
         if value is not SKIP:
             result[item["key"]] = value
     return result
 
 
-def _value(node, path, notes=None):
+def _value(node, path, notes=None, *, preserve_clip_positions=False):
     """One typed value, or SKIP when it was not captured in full (only possible with `notes`)."""
     if not _complete(node, path, notes):
         return SKIP
@@ -85,9 +86,11 @@ def _value(node, path, notes=None):
     if kind == "null":
         return {"type": "String", "value": None}
     if kind == "intent":
-        return {"type": "Intent", "value": _intent(node, path, nested=True, notes=notes)}
+        return {"type": "Intent", "value": _intent(node, path, nested=True, notes=notes,
+                                                   preserve_clip_positions=preserve_clip_positions)}
     if kind == "bundle" and node.get("type") == "android.os.Bundle":
-        return {"type": "Bundle", "value": _bundle(node, path, notes)}
+        return {"type": "Bundle", "value": _bundle(node, path, notes,
+                                                   preserve_clip_positions=preserve_clip_positions)}
     java_type = node.get("type", "")
     if kind == "scalar" and (java_type == "android.net.Uri" or java_type.startswith("android.net.Uri$")):
         return {"type": "Uri", "value": node["value"]}
@@ -112,14 +115,15 @@ def _value(node, path, notes=None):
                   "[B": "byte", "[S": "short", "[F": "float", "[D": "double", "[C": "char",
                   "[Landroid.content.Intent;": "Intent"}.get(node.get("type"))
         if target and node.get("count") == len(node.get("items", [])):
-            items = [_value(item, f"{path}[{index}]", notes) for index, item in enumerate(node["items"])]
+            items = [_value(item, f"{path}[{index}]", notes, preserve_clip_positions=preserve_clip_positions)
+                     for index, item in enumerate(node["items"])]
             if all(item is not SKIP and (item["type"] == target or item["value"] is None) for item in items):
                 return {"type": target + "[]", "value": [item["value"] for item in items]}
     _fail(notes, f"{path}: cannot reconstruct {node.get('type') or kind}; replace or remove it explicitly")
     return SKIP
 
 
-def _intent(info, path, nested=False, notes=None):
+def _intent(info, path, nested=False, notes=None, *, preserve_clip_positions=False):
     if not isinstance(info, dict):
         _fail(notes, f"{path}: no structured capture is available")
         return {}
@@ -140,7 +144,9 @@ def _intent(info, path, nested=False, notes=None):
         if key in dropped or (key not in ("selector", "clipData") and _at_limit(info[key])):
             continue
         if key == "selector":
-            result[key] = None if info[key] is None else _intent(info[key], f"{path}.selector", nested=True, notes=notes)
+            result[key] = None if info[key] is None else _intent(
+                info[key], f"{path}.selector", nested=True, notes=notes,
+                preserve_clip_positions=preserve_clip_positions)
         elif key == "clipData":
             clip = info[key]
             if clip is None:
@@ -153,14 +159,21 @@ def _intent(info, path, nested=False, notes=None):
             if clip.get("kind") != "clipdata" or clip.get("count") != len(clip.get("items", [])):
                 _fail(notes, f"{path}.clipData: incomplete capture")
             items = []
-            for item in clip.get("items", []):
+            captured_items = clip.get("items", [])
+            for item in captured_items:
                 if not _complete(item, f"{path}.clipData.item", notes):
                     continue
                 if not all(k in item for k in ("text", "html", "uri", "intent")):
                     _fail(notes, f"{path}.clipData: item fields were not captured")
                 items.append({"text": item.get("text"), "htmlText": item.get("html"), "uri": item.get("uri"),
                               "intent": None if item.get("intent") is None else
-                              _intent(item["intent"], path + ".clipData.intent", nested=True, notes=notes)})
+                              _intent(item["intent"], path + ".clipData.intent", nested=True, notes=notes,
+                                      preserve_clip_positions=preserve_clip_positions)})
+            if preserve_clip_positions and len(items) != len(captured_items):
+                # Intercept paths address the original ClipData by index. A
+                # compacted list is safe to display elsewhere, but not to edit.
+                _fail(notes, f"{path}.clipData: omitted from the editor to preserve item positions")
+                continue
             mime_types = [value for value in clip.get("mimeTypes") or [] if not _at_limit(value)]
             if items and mime_types:
                 result[key] = {"label": None if _at_limit(clip.get("label")) else clip.get("label"),
@@ -174,7 +187,8 @@ def _intent(info, path, nested=False, notes=None):
     if nested:
         if "extras" not in info:
             _fail(notes, f"{path}.extras: not captured")
-        result["extras"] = None if info.get("extras") is None else _bundle(info["extras"], path + ".extras", notes)
+        result["extras"] = None if info.get("extras") is None else _bundle(
+            info["extras"], path + ".extras", notes, preserve_clip_positions=preserve_clip_positions)
     else:
         metadata = info.get("extrasMeta")
         if (metadata is None and info.get("extras")) or (metadata and (metadata.get("error") or metadata.get("omitted"))):
@@ -184,7 +198,8 @@ def _intent(info, path, nested=False, notes=None):
             if item.get("keyTruncated") or item.get("structuredVersion") != 1:
                 _fail(notes, f"{path}.extras.{key}: incomplete or legacy capture")
                 continue
-            value = _value(item.get("structured"), path + ".extras.'" + key + "'", notes)
+            value = _value(item.get("structured"), path + ".extras.'" + key + "'", notes,
+                           preserve_clip_positions=preserve_clip_positions)
             if value is not SKIP:
                 result["extras"][key] = value
         if not result["extras"] and metadata is None:

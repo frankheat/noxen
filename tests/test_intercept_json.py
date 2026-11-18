@@ -32,6 +32,16 @@ def captured():
                        "inner": extra(nested)}}
 
 
+def clip_data(capture, *, skip_first=False):
+    inner = capture["extras"]["inner"]["structured"]
+    return {"kind": "clipdata", "count": 2, "mimeTypes": ["text/plain"], "items": [
+        {"kind": "clipitem", "text": "x" * 2048 if skip_first else "first", "html": None,
+         "uri": None, "intent": {**inner, "action": "FIRST"}},
+        {"kind": "clipitem", "text": "second", "html": None,
+         "uri": None, "intent": {**inner, "action": "SECOND"}},
+    ]}
+
+
 class InterceptJsonTests(unittest.TestCase):
     def setUp(self):
         self.captured = captured()
@@ -60,7 +70,9 @@ class InterceptJsonTests(unittest.TestCase):
         # A field deleted from the JSON is cleared; the uncaptured extra is never removed.
         self.assertEqual(self.mods(lambda e: e.pop("action")), [("action", "", None, "")])
         self.assertEqual(self.mods(lambda e: e.update(action="")), [("action", "", "", "")])  # Empty, not cleared.
-        self.assertNotIn(("extra_rem", "obj", "", ""), self.mods(lambda e: e["extras"].clear()))
+        for clear in (lambda e: e.pop("extras"), lambda e: e.update(extras=None),
+                      lambda e: e["extras"].clear()):
+            self.assertCountEqual(self.mods(clear), [("extra_rem", "n", "", ""), ("extra_rem", "inner", "", "")])
 
     def test_typed_values_are_written_the_way_the_agent_reads_them(self):
         add = lambda key, item: self.mods(lambda e: e["extras"].update({key: item}))  # noqa: E731
@@ -78,6 +90,9 @@ class InterceptJsonTests(unittest.TestCase):
         for change, message in (
             (lambda e: e.update(component="x"), "package/class"),
             (lambda e: e.update(flags=-1), "flags"),
+            (lambda e: e.update(flags=16.0), "flags"),
+            (lambda e: e.update(extras=[]), "intent.extras"),
+            (lambda e: e.update(extras=False), "intent.extras"),
             (lambda e: e.update(categories=["a", "a"]), "duplicate category"),
             (lambda e: e.update(extra=1), "unsupported fields"),
             (lambda e: e["extras"].update(s={"type": "short", "value": 1 << 20}), "short out of range"),
@@ -86,6 +101,36 @@ class InterceptJsonTests(unittest.TestCase):
         ):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 self.mods(change)
+
+    def test_bool_cannot_pass_as_the_same_int_at_any_depth(self):
+        self.captured["flags"] = 1
+        self.shown, _ = editable_intent({"intent": self.captured})
+        with self.assertRaisesRegex(ValueError, "flags"):
+            self.mods(lambda e: e.update(flags=True))
+        with self.assertRaisesRegex(ValueError, "flags"):
+            self.mods(lambda e: e["extras"]["inner"]["value"].update(flags=False))
+
+    def test_clipdata_that_would_shift_indices_is_hidden_and_preserved(self):
+        clip = clip_data(self.captured, skip_first=True)
+        self.captured["clipData"] = clip
+        self.captured["extras"]["inner"]["structured"]["clipData"] = copy.deepcopy(clip)
+        self.shown, notes = editable_intent({"intent": self.captured})
+        self.assertNotIn("clipData", self.shown)
+        self.assertNotIn("clipData", self.shown["extras"]["inner"]["value"])
+        self.assertTrue(any("preserve item positions" in note for note in notes))
+        self.assertEqual(self.mods(lambda e: e.update(action="X")), [("action", "", "X", "")])
+        with self.assertRaisesRegex(ValueError, "not captured in full"):
+            self.mods(lambda e: e.update(clipData={"items": []}))
+        with self.assertRaisesRegex(ValueError, "not in the JSON"):
+            apply_mod_to_json(self.shown, ("nested_action", "", "X", '["clipData", 1]'), self.captured)
+
+    def test_complete_clipdata_keeps_indices_and_checks_keys(self):
+        self.captured["clipData"] = clip_data(self.captured)
+        self.shown, _ = editable_intent({"intent": self.captured})
+        self.assertEqual(self.mods(lambda e: e["clipData"]["items"][1]["intent"].update(action="X")),
+                         [("nested_action", "", "X", '["clipData", 1]')])
+        with self.assertRaisesRegex(ValueError, "unsupported fields: mimeTypez"):
+            self.mods(lambda e: e["clipData"].update(mimeTypez=["text/plain"]))
 
     def test_any_sender_type_and_structure_is_set_as_a_whole_value(self):
         whole = lambda key, item: ("extra_json", key, json.dumps(item, ensure_ascii=False), "")  # noqa: E731
@@ -169,7 +214,13 @@ class InterceptJsonEditorTests(IsolatedAppTestCase):
                 self.assertTrue(status.has_class("error"))
                 self.assertIn("Line 3", str(status.content))
                 self.assertEqual(sent, [])
-                editor.area.load(editor.area.text.replace('"test.PING", oops', '"EDITED",'))
+                original = json.loads(editor.area.text.replace('"test.PING", oops', '"test.PING",'))
+                editor.area.load(json.dumps({**original, "extras": []}))
+                app._forward_from_edit_mode()
+                await pilot.pause()
+                self.assertIn("intent.extras", str(status.content))
+                self.assertEqual(sent, [])
+                editor.area.load(json.dumps({**original, "action": "EDITED"}))
                 app._forward_from_edit_mode()
                 await pilot.pause()
             self.assertEqual(sent, [[("action", "", "EDITED", "")]])

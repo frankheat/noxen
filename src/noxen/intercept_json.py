@@ -44,10 +44,21 @@ def editable_intent(entry):
     """The held Intent as Sender-format JSON, and notes on what could not be captured."""
     notes = []
     try:
-        intent = _intent((entry or {}).get("intent"), "intent", notes=notes)
+        intent = _intent((entry or {}).get("intent"), "intent", notes=notes, preserve_clip_positions=True)
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return {}, ["This capture is malformed and could not be read in full"]
     return intent, notes
+
+
+def _same_json(before, after):
+    """Compare JSON without treating booleans and numbers as interchangeable."""
+    if type(before) is not type(after):
+        return False
+    if isinstance(before, dict):
+        return before.keys() == after.keys() and all(_same_json(before[k], after[k]) for k in before)
+    if isinstance(before, list):
+        return len(before) == len(after) and all(_same_json(old, new) for old, new in zip(before, after))
+    return before is after or before == after
 
 
 def json_to_mods(captured, shown, edited):
@@ -57,9 +68,9 @@ def json_to_mods(captured, shown, edited):
     started from. Only what differs between `shown` and `edited` is changed; a value
     that is absent from both (it could not be captured) is not touched.
     """
-    if edited == shown:
-        return []
     try:
+        if _same_json(shown, edited):
+            return []
         return _json_to_mods(captured, shown, edited)
     except SenderError as error:  # A changed value has the wrong shape.
         raise ValueError(str(error)) from None
@@ -86,10 +97,10 @@ def _json_to_mods(captured, shown, edited):
     selector = edited.get("selector", shown.get("selector"))
     if package != shown.get("package"):
         string(package, "intent.package", nullable=True)
-    if (package != shown.get("package") or selector != shown.get("selector")) \
+    if (package != shown.get("package") or not _same_json(shown.get("selector"), selector)) \
             and package is not None and selector is not None:
         raise ValueError("intent: package and selector cannot both be set (Android refuses it)")
-    if "flags" in edited and edited["flags"] != shown.get("flags"):
+    if "flags" in edited and not _same_json(shown.get("flags"), edited["flags"]):
         if type(edited["flags"]) is not int or not 0 <= edited["flags"] <= 0xFFFFFFFF:
             raise ValueError("intent.flags: expected unsigned 32-bit integer")
         draft["flags"] = edited["flags"]
@@ -100,12 +111,12 @@ def _json_to_mods(captured, shown, edited):
         if len(set(categories)) != len(categories):
             raise ValueError("intent.categories: duplicate category")
         draft["categories"] = list(categories)
-    if not isinstance(edited.get("extras") or {}, dict):
+    if edited.get("extras") is not None and not isinstance(edited["extras"], dict):
         raise ValueError("intent.extras: expected keyed typed values")
     _extras(draft, shown.get("extras") or {}, edited.get("extras") or {}, captured, notes, whole)
     for key, kind in (("selector", "selector_json"), ("clipData", "clipdata_json")):
         before, after = shown.get(key), edited.get(key)
-        if (key in edited or key in shown) and before != after:
+        if (key in edited or key in shown) and not _same_json(before, after):
             try:
                 _trial(draft, lambda trial: _nested_field(trial, key, before, after, (key,)))
             except ValueError as refusal:
@@ -142,7 +153,7 @@ def _extras(draft, shown, edited, captured, notes, whole):
             extras.pop(key, None)
     for key, item in edited.items():
         before = shown.get(key)
-        if item == before:
+        if _same_json(before, item):
             continue
         path = f"intent.extras.'{key}'"
         complete = _complete(notes, path)
@@ -205,11 +216,14 @@ def _nested_value(draft, before, after, path):
     if after["type"] == "Intent":
         _nested_intent(draft, before["value"], after["value"], path)
         return
+    fields(after, ("type", "value"), _label(path))
+    if after.get("value") is not None and not isinstance(after["value"], dict):
+        raise ValueError(f"{_label(path)}: expected keyed typed values")
     old, new = before["value"] or {}, after["value"] or {}
     if set(old) != set(new) or (before["value"] is None) != (after["value"] is None):
         raise ValueError(f"{_label(path)}: keys inside a Bundle cannot be added or removed on a held Intent")
     for key in old:
-        if old[key] == new[key]:
+        if _same_json(old[key], new[key]):
             continue
         if old[key]["type"] == new[key]["type"] and old[key]["type"] in ("Intent", "Bundle"):
             _nested_value(draft, old[key], new[key], (*path, key))
@@ -219,21 +233,24 @@ def _nested_value(draft, before, after, path):
 
 def _nested_field(draft, key, before, after, path):
     """selector or clipData of the held Intent: only fields of the Intents they hold may change."""
-    if before == after:
+    if _same_json(before, after):
         return
     if before is None or after is None:
         raise ValueError(f"{key} cannot be added or removed on a held Intent")
     if key == "selector":
         _nested_intent(draft, before, after, path)
         return
-    same = {name: before.get(name) == after.get(name) for name in ("label", "mimeTypes")}
-    old_items, new_items = before.get("items") or [], after.get("items") or []
-    if not all(same.values()) or len(old_items) != len(new_items):
+    fields(after, ("label", "mimeTypes", "items"), _label(path))
+    same = all(_same_json(before.get(name), after.get(name)) for name in ("label", "mimeTypes"))
+    old_items, new_items = before["items"], after.get("items")
+    if not same or not isinstance(new_items, list) or len(old_items) != len(new_items):
         raise ValueError("clipData: only fields of the Intents in its items can be changed on a held Intent")
     for index, (old, new) in enumerate(zip(old_items, new_items)):
-        if {k: v for k, v in old.items() if k != "intent"} != {k: v for k, v in new.items() if k != "intent"}:
+        fields(new, ("text", "htmlText", "uri", "intent"), _label((*path, index)))
+        if not _same_json({k: v for k, v in old.items() if k != "intent"},
+                          {k: v for k, v in new.items() if k != "intent"}):
             raise ValueError("clipData: only fields of the Intents in its items can be changed on a held Intent")
-        if old.get("intent") != new.get("intent"):
+        if not _same_json(old.get("intent"), new.get("intent")):
             if old.get("intent") is None or new.get("intent") is None:
                 raise ValueError("clipData: an item Intent cannot be added or removed on a held Intent")
             _nested_intent(draft, old["intent"], new["intent"], (*path, index))
@@ -245,7 +262,7 @@ def _nested_intent(draft, before, after, path):
     fields(after, INTENT_KEYS, _label(path))
     others = set(before) | set(after)
     for key in sorted(others - set(NESTED_FIELDS)):
-        if before.get(key) == after.get(key):
+        if _same_json(before.get(key), after.get(key)):
             continue
         if key == "extras" and before.get(key) is not None and after.get(key) is not None:
             _nested_value(draft, {"type": "Bundle", "value": before[key]}, {"type": "Bundle", "value": after[key]},
@@ -258,7 +275,7 @@ def _nested_intent(draft, before, after, path):
     node = dict(nested_intents(draft)).get(path)
     readable = nested_intent_fields(node)
     for field in NESTED_FIELDS:
-        if before.get(field) == after.get(field):
+        if _same_json(before.get(field), after.get(field)):
             continue
         if field not in readable:
             raise ValueError(f"{_label(path)}.{field} was not captured in full and cannot be changed")
