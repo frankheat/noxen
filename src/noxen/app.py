@@ -16,7 +16,7 @@ from textual.worker import get_current_worker
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import (
-    Button, DataTable, Footer, Input, Label,
+    Button, DataTable, Input, Label,
     OptionList, RichLog, Rule, Select, Static, Switch, TabbedContent, TabPane,
 )
 from textual.binding import Binding
@@ -78,6 +78,7 @@ from noxen.sender_capture import (capture_as_request, capture_operation, prepare
                                   prepare_intent_request, prepare_monitor_request)
 from noxen.sender_json import format_request, parse as parse_json
 from noxen.sender_json_editor import JsonRequestEditor, json_text
+from noxen.shortcut_footer import ShortcutFooter
 from noxen.intercept_json import apply_mod_to_json, editable_intent, json_to_mods
 from noxen.intent_mods import (
     NESTED_INTENT_FIELDS,
@@ -1232,7 +1233,7 @@ class NoxenApp(App):
                 id="history_input_wrapper",
             )
         with Horizontal(id="app_footer"):
-            yield Footer()
+            yield ShortcutFooter()
             yield Label("", id="filter_count_label")
             yield Label("", id="monitor_recording_status", markup=False)
 

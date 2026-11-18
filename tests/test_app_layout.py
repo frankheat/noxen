@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import tempfile
@@ -21,6 +22,7 @@ from noxen.app import (
     max_primary_panel_height,
 )
 from noxen.logging_ui import log_debug, log_info
+from noxen.sender_ui import SenderPane
 
 
 def css_int_property(selector: str, property_name: str) -> int:
@@ -96,6 +98,45 @@ class AppLayoutTests(unittest.TestCase):
             log_debug("Hidden detail", "agent"),
             log_info("Visible event", "frida"),
         ])
+
+
+class ShortcutOrderTests(IsolatedAppTestCase):
+    async def test_app_keys_keep_their_order_across_tabs_and_editor_focus(self):
+        app = NoxenApp(SimpleNamespace(project=None, new_project=str(self.settings_path.parent / "shortcuts"),
+                                       skip_device_scan=True))
+        async with app.run_test(size=(120, 38)) as pilot:
+            async def expect(*keys):
+                for _ in range(50):
+                    actual = tuple(key.key for key in app.query("FooterKey"))
+                    if actual == keys:
+                        return
+                    await asyncio.sleep(0.05)
+                self.assertEqual(actual, keys)
+
+            await expect("ctrl+q")
+            tabs = app.query_one("#main_tabs")
+            tabs.active = "tab_sender"
+            await pilot.pause()
+            sender = app.query_one(SenderPane)
+            sender.editor.area.focus()
+            await expect("ctrl+q", "alt+left", "alt+right", "ctrl+space", "ctrl+o", "ctrl+n")
+            sender.query_one("#sender_new").focus()
+            await expect("ctrl+q", "alt+left", "alt+right")
+            tabs.active = "tab_history"
+            await expect("ctrl+q", "ctrl+l", "alt+up", "alt+down", "ctrl+b", "ctrl+r", "ctrl+t")
+            tabs.active = "tab_log"
+            await expect("ctrl+q", "ctrl+l")
+            tabs.active = "tab_info"
+            await expect("ctrl+q", "ctrl+g")
+            tabs.active = "tab_settings"
+            await expect("ctrl+q")
+            tabs.active = "tab_intercept"
+            await pilot.pause()
+            app._current_intercepted_entry = {"id": 1, "method": "getIntent", "intent": {"flags": 0}}
+            app._intent_blocked = True
+            app._enter_edit_mode()
+            await expect("ctrl+q", "alt+up", "alt+down", "ctrl+b", "ctrl+f", "ctrl+d", "escape",
+                         "ctrl+space", "ctrl+o", "ctrl+n")
 
 
 class SwitchControlLayoutTests(IsolatedAppTestCase):
