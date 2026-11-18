@@ -430,9 +430,12 @@ Switch.-on > .switch--slider {
 #settings_theme > SelectCurrent { padding-left: 2; }
 #home_split {
     height: 1fr;
+    layout: horizontal;
+    overflow-y: hidden;
 }
 #home_sidebar {
     width: 1fr;
+    min-width: 29;
     height: 1fr;
 }
 #home_separator { margin: 0; }
@@ -450,6 +453,33 @@ Switch.-on > .switch--slider {
 #home_form {
     width: 2fr;
     padding: 1 2;
+}
+#home_split.home-stacked {
+    layout: vertical;
+    overflow-y: auto;
+}
+#home_split.home-stacked #home_sidebar, #home_split.home-stacked #home_form {
+    width: 100%;
+    min-width: 0;
+    height: auto;
+}
+#home_split.home-stacked #home_separator {
+    display: none;
+}
+#home_split.home-stacked #home_info {
+    margin-top: 1;
+}
+#home_split.home-tight {
+    scrollbar-size-vertical: 0;
+}
+#home_split.home-narrow #home_form {
+    padding: 0 1;
+}
+#home_split.home-narrow .connect_label {
+    width: 8;
+}
+#home_split.home-narrow #home_btn {
+    width: auto;
 }
 #home_title {
     text-style: bold;
@@ -496,6 +526,13 @@ Switch.-on > .switch--slider {
 }
 #home_system_anr_bypass {
     margin-right: 2;
+}
+#home_split.home-narrow #home_anr_bypass_label {
+    width: 1fr;
+    height: auto;
+}
+#home_split.home-narrow #home_system_anr_bypass {
+    margin-right: 0;
 }
 #home_mode {
     width: 1fr;

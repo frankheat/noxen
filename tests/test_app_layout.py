@@ -13,6 +13,7 @@ from tests.ui_test_case import IsolatedAppTestCase
 
 from noxen.app import (
     HISTORY_COMMAND_OUTPUT_HEIGHT,
+    HomeLayout,
     HomeLogo,
     INTERCEPT_COMMAND_OUTPUT_HEIGHT,
     MAX_COMMAND_OUTPUT_HEIGHT,
@@ -73,6 +74,13 @@ class AppLayoutTests(unittest.TestCase):
         n_top = [line[:15] for line in HomeLogo.brand_lines(3)[0]]
         self.assertEqual(n_top, ["████████████   ", "████████████▄▄▄", "███████████████"])
 
+    def test_home_logo_fit_considers_both_terminal_dimensions(self):
+        self.assertEqual(HomeLogo.fit(29, 16, stacked=True)[0], 1)
+        self.assertEqual(HomeLogo.fit(28, 16, stacked=True), (0, 0))
+        self.assertEqual(HomeLogo.fit(87, 18, stacked=False)[0], 3)
+        self.assertEqual(HomeLogo.fit(87, 15, stacked=False)[0], 2)
+        self.assertEqual(HomeLogo.fit(87, 12, stacked=False), (1, 0))
+
     def test_clamp_height_applies_minimum_and_optional_maximum(self):
         self.assertEqual(clamp_height(1, minimum=3), 3)
         self.assertEqual(clamp_height(5, minimum=3), 5)
@@ -98,6 +106,46 @@ class AppLayoutTests(unittest.TestCase):
             log_debug("Hidden detail", "agent"),
             log_info("Visible event", "frida"),
         ])
+
+
+class HomeZoomTests(IsolatedAppTestCase):
+    async def test_resize_keeps_original_logo_and_form_accessible(self):
+        app = NoxenApp(SimpleNamespace(project=None, new_project=str(self.settings_path.parent / "home-zoom"),
+                                       skip_device_scan=True))
+        async with app.run_test(size=(185, 36)) as pilot:
+            layout = app.query_one(HomeLayout)
+            logo = app.query_one(HomeLogo)
+            form = app.query_one("#home_form")
+            self.assertIn(HomeLogo.brand_lines(2)[0][0], str(logo.content))
+            for width, height, stacked, scale in (
+                (82, 32, False, 1), (64, 31, True, 2), (29, 26, True, 1),
+                (28, 26, True, 0), (140, 12, True, 1), (185, 36, False, 2),
+            ):
+                with self.subTest(width=width, height=height):
+                    await pilot.resize_terminal(width, height)
+                    await pilot.pause()
+                    self.assertEqual(layout.has_class("home-stacked"), stacked)
+                    if scale:
+                        self.assertGreaterEqual(logo.content_size.width, scale * HomeLogo.WIDTH)
+                        self.assertIn(HomeLogo.brand_lines(scale)[0][0], str(logo.content))
+                    else:
+                        self.assertIn("noxen", str(logo.content))
+                        self.assertNotIn("█", str(logo.content))
+                    if stacked:
+                        self.assertGreaterEqual(form.region.y, logo.region.bottom)
+                        self.assertGreater(layout.max_scroll_y, 0)
+                        if width == 29:
+                            layout.scroll_end(animate=False, immediate=True)
+                            await pilot.pause()
+                            button = app.query_one("#home_btn")
+                            self.assertGreaterEqual(button.region.y, layout.region.y)
+                            self.assertLessEqual(button.region.bottom, layout.region.bottom)
+                            layout.scroll_home(animate=False, immediate=True)
+                            await pilot.pause()
+                    else:
+                        self.assertGreaterEqual(form.region.x, logo.region.right)
+                        self.assertEqual(form.region.y, logo.region.y)
+                        self.assertEqual(layout.max_scroll_y, 0)
 
 
 class ShortcutOrderTests(IsolatedAppTestCase):

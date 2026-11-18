@@ -169,6 +169,21 @@ def max_primary_panel_height(primary_height: int, secondary_height: int, seconda
     return clamp_height(primary_height + secondary_height - secondary_minimum, MIN_PANEL_HEIGHT)
 
 
+class HomeLayout(VerticalScroll):
+    """Keep the original artwork room to breathe before stacking the Home form."""
+
+    MIN_FORM_WIDTH = 52
+
+    def on_resize(self, event: events.Resize) -> None:
+        width = event.size.width
+        stacked = (width < HomeLogo.WIDTH + 1 + self.MIN_FORM_WIDTH
+                   or event.size.height < HomeInfo.LAYOUT_ROWS + len(HomeLogo._ART))
+        self.set_class(stacked, "home-stacked")
+        self.set_class(width < 45, "home-narrow")
+        self.set_class(width <= HomeLogo.WIDTH, "home-tight")
+        self.call_after_refresh(self.query_one(HomeLogo)._render_brand)
+
+
 class HomeLogo(Static):
     # "coder mini" font — 3 rows × 29 chars
     _ART = [
@@ -176,6 +191,7 @@ class HomeLogo(Static):
         "██ ██ ██ ██  ███  ██▄█▀ ██ ██",
         "██ ██ ▀███▀ ██ ██ ▀█▄▄▄ ██ ██",
     ]
+    WIDTH = len(_ART[0])
 
     def on_mount(self) -> None:
         self._render_brand()
@@ -209,10 +225,26 @@ class HomeLogo(Static):
             rows.append(cells)
         return rows
 
+    @classmethod
+    def fit(cls, width: int, height: int, *, stacked: bool) -> tuple[int, int]:
+        """Return the largest integral scale that fits and the remaining top gap."""
+        if width < cls.WIDTH:
+            return 0, 0
+        rows = len(cls._ART)
+        available = max(rows, height // 4 if stacked else height - HomeInfo.LAYOUT_ROWS)
+        scale = min(width // cls.WIDTH, available // rows)
+        free = available - scale * rows
+        return scale, min(free, 1 if stacked else height // 4)
+
     def _render_brand(self) -> None:
-        panel_w = self.size.width
-        scale = max(1, panel_w // (len(self._ART[0]) + 4))
-        top_pad = self.app.size.height // 4
+        width = self.content_size.width
+        if not width:
+            return
+        layout = self.app.query_one(HomeLayout)
+        scale, top_pad = self.fit(width, layout.size.height, stacked=layout.has_class("home-stacked"))
+        if not scale:
+            self.update(f"[bold {self._COLORS[0]}]{'noxen'[:width]}[/]")
+            return
 
         lines = [""] * top_pad
         for color, cells in zip(self._COLORS, self.brand_lines(scale)):
@@ -221,6 +253,8 @@ class HomeLogo(Static):
 
 
 class HomeInfo(Static):
+    LAYOUT_ROWS = 9  # Seven lines of metadata plus the two-row margin in the wide layout.
+
     def on_mount(self) -> None:
         self.refresh_info()
 
@@ -1031,7 +1065,7 @@ class NoxenApp(App):
         yield Horizontal(Label("", id="session_info"), id="session_bar")
         with TabbedContent(id="main_tabs"):
             with TabPane(" Home ", id="tab_home"):
-                with Horizontal(id="home_split"):
+                with HomeLayout(id="home_split"):
                     with Vertical(id="home_sidebar"):
                         yield HomeLogo("", id="home_logo", markup=True)
                         yield HomeInfo("", id="home_info", markup=True)
