@@ -15,6 +15,15 @@ from noxen.monitor_ui import RecordingDialog
 from tests.ui_test_case import IsolatedAppTestCase
 
 
+async def settle(pilot, condition, timeout=5.0):
+    """Wait for `condition()`: Sender refreshes on a timer and loads its tabs in a worker,
+    both later on a busy machine. The assertion that follows reports any failure."""
+    for _ in range(int(timeout / 0.1)):
+        if condition():
+            return
+        await pilot.pause(0.1)
+
+
 class SenderUITests(IsolatedAppTestCase):
     async def test_background_launch_can_be_cancelled_or_sent_without_claiming_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -139,11 +148,15 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertFalse(pane.query_one("#sender_disconnect").disabled)
                 area = pane.editor.area
                 # A new project already has one empty request, so there is always something to edit.
+                labels = lambda: [str(tab.label) for tab in pane.query(RequestTab)]  # noqa: E731
+                await settle(pilot, lambda: labels() == ["1"] and pane.selected() is not None)
                 self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["1"])
                 self.assertEqual(pane.selected()["request"], {})
                 for expected in ("2", "3"):
                     await pilot.click("#sender_new")  # Created at once, empty, ready to edit as JSON.
-                    await pilot.pause(0.5)
+                    await settle(pilot, lambda: pane.selected() is not None and pane.selected()["name"] == expected
+                                 and area.text == NEW_REQUEST_TEXT)
+                    await pilot.pause(0.2)  # The operations are listed after the text is shown.
                     self.assertEqual(pane.selected()["name"], expected)
                     self.assertEqual(pane.selected()["request"], {})  # No operation is chosen for the user...
                     self.assertEqual(area.text, NEW_REQUEST_TEXT)
@@ -277,7 +290,7 @@ class SenderUITests(IsolatedAppTestCase):
                 menu = app.screen.query_one("OptionList")
                 menu.highlighted = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)].index("Close")
                 await pilot.press("enter")
-                await pilot.pause(0.6)
+                await settle(pilot, lambda: names() == ["1"] and app.focused is pane.editor.area)
                 self.assertEqual(names(), ["1"])
                 self.assertEqual(pane.selected()["request"], {})
                 self.assertEqual(pane.editor.area.text, NEW_REQUEST_TEXT)
@@ -285,7 +298,7 @@ class SenderUITests(IsolatedAppTestCase):
                 # Removed elsewhere (e.g. over MCP), the last request is replaced too.
                 row = app.db.sender_requests()[0]
                 service.remove_request(row["id"], row["revision"])
-                await pilot.pause(0.8)
+                await settle(pilot, lambda: len(app.db.sender_requests()) == 1 and names() == ["1"])
                 self.assertEqual(names(), ["1"])
                 self.assertEqual(len(app.db.sender_requests()), 1)
 
@@ -559,10 +572,7 @@ class SenderUITests(IsolatedAppTestCase):
                     await pilot.click(tabs[0], button=3)
                     await pilot.pause()
                     await pilot.press("down", "down", "enter")  # Close
-                    for _ in range(30):  # The tabs are rebuilt by a worker: slower when the machine is busy.
-                        await pilot.pause(0.1)
-                        if [str(tab.label) for tab in pane.query(RequestTab)] == ["A"]:
-                            break
+                    await settle(pilot, lambda: [str(tab.label) for tab in pane.query(RequestTab)] == ["A"])
                     self.assertEqual([row["id"] for row in app.db.sender_requests()], [pane.selected()["id"]])
                     self.assertNotEqual(pane.selected()["id"], first["id"])
                     self.assertEqual([str(tab.label) for tab in pane.query(RequestTab)], ["A"])
