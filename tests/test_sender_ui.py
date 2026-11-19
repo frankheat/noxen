@@ -25,6 +25,42 @@ async def settle(pilot, condition, timeout=5.0):
 
 
 class SenderUITests(IsolatedAppTestCase):
+    async def test_result_shows_query_summary_and_switches_to_raw_and_details(self):
+        project = self.settings_path.parent / "result"
+        app = NoxenApp(SimpleNamespace(project=None, new_project=str(project), skip_device_scan=True))
+        async with app.run_test(size=(120, 45)) as pilot:
+            saved = app.sender_service.save_request("Notes", {"operation": "query", "uri": "content://dev.example/notes"})
+            run_id = app.db.create_sender_run("result-preview", {
+                "request_id": saved["id"], "revision": saved["revision"], "request": saved["request"],
+                "name": saved["name"], "sender": {"package": "dev.example", "uid": 10001, "pid": 1},
+                "device": "emulator", "createdAt": "host time", "state": "returned",
+                "result": {"kind": "cursor", "columns": ["title", "attachment"],
+                           "rows": [[{"type": "String", "value": "Release notes"},
+                                     {"type": "blob", "captured": False}]], "truncated": False},
+            })
+            self.assertTrue(await pilot.click("#--content-tab-tab_sender"))
+            pane = app.query_one(SenderPane)
+            log = pane.query_one("#sender_run_detail")
+            rendered = lambda: "\n".join(line.text for line in log.lines)  # noqa: E731
+            await settle(pilot, lambda: "Partial result" in rendered())
+            self.assertIn(f"#{run_id}", rendered())
+            self.assertIn("Release notes", rendered())
+            self.assertIn("Cells not captured", rendered())
+            self.assertTrue(await pilot.click("#sender_result_raw"))
+            await settle(pilot, lambda: "[RAW RESULT]" in rendered())
+            self.assertIn("[RAW RESULT]", rendered())
+            self.assertIn("truncated", rendered())
+            self.assertTrue(await pilot.click("#sender_result_details"))
+            await settle(pilot, lambda: "[TIMING]" in rendered())
+            self.assertIn("[SENDER]", rendered())
+            self.assertNotIn("[RAW RESULT]", rendered())
+            self.assertTrue(await pilot.click("#sender_result_details"))
+            await settle(pilot, lambda: "Release notes" in rendered())
+            await pilot.resize_terminal(60, 40)
+            await settle(pilot, lambda: "Release notes" in rendered())
+            self.assertIn("Release notes", rendered())
+            self.assertLessEqual(pane.query_one("#sender_result_details").region.right, pane.region.right)
+
     async def test_invalid_drafts_survive_autosave_quit_and_reopen_without_becoming_sendable(self):
         path = self.settings_path.parent / "drafts.noxen"
         app = NoxenApp(SimpleNamespace(project=None, new_project=str(path), skip_device_scan=True))
@@ -313,26 +349,32 @@ class SenderUITests(IsolatedAppTestCase):
             app = NoxenApp(SimpleNamespace(project=None, new_project=directory + "/sender", skip_device_scan=True))
             async with app.run_test(size=(130, 40)) as pilot:
                 service = app.sender_service
+                runs = {}
                 for name in "ABCDE":
-                    service.save_request(name, {})
+                    saved = service.save_request(name, {"operation": "sendBroadcast", "intent": {}})
+                    run = {**saved, "request_id": saved["id"], "state": "returned",
+                           "sender": {"package": "dev.example", "uid": 10001, "pid": 1},
+                           "device": "emulator", "createdAt": "host time", "result": {"kind": "void"}}
+                    runs[name] = app.db.create_sender_run(name, run)
+                    if name == "E":
+                        service.unsaved[runs[name]] = dict(run, id=runs[name])
                 app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
                 await pilot.pause(0.6)
                 pane = app.query_one(SenderPane)
                 names = lambda: [str(tab.label) for tab in pane.query(RequestTab)]
                 tab = lambda name: next(t for t in pane.query(RequestTab) if str(t.label) == name)
 
-                async def close(name, label, confirm=True):
+                async def close(name, label, remaining):
                     await pilot.click(tab(name), button=3)
                     await pilot.pause()
                     menu = app.screen.query_one("OptionList")
                     labels = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)]
                     menu.highlighted = labels.index(label)
                     await pilot.press("enter")
-                    await pilot.pause()
-                    self.assertIsInstance(app.screen, RecordingDialog)  # Requests are deleted: confirmed first.
-                    await pilot.click("#recording_confirm" if confirm else "#recording_cancel")
-                    await pilot.pause(0.6)
-                    return labels
+                    await settle(pilot, lambda: names() == list(remaining))
+                    self.assertEqual(names(), list(remaining))
+                    self.assertNotIsInstance(app.screen, RecordingDialog)
+                    self.assertEqual({run["id"] for run in app.db.sender_runs()}, {runs[name] for name in remaining})
 
                 # Only the directions that have tabs are offered.
                 await pilot.click(tab("A"), button=3)
@@ -344,14 +386,10 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.press("escape")
                 await pilot.pause()
 
-                await close("C", "Close tabs to the right", confirm=False)
-                self.assertEqual(names(), list("ABCDE"))  # Cancelled: nothing removed.
-                await close("C", "Close tabs to the right")
-                self.assertEqual(names(), list("ABC"))
-                await close("B", "Close tabs to the left")
-                self.assertEqual(names(), list("BC"))
-                await close("C", "Close other tabs")
-                self.assertEqual(names(), ["C"])
+                await close("C", "Close tabs to the right", "ABC")
+                self.assertNotIn(runs["E"], service.unsaved)
+                await close("B", "Close tabs to the left", "BC")
+                await close("C", "Close other tabs", "C")
                 self.assertEqual([row["name"] for row in app.db.sender_requests()], ["C"])
                 self.assertEqual(pane.selected()["name"], "C")
 
@@ -364,6 +402,7 @@ class SenderUITests(IsolatedAppTestCase):
                 await settle(pilot, lambda: names() == ["1"] and app.focused is pane.editor.area)
                 self.assertEqual(names(), ["1"])
                 self.assertEqual(pane.selected()["request"], {})
+                self.assertEqual(app.db.sender_runs(), [])
                 self.assertEqual(pane.editor.area.text, NEW_REQUEST_TEXT)
                 self.assertIs(app.focused, pane.editor.area)  # Like +: the operations are listed.
                 # Removed elsewhere (e.g. over MCP), the last request is replaced too.

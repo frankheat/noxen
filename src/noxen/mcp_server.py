@@ -179,7 +179,7 @@ def create_http_app(invoke, token, port):
 
     @server.tool(annotations=write)
     async def remove_sender_request(request_id: str, revision: int, expected_connection: str) -> dict[str, Any]:
-        """Remove the saved request at this revision; preserves all previous runs."""
+        """Permanently delete the saved request at this revision, its draft, and its runs."""
         return await invoke("remove_sender_request", request_id=request_id, revision=revision, expected_connection=expected_connection)
 
     @server.tool(annotations=write)

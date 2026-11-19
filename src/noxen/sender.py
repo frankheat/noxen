@@ -271,17 +271,17 @@ def validate_request(raw, *, for_execution=False):
     return value
 
 
-def render_sender_detail(record, current_revision=None):
+def render_sender_detail(record, current_revision=None, *, view="summary"):
     """Match noxen's section headings and aligned label/value details.
 
-    A request shows its arguments. A run is shown result first, beside its
-    request; what was sent is listed only when the request has changed since
-    (the run's revision differs from `current_revision`).
+    A run shows its result first. Details includes the sent request if its
+    revision changed.
     """
     from rich.text import Text
     from rich.pretty import Pretty
     from rich.console import Group
     from noxen.rendering import capture_datetime, format_capture_time
+    from noxen.sender_result import summarize_result
 
     def device_time(value):
         instant = capture_datetime(value)
@@ -293,7 +293,10 @@ def render_sender_detail(record, current_revision=None):
         width = max((len(label) for label, _ in rows), default=0)
         for label, value in rows:
             text.append(f"  {label:<{width}} : ", style="dim")
-            text.append("None" if value is None else str(value), style="none")
+            if isinstance(value, Text):
+                text.append_text(value)
+            else:
+                text.append("None" if value is None else str(value), style="none")
             text.append("\n")
         return text
 
@@ -305,22 +308,31 @@ def render_sender_detail(record, current_revision=None):
         return Group(*described, *arguments)
     identity = record["sender"]
     rows = [("Run", f"#{record['id']}")] if "id" in record else []
-    rows.append(("State", record["state"]))
+    operation = request["operation"]
+    state, fields, body = summarize_result(operation, record)
+    rows.extend([("Operation", operation), ("State", Text(state, style="bold"))])
     # Only what happened is listed.
     if record.get("error"):
         rows.append(("Error", record["error"]))
     if record.get("cancellationRequested"):
         rows.append(("Cancellation requested", True))
-    activity_returned = request["operation"] == "startActivity" and record["state"] == "returned"
-    if activity_returned:
-        rows = [("State", "Call returned · Activity launch unverified") if row[0] == "State" else row for row in rows]
-    if record.get("activityContext", {}).get("state") == "background":
+    if record.get("senderCrashId") is not None:
+        rows.append(("Sender crash", f"#{record['senderCrashId']}"))
+    if (record.get("activityContext") or {}).get("state") == "background":
         rows.append(("Sender at dispatch", "Background process · Android may block the launch"))
+    changed = current_revision is not None and record["revision"] != current_revision
+    if changed and view != "details":
+        rows.append(("Request", "Changed since this run · See Details for the request as sent"))
+    if view == "summary":
+        return Group(section("RESULT", rows + fields), *body)
     outcome = [section("RESULT", rows)]
-    if "result" in record and not activity_returned:
-        outcome.append(Pretty(record["result"], expand_all=True, highlighter=lambda value: value))
+    if view == "raw":
+        if "result" in record:
+            outcome.extend([Text("[RAW RESULT]", style="bold"),
+                            Pretty(record["result"], expand_all=True, highlighter=lambda value: value)])
+        return Group(*outcome)
     outcome.append(section("TIMING", [("Created (host)", record["createdAt"]), ("Started (device)", device_time(record.get("startedAt"))),
-                                      ("Finished (device)", device_time(record.get("finishedAt"))), ("Duration (ms)", record.get("durationMs"))]))
+                                       ("Finished (device)", device_time(record.get("finishedAt"))), ("Duration (ms)", record.get("durationMs"))]))
     sender = [section("SENDER", [("Package", identity["package"]), ("UID", identity["uid"]),
                                  ("PID", identity["pid"]), ("Device", record["device"]),
                                  ("Target SDK", identity.get("targetSdk")), ("System app", identity.get("systemApp")),
@@ -328,10 +340,12 @@ def render_sender_detail(record, current_revision=None):
     if identity.get("permissions"):
         sender.append(section("SENDER PERMISSIONS", [("Granted" if p["granted"] else "Not granted", p["name"])
                                                      for p in identity["permissions"]]))
-    if current_revision is None or record["revision"] == current_revision:
-        return Group(*outcome, *sender)
-    note = Text("The request has changed since this run. It was sent as:\n", style="dim")
-    return Group(*outcome, *sender, note, *described, *arguments)
+    outcome.extend(sender)
+    if changed:
+        outcome.append(Text("The request has changed since this run. It was sent as:\n", style="dim"))
+    if changed:
+        outcome.extend([*described, *arguments])
+    return Group(*outcome)
 
 
 def compare_sender_runs(left, right):

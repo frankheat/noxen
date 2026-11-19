@@ -145,6 +145,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.execute()["id"], run["id"])
         with self.assertRaises(SenderError):
             self.execute("two")
+        with self.assertRaisesRegex(SenderError, "active run"):
+            self.service.remove_request(self.request["id"], self.request["revision"])
         self.release.set()
         result = await self.service.wait(run["id"])
         self.assertEqual(result["state"], "returned")
@@ -153,8 +155,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SenderError):
             self.execute("three")
         self.assertEqual(self.service.get_run(run["id"])["name"], "test")
-        self.db.remove_sender_request(updated["id"], updated["revision"])
-        self.assertEqual(self.service.get_run(run["id"])["request"], self.request["request"])
+        self.service.remove_request(updated["id"], updated["revision"])
+        with self.assertRaisesRegex(SenderError, "Unknown Sender run"):
+            self.service.get_run(run["id"])
 
     async def test_failed_initial_save_never_invokes_android(self):
         with patch.object(self.db, "create_sender_run", side_effect=sqlite3.OperationalError("disk full")):

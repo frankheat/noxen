@@ -187,10 +187,21 @@ class SenderService:
         return dict(id=request_id, revision=revision, name=name, request=valid)
 
     def remove_request(self, request_id, revision):
+        self.remove_requests([(request_id, revision)])
+
+    def remove_requests(self, requests):
+        request_ids = {request_id for request_id, _ in requests}
+        if self.active_run is not None and self.get_run(self.active_run)["request_id"] in request_ids:
+            raise SenderError("Wait for the active run to finish before closing its request")
         try:
-            self.db.remove_sender_request(request_id, revision)
+            self.db.remove_sender_requests(requests)
         except ValueError as error:
             raise SenderError(str(error)) from None
+        for run_id, run in list(self.unsaved.items()):
+            if run["request_id"] in request_ids:
+                del self.unsaved[run_id]
+        if not self.unsaved and (self.error or "").startswith("Result not saved:"):
+            self.error = None
         self.version += 1
 
     def get_request(self, request_id):

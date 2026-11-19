@@ -408,11 +408,14 @@ class ProjectDB:
                 conn.execute("DELETE FROM sender_drafts WHERE request_id=?", (request_id,))
         return revision + 1
 
-    def remove_sender_request(self, request_id, revision):
+    def remove_sender_requests(self, requests):
         with self._lock, self._require_connection() as conn:
-            if conn.execute("DELETE FROM sender_requests WHERE id=? AND revision=?",
-                            (request_id, revision)).rowcount != 1:
-                raise ValueError("Request changed; reload it before removing")
+            for request_id, revision in requests:
+                if conn.execute("DELETE FROM sender_requests WHERE id=? AND revision=?",
+                                (request_id, revision)).rowcount != 1:
+                    raise ValueError("Request changed; reload it before removing")
+                conn.execute("DELETE FROM sender_runs WHERE json_extract(payload, '$.request_id')=?",
+                             (request_id,))
 
     def create_sender_run(self, execution_key, payload):
         with self._lock, self._require_connection() as conn:

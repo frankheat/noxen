@@ -106,6 +106,11 @@ class RequestTab(ModalButton):
             self.screen.query_one(SenderPane).open_tab_menu(self.request_id, event.screen_x, event.screen_y)
 
 
+class SenderResultLog(RichLog):
+    def on_resize(self):
+        self.call_after_refresh(self.screen.query_one(SenderPane).render_run_result)
+
+
 class SenderPane(Vertical):
     DEFAULT_CSS = """
     SenderPane { height: 1fr; }
@@ -117,6 +122,7 @@ class SenderPane(Vertical):
     SenderPane #sender_tabs { height: auto; max-height: 4; margin: 0 1; scrollbar-size-horizontal: 1; }
     SenderPane #sender_new { height: 3; min-width: 5; border: none; }
     SenderPane #sender_tabs .request_tab.-selected { border: round $accent; color: $accent; }
+    SenderPane .side_header Button.-selected { border: round $accent; color: $accent; }
     SenderPane #sender_split { height: 1fr; }
     SenderPane .sender_side { width: 1fr; height: 1fr; margin: 0 1; }
     SenderPane #sender_result_side { border-left: solid $foreground-muted; padding-left: 1; }
@@ -148,6 +154,9 @@ class SenderPane(Vertical):
         self._autosave = None         # Pending timer of the automatic save.
         self._retry_save = False      # The last save failed for a reason other than the text.
         self._result_shown = None     # What the result panel currently describes.
+        self._result_record = None
+        self._result_target = None
+        self._result_view = "summary"
         self._suggest_on_load = None  # A new request: list the operations once its text is shown.
         self._rows_loaded = False     # The tabs reflect the saved requests at least once.
 
@@ -177,7 +186,10 @@ class SenderPane(Vertical):
                     yield ModalButton("‹", id="sender_run_older")
                     yield ModalButton("›", id="sender_run_newer")
                     yield Label("Result", id="sender_result_title", markup=False)
-                yield RichLog(id="sender_run_detail", markup=False, highlight=False, auto_scroll=False, wrap=True)
+                    yield ModalButton("Raw", id="sender_result_raw", disabled=True, tooltip="Show the saved result")
+                    yield ModalButton("Details", id="sender_result_details", disabled=True, tooltip="Show timing and sender")
+                yield SenderResultLog(id="sender_run_detail", markup=False, highlight=False, auto_scroll=False, wrap=True,
+                                      min_width=1)
         yield Rule(classes="section_separator")
 
     def on_resize(self):
@@ -423,27 +435,53 @@ class SenderPane(Vertical):
         position = run_ids.index(run_id) if run_ids else 0
         self.query_one("#sender_run_older", Button).disabled = position >= len(run_ids) - 1
         self.query_one("#sender_run_newer", Button).disabled = position == 0
-        self.query_one("#sender_result_title", Label).update(
-            Text(f"Result · run {len(run_ids) - position} of {len(run_ids)}" if run_ids else "Result"))
         await self.show_tabs()
         row = self.selected()
+        if row is None or (run is not None and run.get("request_id") != row["id"]):
+            run = None
         # An earlier run is shown with the request exactly as it was sent.
         self.show_request_json(row, run)
         same_revision = run is not None and (self._run_id is not None or run["revision"] == row["revision"])
-        shown = (row and row["id"], run and (run["id"], run["state"], run.get("receivedAt")), same_revision)
-        if shown != self._result_shown:
-            # An automatic save alone leaves the result as it is, scroll position included.
-            self._result_shown = shown
-            result_log = self.query_one("#sender_run_detail", RichLog)
-            result_log.clear()
-            if row is not None and run is None:
-                result_log.write(Text("Not sent yet.", style="dim"))
-            elif row is not None:
-                result_log.write(render_sender_detail(
-                    run, current_revision=run["revision"] if same_revision else row["revision"]))
+        self._result_record = (row, run, len(run_ids) - position, len(run_ids), same_revision)
+        self.render_run_result()
         # A stale signature means the selection moved while this ran; read again.
         if (self.service.version, self._selected_id, self._run_id) != signature:
             self.refresh_sender()
+
+    def render_run_result(self):
+        if self._result_record is None:
+            return
+        row, run, position, count, same_revision = self._result_record
+        result_log = self.query_one("#sender_run_detail", RichLog)
+        if not result_log.content_size.width:
+            return
+        width = max(1, result_log.content_size.width - 1)
+        target = (row and row["id"], run and run["id"])
+        raw_available = run is not None and "result" in run
+        if target != self._result_target or (self._result_view == "raw" and not raw_available):
+            self._result_target = target
+            self._result_view = "summary"
+        for view, disabled in (("raw", not raw_available), ("details", run is None)):
+            button = self.query_one(f"#sender_result_{view}", Button)
+            button.disabled = disabled
+            button.set_class(self._result_view == view, "-selected")
+        shown = (target, run and (run["state"], run.get("receivedAt"), run.get("cancellationRequested")),
+                 same_revision, self._result_view, width, position, count)
+        if shown == self._result_shown:
+            return  # An automatic save alone leaves the scroll position intact.
+        self._result_shown = shown
+        if run is None:
+            title = "Result"
+        else:
+            title = f"Result · run {position} of {count}" if width >= 53 else f"{position}/{count}"
+        self.query_one("#sender_result_title", Label).update(Text(title))
+        result_log.clear()
+        if row is not None and run is None:
+            result_log.write(Text("Not sent yet.", style="dim"), width=width)
+        elif row is not None:
+            result_log.write(render_sender_detail(
+                run, current_revision=run["revision"] if same_revision else row["revision"], view=self._result_view),
+                width=width)
 
     async def show_tabs(self):
         tabs = self.query_one("#sender_tabs", HorizontalScroll)
@@ -608,7 +646,8 @@ class SenderPane(Vertical):
                 elif action == "close":
                     self.remove_requests([row])
                 elif action in closing:
-                    self.confirm_remove(closing[action])
+                    request_ids = set(closing[action])
+                    self.remove_requests([row for row in self.service.db.sender_requests() if row["id"] in request_ids])
                 self.refresh_sender()
             except Exception as error:
                 self.notify(str(error), severity="error")
@@ -623,9 +662,9 @@ class SenderPane(Vertical):
         self.app.push_screen(SenderTabMenu(x, y, options), chosen)
 
     def remove_requests(self, rows):
-        """Remove saved requests, with any unsaved text of theirs. Closing the last one leaves a new empty one."""
+        """Close requests and discard their editor state once deletion succeeds."""
+        self.service.remove_requests([(row["id"], row["revision"]) for row in rows])
         for row in rows:
-            self.service.remove_request(row["id"], row["revision"])
             self._drafts.pop(row["id"], None)
             if self._editor_key is not None and self._editor_key[0] == row["id"]:
                 self._editor_key, self._editor_baseline = None, self.editor.area.full_text()
@@ -640,23 +679,6 @@ class SenderPane(Vertical):
             self.service.save_request(self.next_name(), {})
             current = self.service.db.sender_requests()
         return min(current, key=lambda row: row["number"])
-
-    def confirm_remove(self, request_ids):
-        """Closing several tabs deletes their requests, so it is confirmed first."""
-        names = [row["name"] for row in self._requests if row["id"] in request_ids]
-        shown = ", ".join(names[:8]) + (f" and {len(names) - 8} more" if len(names) > 8 else "")
-        def answered(confirmed):
-            if not confirmed:
-                return
-            try:
-                # Read again: a request may have been saved since the menu opened.
-                self.remove_requests([row for row in self.service.db.sender_requests() if row["id"] in request_ids])
-            except Exception as error:
-                self.notify(str(error), severity="error")
-            self.refresh_sender()
-        message = (f"Close tab {shown}?\n\nIts request is deleted." if len(names) == 1 else
-                   f"Close {len(names)} tabs: {shown}?\n\nTheir requests are deleted.")
-        self.app.push_screen(RecordingDialog(message + " This cannot be undone.", "Close"), answered)
 
     async def on_button_pressed(self, event):
         event.stop()
@@ -689,6 +711,10 @@ class SenderPane(Vertical):
                     await self.service.cancel(status["active_run"], self.service.token)
             elif button in ("sender_run_older", "sender_run_newer"):
                 self.browse_runs(1 if button == "sender_run_older" else -1)
+            elif button in ("sender_result_raw", "sender_result_details"):
+                view = button.removeprefix("sender_result_")
+                self._result_view = "summary" if self._result_view == view else view
+                self.render_run_result()
             elif button == "sender_send":
                 row = self.save_editor()  # Send what is on screen.
                 if row is None or self._checking_activity_send:
