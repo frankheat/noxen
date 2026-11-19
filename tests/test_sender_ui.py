@@ -4,7 +4,7 @@ import tempfile
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from textual.widgets import TabbedContent, Input, Label, Select
+from textual.widgets import TabbedContent, Input, Label, OptionList, Select
 
 from noxen.app import NoxenApp
 from noxen.sender_ui import NEW_REQUEST_TEXT, RequestTab, SenderPane, SenderRenameModal, SenderTabMenu
@@ -359,16 +359,25 @@ class SenderUITests(IsolatedAppTestCase):
                     if name == "E":
                         service.unsaved[runs[name]] = dict(run, id=runs[name])
                 app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
-                await pilot.pause(0.6)
                 pane = app.query_one(SenderPane)
                 names = lambda: [str(tab.label) for tab in pane.query(RequestTab)]
                 tab = lambda name: next(t for t in pane.query(RequestTab) if str(t.label) == name)
+                await settle(pilot, lambda: names() == list("ABCDE") and pane.selected() is not None)
+                self.assertEqual(names(), list("ABCDE"))
+
+                async def open_menu(name):
+                    self.assertTrue(await pilot.click(tab(name), button=3))
+                    # The editor also contains an OptionList. Wait until the
+                    # context menu is mounted and owns keyboard focus.
+                    await settle(pilot, lambda: isinstance(app.screen, SenderTabMenu)
+                                 and isinstance(app.focused, OptionList) and app.focused.screen is app.screen)
+                    self.assertIsInstance(app.screen, SenderTabMenu)
+                    menu = app.screen.query_one(OptionList)
+                    self.assertIs(app.focused, menu)
+                    return menu, [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)]
 
                 async def close(name, label, remaining):
-                    await pilot.click(tab(name), button=3)
-                    await pilot.pause()
-                    menu = app.screen.query_one("OptionList")
-                    labels = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)]
+                    menu, labels = await open_menu(name)
                     menu.highlighted = labels.index(label)
                     await pilot.press("enter")
                     await settle(pilot, lambda: names() == list(remaining))
@@ -377,14 +386,12 @@ class SenderUITests(IsolatedAppTestCase):
                     self.assertEqual({run["id"] for run in app.db.sender_runs()}, {runs[name] for name in remaining})
 
                 # Only the directions that have tabs are offered.
-                await pilot.click(tab("A"), button=3)
-                await pilot.pause()
-                menu = app.screen.query_one("OptionList")
-                labels = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)]
+                _, labels = await open_menu("A")
                 self.assertIn("Close tabs to the right", labels)
                 self.assertNotIn("Close tabs to the left", labels)
                 await pilot.press("escape")
-                await pilot.pause()
+                await settle(pilot, lambda: not isinstance(app.screen, SenderTabMenu))
+                self.assertNotIsInstance(app.screen, SenderTabMenu)
 
                 await close("C", "Close tabs to the right", "ABC")
                 self.assertNotIn(runs["E"], service.unsaved)
@@ -394,10 +401,8 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual(pane.selected()["name"], "C")
 
                 # Closing the last tab leaves a new empty request, ready to edit.
-                await pilot.click(tab("C"), button=3)
-                await pilot.pause()
-                menu = app.screen.query_one("OptionList")
-                menu.highlighted = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)].index("Close")
+                menu, labels = await open_menu("C")
+                menu.highlighted = labels.index("Close")
                 await pilot.press("enter")
                 await settle(pilot, lambda: names() == ["1"] and app.focused is pane.editor.area)
                 self.assertEqual(names(), ["1"])
