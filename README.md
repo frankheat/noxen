@@ -7,8 +7,11 @@ runtime. It uses [Frida](https://frida.re) to hook Java methods in the target pr
 so you can see each Intent as it is sent or received, change it before the app
 continues, or drop it.
 
-![Python](https://img.shields.io/badge/python-3.10+-blue)
-![License](https://img.shields.io/badge/license-GPLv3-green)
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.10+-blue" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/license-GPLv3-green" alt="License: GPLv3">
+  <a href="https://blackhat.com/europe/arsenal/schedule/#noxen-android-interception-tool-for-component-communication-and-attack-surface-mapping-55953"><img src="https://img.shields.io/badge/Black%20Hat%20Arsenal-Europe%202026-007ec6" alt="Black Hat Arsenal: Europe 2026"></a>
+</p>
 
 ![noxen Home tab](assets/screenshots/home.png)
 
