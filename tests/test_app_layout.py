@@ -153,6 +153,17 @@ class ShortcutOrderTests(IsolatedAppTestCase):
         app = NoxenApp(SimpleNamespace(project=None, new_project=str(self.settings_path.parent / "shortcuts"),
                                        skip_device_scan=True))
         async with app.run_test(size=(120, 38)) as pilot:
+            tabs = app.query_one("#main_tabs")
+
+            async def open_tab(tab_id):
+                # Drain any Focused message from the previous pane before clicking
+                # the next tab. A queued focus change can reactivate its own pane.
+                await pilot.pause()
+                self.assertTrue(await pilot.click(tabs.get_tab(tab_id)))
+                await pilot.pause()
+                self.assertEqual(tabs.active, tab_id)
+                self.assertEqual(app._active_tab, tab_id)
+
             async def expect(*keys):
                 for _ in range(50):
                     actual = tuple(key.key for key in app.query("FooterKey"))
@@ -162,24 +173,21 @@ class ShortcutOrderTests(IsolatedAppTestCase):
                 self.assertEqual(actual, keys)
 
             await expect("ctrl+q")
-            tabs = app.query_one("#main_tabs")
-            tabs.active = "tab_sender"
-            await pilot.pause()
+            await open_tab("tab_sender")
             sender = app.query_one(SenderPane)
             sender.editor.area.focus()
             await expect("ctrl+q", "alt+left", "alt+right", "ctrl+space", "ctrl+o", "ctrl+n")
             sender.query_one("#sender_new").focus()
             await expect("ctrl+q", "alt+left", "alt+right")
-            tabs.active = "tab_history"
+            await open_tab("tab_history")
             await expect("ctrl+q", "ctrl+l", "alt+up", "alt+down", "ctrl+b", "ctrl+r", "ctrl+t")
-            tabs.active = "tab_log"
+            await open_tab("tab_log")
             await expect("ctrl+q", "ctrl+l")
-            tabs.active = "tab_info"
+            await open_tab("tab_info")
             await expect("ctrl+q", "ctrl+g")
-            tabs.active = "tab_settings"
+            await open_tab("tab_settings")
             await expect("ctrl+q")
-            tabs.active = "tab_intercept"
-            await pilot.pause()
+            await open_tab("tab_intercept")
             app._current_intercepted_entry = {"id": 1, "method": "getIntent", "intent": {"flags": 0}}
             app._intent_blocked = True
             app._enter_edit_mode()
