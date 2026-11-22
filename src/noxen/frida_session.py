@@ -63,6 +63,7 @@ class FridaSession:
         release_cb: callable = None,
         crash_cb: callable = None,
         validate_target: callable = None,
+        cursor_previews: bool = False,
     ):
         self._config = config
         self.filter_manager = filter_manager
@@ -73,6 +74,7 @@ class FridaSession:
         self.outcome_cb = outcome_cb
         self.intercept_log_cb = intercept_log_cb
         self.initial_intercept = initial_intercept
+        self.provider_cb = None
         self.hold_start_cb = hold_start_cb
         self.hold_end_cb = hold_end_cb
         self.device_resolver = device_resolver
@@ -80,6 +82,9 @@ class FridaSession:
         self.release_cb = release_cb
         self.crash_cb = crash_cb
         self.validate_target = validate_target
+        self.cursor_previews = cursor_previews
+        self._cursor_previews_lock = threading.Lock()
+        self._provider_script = None
         self.api_level_cb = None
         self.hook_warning_cb = None
         self.connected_cb = None
@@ -329,6 +334,19 @@ class FridaSession:
                     or not isinstance(report.get("failed"), list)):
                 raise RuntimeError("Malformed hook registration report")
 
+            # In Spawn mode Java.perform cannot finish before device.resume().
+            # Install provider hooks after the main hook report so this RPC
+            # neither waits on the suspended process nor races with proxy().
+            self._provider_hooks_report = None
+            try:
+                with self._cursor_previews_lock:
+                    self._provider_hooks_report = script.exports_sync.configure_providers(
+                        True, True, self.cursor_previews,
+                    )
+                    self._provider_script = script
+            except Exception as error:
+                self.log_cb(log_warning(f"Provider hooks unavailable: {error}", "hooks"))
+
             with self._lock:
                 if generation != self._generation or self._session is not session:
                     close_after_lock = True
@@ -567,6 +585,10 @@ class FridaSession:
             payload = message["payload"]
             if isinstance(payload, dict):
                 event_name = payload.get("noxenEvent")
+                if event_name in ("provider_request", "provider_response", "provider_update", "provider_result", "provider_edit_error"):
+                    if self.provider_cb:
+                        self.provider_cb(dict(payload, captureSession=capture_session or self._capture_session))
+                    return
                 if event_name == "sender_started":
                     return  # SenderSession has its own listener on this script.
                 if event_name in ("monitor_batch", "monitor_status"):
@@ -794,6 +816,21 @@ class FridaSession:
         with self._lock:
             return self._ready and self._script is not None
 
+    def set_cursor_previews(self, enabled: bool) -> None:
+        """Run on a worker, serializing updates with initial provider setup."""
+        with self._cursor_previews_lock:
+            self.cursor_previews = enabled
+            with self._lock:
+                script, ready = self._script, self._ready
+            if script is None:
+                return
+            if script is not self._provider_script:
+                if ready:
+                    raise RuntimeError("Provider hooks are unavailable")
+                return  # Startup will read the new value when installing the hooks.
+            if script.exports_sync.set_cursor_previews(enabled) is not True:
+                raise RuntimeError("Agent did not apply the Cursor preview setting")
+
     def cleanup(self):
         with self._modification_lock:
             for event, _result in self._pending_modifications.values():
@@ -812,6 +849,10 @@ class FridaSession:
         # Detach may outlive this owner: pin its discovery context until done.
         def perform_cleanup(_device_resolver=self.device_resolver):
             if script:
+                try:
+                    script.exports_sync.stop_providers()
+                except Exception:
+                    pass
                 try:
                     script.exports_sync.interceptoff()
                 except Exception:

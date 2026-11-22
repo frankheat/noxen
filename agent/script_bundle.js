@@ -2225,6 +2225,711 @@
     }
   });
 
+  // agent/provider_cursor.js
+  var require_provider_cursor = __commonJS({
+    "agent/provider_cursor.js"(exports, module) {
+      init_node_globals();
+      var MAX_ROWS = 100;
+      var MAX_COLUMNS = 32;
+      var MAX_BYTES = 65536;
+      function tableBytes(table) {
+        let bytes = 0;
+        for (const char of JSON.stringify(table)) {
+          const code3 = char.codePointAt(0);
+          bytes += code3 < 128 ? 1 : code3 < 2048 ? 2 : code3 < 65536 ? 3 : 4;
+        }
+        return bytes;
+      }
+      function validateTable(table) {
+        if (!table || typeof table !== "object" || Array.isArray(table) || Object.keys(table).sort().join(",") !== "columns,rows" || !Array.isArray(table.columns) || !table.columns.length || table.columns.length > MAX_COLUMNS || table.columns.some((x) => typeof x !== "string" || x.length > 256) || new Set(table.columns).size !== table.columns.length || !Array.isArray(table.rows) || table.rows.length > MAX_ROWS || tableBytes(table) > MAX_BYTES)
+          throw new Error("Cursor table requires unique columns and at most 100 rows, 32 columns and 64 KiB");
+        for (const row of table.rows) {
+          if (!Array.isArray(row) || row.length !== table.columns.length) throw new Error("Each row must match the columns");
+          for (const cell of row) {
+            if (!cell || Object.keys(cell).sort().join(",") !== "type,value") throw new Error("Cells require type and value");
+            const { type, value } = cell;
+            if (type === "null" && value === null) continue;
+            if (type === "string" && typeof value === "string" && value.length <= 8192) continue;
+            if (type === "float" && typeof value === "number" && Number.isFinite(value)) continue;
+            if (type === "integer" && typeof value === "string" && /^-?(0|[1-9][0-9]*)$/.test(value) && BigInt(value) >= -9223372036854775808n && BigInt(value) <= 9223372036854775807n) continue;
+            throw new Error("Unsupported Cursor cell or out-of-range value");
+          }
+        }
+        return table;
+      }
+      function readCell(cursor, column, type = cursor.getType(column)) {
+        switch (type) {
+          case 0:
+            return { type: "null", value: null };
+          case 1:
+            return { type: "integer", value: String(cursor.getLong(column)) };
+          case 2:
+            return { type: "float", value: cursor.getDouble(column) };
+          case 3:
+            return { type: "string", value: String(cursor.getString(column)) };
+          default:
+            throw new Error("Blob or unsupported Cursor cell; original result kept");
+        }
+      }
+      function previewCursor(cursor) {
+        const position = cursor.getPosition();
+        const columns = Array.from(cursor.getColumnNames(), String);
+        if (columns.length > MAX_COLUMNS || columns.some((name) => name.length > 256))
+          throw new Error("Cursor exceeds preview column limits");
+        const preview = { columns, rows: [], complete: false, reason: "Row limit reached" };
+        try {
+          for (let index = 0; index <= MAX_ROWS; index++) {
+            if (!cursor.moveToPosition(index)) {
+              if (cursor.getPosition() !== index) throw new Error("Cursor could not reach the next row");
+              preview.complete = true;
+              delete preview.reason;
+              break;
+            }
+            if (index === MAX_ROWS) break;
+            const row = columns.map((_, column) => {
+              const type = cursor.getType(column);
+              if (type === 4) return { type: "omitted", value: "Blob" };
+              const cell = readCell(cursor, column, type);
+              if (cell.type === "string" && cell.value.length > 8192)
+                return { type: "omitted", value: "String exceeds cell limit" };
+              if (cell.type === "float" && !Number.isFinite(cell.value))
+                return { type: "omitted", value: "Non-finite number" };
+              return cell;
+            });
+            preview.rows.push(row);
+            if (tableBytes(preview) > MAX_BYTES) {
+              preview.rows.pop();
+              preview.reason = "Size limit reached";
+              break;
+            }
+          }
+        } finally {
+          if (cursor.getPosition() !== position) cursor.moveToPosition(position);
+          if (cursor.getPosition() !== position) throw new Error("Could not restore Cursor position");
+        }
+        if (preview.complete && preview.rows.some((row) => row.some((cell) => cell.type === "omitted"))) {
+          preview.complete = false;
+          preview.reason = "Some cell values omitted";
+        }
+        return preview;
+      }
+      function snapshotCursor(cursor) {
+        const position = cursor.getPosition();
+        let failure = null, table;
+        try {
+          const count = cursor.getCount(), columns = Array.from(cursor.getColumnNames(), String);
+          if (count > MAX_ROWS || columns.length > MAX_COLUMNS) throw new Error("Cursor exceeds snapshot limits (100 rows, 32 columns)");
+          table = { columns, rows: [] };
+          for (let row = 0; row < count; row++) {
+            if (!cursor.moveToPosition(row)) throw new Error("Cursor changed while being read");
+            table.rows.push(columns.map((_, col) => readCell(cursor, col)));
+            if (tableBytes(table) > MAX_BYTES) throw new Error("Cursor exceeds 64 KiB snapshot limit");
+          }
+          validateTable(table);
+        } catch (error) {
+          failure = error;
+        } finally {
+          cursor.moveToPosition(position);
+          if (cursor.getPosition() !== position) throw new Error("Could not restore Cursor position; replacement disabled");
+        }
+        if (failure) throw failure;
+        return table;
+      }
+      function buildCursor(Java2, table, javaText) {
+        validateTable(table);
+        const cursor = Java2.use("android.database.MatrixCursor").$new(Java2.array("java.lang.String", table.columns.map(javaText)));
+        try {
+          for (const row of table.rows) {
+            const values = row.map((cell) => {
+              if (cell.type === "null") return null;
+              if (cell.type === "string") return Java2.use("java.lang.String").$new(javaText(cell.value));
+              return Java2.use(cell.type === "integer" ? "java.lang.Long" : "java.lang.Double").valueOf(String(cell.value));
+            });
+            cursor.addRow.overload("[Ljava.lang.Object;").call(cursor, Java2.array("java.lang.Object", values));
+          }
+          return cursor;
+        } catch (error) {
+          cursor.close();
+          throw error;
+        }
+      }
+      module.exports = { snapshotCursor, previewCursor, validateTable, buildCursor };
+    }
+  });
+
+  // agent/provider_intercept.js
+  var require_provider_intercept = __commonJS({
+    "agent/provider_intercept.js"(exports, module) {
+      init_node_globals();
+      var { snapshotCursor, previewCursor, validateTable, buildCursor } = require_provider_cursor();
+      function createProviderInterceptor(Java2, emit, options) {
+        const send2 = (event) => {
+          try {
+            emit(event);
+            return true;
+          } catch (_) {
+            return false;
+          }
+        };
+        const RESOLVER = "android.content.ContentResolver";
+        const TRANSPORT = "android.content.ContentProvider$Transport";
+        const URI = "android.net.Uri", STRING = "java.lang.String", STRINGS = "[Ljava.lang.String;";
+        const VALUES = "android.content.ContentValues", BUNDLE = "android.os.Bundle";
+        const methods = /* @__PURE__ */ new Set([
+          "query",
+          "getType",
+          "insert",
+          "update",
+          "delete",
+          "call",
+          "openFile",
+          "openAssetFile",
+          "openTypedAssetFile",
+          "openFileDescriptor",
+          "openInputStream",
+          "openOutputStream",
+          "openTypedAssetFileDescriptor"
+        ]);
+        const installed = /* @__PURE__ */ new Map(), depth = /* @__PURE__ */ new Set(), dropped = /* @__PURE__ */ new Set();
+        let enabled = { outgoing: false, incoming: false }, pending = null, serial = 0, lock2;
+        let capturePreviews = false;
+        const javaText = (text) => text === null ? null : text.includes("\0") ? Java2.use(STRING).$new(Java2.array("char", text.split(""))) : text;
+        function descriptors(method, types, direction) {
+          const fields = [], counts = {};
+          const stringNames = {
+            query: ["selection", "sortOrder"],
+            update: ["selection"],
+            delete: ["selection"],
+            call: direction === "incoming" ? ["authority", "method", "arg"] : ["method", "arg"],
+            openFile: ["mode"],
+            openAssetFile: ["mode"],
+            openTypedAssetFile: ["mimeType"],
+            openFileDescriptor: ["mode"],
+            openOutputStream: ["mode"],
+            openTypedAssetFileDescriptor: ["mimeType"]
+          };
+          types.forEach((type, index) => {
+            counts[type] = (counts[type] || 0) + 1;
+            let name;
+            if (type === URI) name = "uri";
+            else if (type === STRING) {
+              if (method === "call" && types[0] === STRING && direction === "outgoing")
+                name = ["authority", "method", "arg"][counts[type] - 1];
+              else name = (stringNames[method] || [])[counts[type] - 1];
+            } else if (type === STRINGS) name = method === "query" && counts[type] === 1 ? "projection" : "selectionArgs";
+            else if (type === VALUES) name = "values";
+            else if (type === BUNDLE && ["query", "update", "delete"].includes(method)) name = "queryArguments";
+            if (name) fields.push({ name, index, type });
+          });
+          return fields;
+        }
+        function capture(args, fields) {
+          const values = /* @__PURE__ */ Object.create(null), editable = [];
+          for (const field of fields) {
+            const arg = args[field.index];
+            let value = null;
+            if (arg != null) {
+              if (field.type === URI) {
+                if (!["android.net.Uri$StringUri", "android.net.Uri$HierarchicalUri", "android.net.Uri$OpaqueUri"].includes(arg.$className))
+                  continue;
+                value = String(arg.toString());
+              } else if (field.type === VALUES) {
+                const source = Java2.cast(arg, Java2.use(VALUES));
+                if (source.size() > 32) continue;
+                value = /* @__PURE__ */ Object.create(null);
+                const keys = source.keySet().iterator();
+                let supported = true;
+                while (keys.hasNext()) {
+                  const key = String(keys.next()), item = source.get(key);
+                  if (item === null) {
+                    value[key] = { type: "String", value: null };
+                    continue;
+                  }
+                  const kind = item.$className;
+                  if (kind === STRING) value[key] = { type: "String", value: String(item) };
+                  else if (kind === "java.lang.Integer") value[key] = { type: "int", value: Java2.cast(item, Java2.use(kind)).intValue() };
+                  else if (kind === "java.lang.Long") value[key] = { type: "long", value: String(item) };
+                  else if (kind === "java.lang.Boolean") value[key] = { type: "boolean", value: Java2.cast(item, Java2.use(kind)).booleanValue() };
+                  else {
+                    supported = false;
+                    break;
+                  }
+                }
+                if (!supported) continue;
+              } else if (field.type === BUNDLE) {
+                const source = Java2.cast(arg, Java2.use(BUNDLE));
+                if (source.isParcelled() !== false) continue;
+                value = {};
+                for (const [name, key] of [["selection", "selection"], ["selectionArgs", "selection-args"], ["sortOrder", "sort-order"]]) {
+                  const full = "android:query-arg-sql-" + key;
+                  if (name === "selectionArgs") {
+                    const array = source.getStringArray(full);
+                    if (array !== null && array.length > 64) {
+                      value = null;
+                      break;
+                    }
+                    value[name] = array === null ? null : Array.from(array, String);
+                  } else {
+                    const text = source.getString(full);
+                    value[name] = text === null ? null : String(text);
+                  }
+                }
+                if (value === null) continue;
+              } else if (field.type === STRINGS) {
+                if (arg.length > 64) continue;
+                value = Array.from(arg, (x) => x == null ? null : String(x));
+              } else value = String(arg);
+              if (JSON.stringify(value).length > 8192) continue;
+            }
+            values[field.name] = value;
+            editable.push(field);
+          }
+          return { values, editable };
+        }
+        function resultValue(result, type) {
+          if (result == null || type === "void") return { type, value: null };
+          if (type === "boolean" || type === "int") return { type, value: result };
+          if (type === STRING) return { type, value: String(result).slice(0, 2048) };
+          if (type === URI && [
+            "android.net.Uri$StringUri",
+            "android.net.Uri$HierarchicalUri",
+            "android.net.Uri$OpaqueUri"
+          ].includes(result.$className)) {
+            try {
+              const value = options.inspect(() => String(result.toString()));
+              if (value.length <= 8192) return { type, value };
+              return { type, opaque: true, reason: "URI exceeds capture limit" };
+            } catch (error) {
+              return { type, opaque: true, reason: "URI could not be read" };
+            }
+          }
+          return { type: result.$className || type, opaque: true };
+        }
+        function invoke(record, self, args) {
+          const thread = Process.getCurrentThreadId();
+          if (!enabled[record.direction] || depth.has(thread)) return record.method.apply(self, args);
+          const previewEnabled = capturePreviews;
+          depth.add(thread);
+          let owned = false, hold = null, interrupted = false, id;
+          try {
+            let captured;
+            try {
+              captured = options.inspect(() => capture(args, record.fields));
+            } catch (_) {
+              captured = { values: {}, editable: [] };
+            }
+            id = "provider-" + Process.id + "-" + ++serial;
+            owned = options.claim({ class: record.className, method: record.name, data: captured.values.uri || "", flags: "", category: [] });
+            const event = {
+              noxenEvent: "provider_request",
+              ...options.stamp(),
+              id,
+              direction: record.direction,
+              class: record.className,
+              method: record.name,
+              types: record.types,
+              arguments: captured.values,
+              nullArguments: record.types.map((_, index) => index).filter((index) => args[index] == null),
+              opaqueArguments: record.types.map((type, i) => ({ index: i, type })).filter((x) => !captured.editable.some((f) => f.index === x.index)),
+              state: owned ? "held" : "forwarded",
+              phase: "request",
+              decisionId: owned ? id : null
+            };
+            if (!owned) event.decision = options.blocking && !options.blocking() ? "forwarded" : "forwarded_busy";
+            if (record.direction === "incoming")
+              event.callingUid = Java2.use("android.os.Binder").getCallingUid();
+            if (owned) pending = { id, event, args: Array.from(args), fields: captured.editable, mode: null };
+            if (!send2(event)) return record.method.apply(self, args);
+            let callArgs = args, skipResponse = false;
+            if (owned) {
+              hold = options.begin(record.className, record.name);
+              while (true) {
+                Java2.synchronized(lock2, () => {
+                  while (pending.mode === null) {
+                    try {
+                      lock2.wait();
+                    } catch (error) {
+                      if (!error.$h || !Java2.use("java.lang.InterruptedException").class.isInstance(error))
+                        throw error;
+                      interrupted = true;
+                    }
+                  }
+                });
+                if (pending.mode === "drop") break;
+                try {
+                  callArgs = options.inspect(() => buildArguments(pending));
+                  break;
+                } catch (error) {
+                  pending.mode = null;
+                  send2({ noxenEvent: "provider_edit_error", id, state: "held", error: String(error).slice(0, 512) });
+                }
+              }
+              const decision = pending;
+              pending = null;
+              skipResponse = decision.skipResponse;
+              if (decision.mode === "drop") {
+                send2({ noxenEvent: "provider_result", id, state: "dropped", ...options.stamp(), releasedAt: Date.now() });
+                throw Java2.use("android.os.OperationCanceledException").$new("Blocked by noxen");
+              }
+              send2({
+                noxenEvent: "provider_update",
+                id,
+                state: decision.edited ? "modified_forwarded" : "forwarded",
+                sentArguments: decision.values || event.arguments,
+                error: null,
+                releasedAt: Date.now()
+              });
+            }
+            if (interrupted) {
+              Java2.use("java.lang.Thread").currentThread().interrupt();
+              interrupted = false;
+            }
+            try {
+              let result = record.method.apply(self, callArgs);
+              const isCursor = record.method.returnType.className === "android.database.Cursor" && result != null;
+              const isMime = record.name === "getType" && record.method.returnType.className === STRING;
+              const originalResult = resultValue(result, record.method.returnType.className);
+              let preview = {};
+              if (owned && !skipResponse && (!options.blocking || options.blocking()) && (isCursor || isMime)) {
+                result = response(id, result, event, isMime);
+              } else if (previewEnabled && isCursor) {
+                try {
+                  preview = { cursorPreview: options.inspect(() => previewCursor(result)) };
+                } catch (error) {
+                  preview = { cursorPreviewError: String(error).slice(0, 512) };
+                }
+              }
+              send2({
+                noxenEvent: "provider_result",
+                id,
+                state: "returned",
+                ...options.stamp(),
+                result: originalResult,
+                decisionId: null,
+                ...preview
+              });
+              return result;
+            } catch (error) {
+              if (!dropped.has(id)) send2({
+                noxenEvent: "provider_result",
+                id,
+                state: "exception",
+                ...options.stamp(),
+                exception: String(error).slice(0, 2048)
+              });
+              throw error;
+            }
+          } finally {
+            depth.delete(thread);
+            dropped.delete(id);
+            if (owned) {
+              pending = null;
+              options.release();
+              if (hold !== null) options.end(hold);
+            }
+            if (interrupted) Java2.use("java.lang.Thread").currentThread().interrupt();
+          }
+        }
+        function response(id, original, request, isMime = false) {
+          const decisionId = id + ":response";
+          const event = {
+            noxenEvent: "provider_response",
+            id,
+            state: "held",
+            phase: "response",
+            decisionId,
+            result: resultValue(original, isMime ? STRING : "android.database.Cursor"),
+            ...options.stamp(),
+            ...isMime ? { editableResult: { value: original === null ? null : String(original) } } : {}
+          };
+          pending = { id: decisionId, event, mode: null, values: null, snapshot: null, isMime };
+          if (!send2(event)) {
+            pending = null;
+            return original;
+          }
+          let interrupted = false;
+          try {
+            while (true) {
+              Java2.synchronized(lock2, () => {
+                while (pending.mode === null) {
+                  try {
+                    lock2.wait();
+                  } catch (error) {
+                    if (!error.$h || !Java2.use("java.lang.InterruptedException").class.isInstance(error)) throw error;
+                    interrupted = true;
+                  }
+                }
+              });
+              const decision = pending;
+              if (decision.mode === "inspect") {
+                decision.mode = null;
+                try {
+                  decision.snapshot = options.inspect(() => snapshotCursor(original));
+                  send2({
+                    noxenEvent: "provider_response",
+                    id,
+                    state: "held",
+                    phase: "response",
+                    decisionId,
+                    cursor: decision.snapshot,
+                    error: null
+                  });
+                } catch (error) {
+                  decision.snapshot = null;
+                  send2({
+                    noxenEvent: "provider_edit_error",
+                    id,
+                    state: "held",
+                    phase: "response",
+                    decisionId,
+                    error: String(error).slice(0, 512)
+                  });
+                }
+                continue;
+              }
+              if (decision.mode === "drop") {
+                dropped.add(id);
+                try {
+                  original.close();
+                } catch (_) {
+                }
+                send2({ noxenEvent: "provider_result", id, state: "dropped", decisionId: null, ...options.stamp(), releasedAt: Date.now() });
+                throw Java2.use("android.os.OperationCanceledException").$new("Blocked by noxen");
+              }
+              let result = original;
+              try {
+                if (decision.values !== null) {
+                  if (isMime) {
+                    if (decision.values.value !== (original === null ? null : String(original)))
+                      result = options.inspect(() => javaText(decision.values.value));
+                  } else if (JSON.stringify(decision.values) !== JSON.stringify(decision.snapshot)) {
+                    result = options.inspect(() => buildCursor(Java2, decision.values, javaText));
+                  }
+                }
+              } catch (error) {
+                decision.mode = null;
+                send2({
+                  noxenEvent: "provider_edit_error",
+                  id,
+                  state: "held",
+                  phase: "response",
+                  decisionId,
+                  error: String(error).slice(0, 512)
+                });
+                continue;
+              }
+              if (result !== original) {
+                try {
+                  original.close();
+                } catch (_) {
+                }
+              }
+              send2({
+                noxenEvent: "provider_update",
+                id,
+                state: result === original ? "forwarded" : "modified_forwarded",
+                phase: "response",
+                decisionId: null,
+                ...result === original ? {} : isMime ? { sentResult: { type: STRING, value: decision.values.value } } : { sentCursor: decision.values },
+                releasedAt: Date.now(),
+                error: null
+              });
+              return result;
+            }
+          } finally {
+            pending = null;
+            if (interrupted) Java2.use("java.lang.Thread").currentThread().interrupt();
+          }
+        }
+        function buildArguments(decision) {
+          const args = decision.args.slice(), values = decision.values;
+          if (values == null) return args;
+          for (const field of decision.fields) {
+            const value = values[field.name];
+            if (field.type === VALUES) {
+              if (value !== null && (typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 32))
+                throw new Error("values: expected a typed ContentValues object");
+            } else if (field.type === BUNDLE) {
+              if (value !== null && (typeof value !== "object" || Array.isArray(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["selection", "selectionArgs", "sortOrder"])))
+                throw new Error("queryArguments: keep selection, selectionArgs and sortOrder");
+            } else if (field.type === STRINGS) {
+              if (value !== null && (!Array.isArray(value) || value.length > 64 || value.some((x) => x !== null && typeof x !== "string")))
+                throw new Error(field.name + ": expected null or string array");
+            } else if (value !== null && typeof value !== "string")
+              throw new Error(field.name + ": expected null or string");
+            if (field.name === "uri" && (value === null || !value.startsWith("content://")))
+              throw new Error("uri: expected content:// URI");
+            if (JSON.stringify(value).length > 8192) throw new Error(field.name + ": value too large");
+            if (JSON.stringify(value) === JSON.stringify(decision.event.arguments[field.name])) continue;
+            if (value === null) args[field.index] = null;
+            else if (field.type === VALUES) {
+              const target = Java2.use(VALUES).$new();
+              for (const [key, item] of Object.entries(value)) {
+                if (!item || !["String", "int", "long", "boolean"].includes(item.type))
+                  throw new Error("values: supported types are String, int, long and boolean");
+                if (item.value === null) {
+                  target.putNull(key);
+                  continue;
+                }
+                const expected = { String: "string", int: "number", long: "string", boolean: "boolean" }[item.type];
+                if (typeof item.value !== expected) throw new Error(key + ": invalid typed value");
+                if (item.type === "int" && (!Number.isInteger(item.value) || item.value < -2147483648 || item.value > 2147483647))
+                  throw new Error(key + ": integer out of range");
+                const klass = "java.lang." + ({ int: "Integer", long: "Long", boolean: "Boolean" }[item.type] || "String");
+                const boxed = item.type === "String" ? javaText(item.value) : Java2.use(klass).valueOf(String(item.value));
+                target.put.overload(STRING, klass).call(target, javaText(key), boxed);
+              }
+              args[field.index] = target;
+            } else if (field.type === BUNDLE) {
+              const target = args[field.index] === null ? Java2.use(BUNDLE).$new() : Java2.use(BUNDLE).$new(args[field.index]);
+              for (const [name, key] of [["selection", "selection"], ["selectionArgs", "selection-args"], ["sortOrder", "sort-order"]]) {
+                const item = value[name], full = "android:query-arg-sql-" + key;
+                if (name === "selectionArgs") {
+                  if (item !== null && (!Array.isArray(item) || item.length > 64 || item.some((x) => typeof x !== "string")))
+                    throw new Error(name + ": expected null or string array");
+                  target.putStringArray(full, item === null ? null : Java2.array(STRING, item.map(javaText)));
+                } else {
+                  if (item !== null && typeof item !== "string") throw new Error(name + ": expected null or string");
+                  target.putString(full, javaText(item));
+                }
+              }
+              args[field.index] = target;
+            } else args[field.index] = field.type === URI ? Java2.use(URI).parse(javaText(value)) : field.type === STRINGS ? Java2.array(STRING, value.map(javaText)) : javaText(value);
+          }
+          return args;
+        }
+        function validateValues(values, fields) {
+          if (!values || typeof values !== "object" || Array.isArray(values)) throw new Error("Expected argument object");
+          if (JSON.stringify(Object.keys(values).sort()) !== JSON.stringify(fields.map((f) => f.name).sort()))
+            throw new Error("Keep the captured argument keys; null clears a value");
+          for (const field of fields) {
+            const value = values[field.name];
+            if (JSON.stringify(value).length > 8192) throw new Error(field.name + ": value too large");
+            if (field.type === VALUES || field.type === BUNDLE) {
+              if (value !== null && (typeof value !== "object" || Array.isArray(value)))
+                throw new Error(field.name + ": expected object or null");
+            } else if (field.type === STRINGS) {
+              if (value !== null && (!Array.isArray(value) || value.length > 64 || value.some((x) => x !== null && typeof x !== "string")))
+                throw new Error(field.name + ": expected null or string array");
+            } else if (value !== null && typeof value !== "string")
+              throw new Error(field.name + ": expected null or string");
+            if (field.name === "uri" && (value === null || !value.startsWith("content://")))
+              throw new Error("uri: expected content:// URI");
+          }
+        }
+        function resolve(id, action, values, skipResponse = false) {
+          let accepted = false;
+          Java2.performNow(() => Java2.synchronized(lock2, () => {
+            if (!pending || pending.id !== id || pending.mode !== null) return;
+            if (!["forward", "drop", "inspect"].includes(action)) throw new Error("Unknown provider decision");
+            if (action === "inspect" && (pending.event.phase !== "response" || pending.snapshot !== null || pending.isMime))
+              throw new Error("Cursor can only be read once while its response is held");
+            pending.values = null;
+            pending.edited = false;
+            if (values != null && action === "forward") {
+              if (pending.event.phase === "response") {
+                if (pending.isMime) {
+                  if (typeof values !== "object" || Array.isArray(values) || Object.keys(values).join(",") !== "value" || values.value !== null && typeof values.value !== "string" || typeof values.value === "string" && values.value.length > 8192)
+                    throw new Error("Response requires value: a string up to 8192 characters or null");
+                } else {
+                  if (pending.snapshot === null) throw new Error("Read Cursor before editing its response");
+                  validateTable(values);
+                }
+              } else validateValues(values, pending.fields);
+              pending.edited = JSON.stringify(values) !== JSON.stringify(pending.event.arguments);
+              pending.values = values;
+            }
+            pending.skipResponse = skipResponse;
+            pending.mode = action;
+            accepted = true;
+            lock2.notifyAll();
+          }));
+          return accepted;
+        }
+        function configure(outgoing, incoming, previews = false) {
+          return new Promise((resolveConfig, reject) => Java2.perform(() => {
+            try {
+              if (lock2 === void 0) lock2 = Java2.use("java.lang.Object").$new();
+              if (pending && !outgoing && !incoming) resolve(pending.id, "forward", null);
+              enabled = { outgoing: !!outgoing, incoming: !!incoming };
+              capturePreviews = previews === true;
+              const report = [];
+              for (const [direction, className] of [["outgoing", RESOLVER], ["incoming", TRANSPORT]]) {
+                if (!enabled[direction]) continue;
+                let klass;
+                try {
+                  klass = Java2.use(className);
+                } catch (error) {
+                  enabled[direction] = false;
+                  report.push({ direction, method: "*", types: [], state: "Unavailable", error: String(error) });
+                  continue;
+                }
+                for (const name of methods) {
+                  if (!klass[name]) continue;
+                  for (const method of klass[name].overloads) {
+                    const key = String(method.handle);
+                    if (installed.has(key)) {
+                      report.push({
+                        direction,
+                        method: name,
+                        types: installed.get(key).types,
+                        state: "Active"
+                      });
+                      continue;
+                    }
+                    const types = method.argumentTypes.map((t) => t.className);
+                    if (direction === "incoming" && types[0] !== "android.content.AttributionSource") continue;
+                    if (!types.includes(URI) && name !== "call") continue;
+                    if (method.implementation !== null) {
+                      report.push({ direction, method: name, types, state: "Conflict" });
+                      continue;
+                    }
+                    const record = {
+                      method,
+                      name,
+                      className,
+                      direction,
+                      types,
+                      fields: descriptors(name, types, direction)
+                    };
+                    method.implementation = function() {
+                      return invoke(record, this, arguments);
+                    };
+                    installed.set(key, record);
+                    report.push({ direction, method: name, types, state: "Active" });
+                  }
+                }
+                if (!report.some((item) => item.direction === direction && item.state === "Active")) {
+                  enabled[direction] = false;
+                  if (!report.some((item) => item.direction === direction))
+                    report.push({
+                      direction,
+                      method: "*",
+                      types: [],
+                      state: "Unavailable",
+                      error: "No supported overloads on this Android version"
+                    });
+                }
+              }
+              resolveConfig({ enabled, hooks: report });
+            } catch (error) {
+              enabled = { outgoing: false, incoming: false };
+              reject(error);
+            }
+          }));
+        }
+        function release() {
+          if (pending) resolve(pending.id, "forward", null);
+        }
+        function setCursorPreviews(enabled2) {
+          capturePreviews = enabled2 === true;
+        }
+        return { configure, resolve, release, setCursorPreviews };
+      }
+      module.exports = { createProviderInterceptor };
+    }
+  });
+
   // agent/monitor.js
   var require_monitor = __commonJS({
     "agent/monitor.js"(exports, module) {
@@ -14576,6 +15281,7 @@ std_string_c_str (StdString * self)
   }
   var monitor = null;
   var monitorStopped = false;
+  var providerInterceptor = null;
   var captureSequence = 0;
   var captureSessionNumber = 0;
   function captureStamp() {
@@ -16045,6 +16751,37 @@ std_string_c_str (StdString * self)
     return sender;
   }
   rpc.exports = {
+    stopProviders: function() {
+      return providerInterceptor === null ? true : providerInterceptor.configure(false, false);
+    },
+    configureProviders: function(outgoing, incoming, previews) {
+      if (providerInterceptor === null) {
+        providerInterceptor = require_provider_intercept().createProviderInterceptor(Java, send, {
+          inspect: inspectIntent,
+          stamp: captureStamp,
+          begin: beginHold,
+          end: endHold,
+          blocking: () => blockEnabled,
+          claim: (context) => {
+            if (!blockEnabled || waiting) return false;
+            waiting = true;
+            return true;
+          },
+          release: () => {
+            waiting = false;
+          }
+        });
+      }
+      return providerInterceptor.configure(outgoing, incoming, previews);
+    },
+    setCursorPreviews: function(enabled) {
+      if (providerInterceptor === null) return false;
+      providerInterceptor.setCursorPreviews(enabled);
+      return true;
+    },
+    resolveProvider: function(id, action, values, skipResponse) {
+      return providerInterceptor !== null && providerInterceptor.resolve(id, action, values, skipResponse);
+    },
     senderIdentity: function() {
       return getSender().identity();
     },
@@ -16173,7 +16910,8 @@ std_string_c_str (StdString * self)
       try {
         Java.performNow(function() {
           blockEnabled = false;
-          if (waiting && lock) {
+          if (providerInterceptor !== null) providerInterceptor.release();
+          if (activeDecisionId !== null && waiting && lock) {
             Java.synchronized(lock, function() {
               if (!waiting || resumeRequested) return;
               resumeMode = "forward";

@@ -4,8 +4,8 @@
 
 noxen is a tool for inspecting how the components of an Android app communicate at
 runtime. It uses [Frida](https://frida.re) to hook Java methods in the target process,
-so you can see each Intent as it is sent or received, change it before the app
-continues, or drop it.
+so you can inspect and change captured Intents and content provider calls before
+the app continues, or drop them.
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10+-blue" alt="Python 3.10+">
@@ -21,6 +21,9 @@ continues, or drop it.
   extras, change any field and let the app continue.
 - **Review every capture.** Search all captured Intents, including those that were
   never held.
+- **Inspect provider calls.** Hold outgoing ContentResolver and supported incoming
+  provider calls, edit their captured arguments, and inspect or replace a query
+  Cursor response when a complete bounded snapshot is available.
 - **Follow a value.** Record related Java calls, such as SQL queries, file opens and
   WebView loads, without stopping them.
 - **Send your own requests.** Start activities, send broadcasts and call content
@@ -75,6 +78,7 @@ The full documentation is at **https://frankheat.github.io/noxen-docs/**:
 - [Commands](https://frankheat.github.io/noxen-docs/commands/) and
   [keyboard shortcuts](https://frankheat.github.io/noxen-docs/keyboard-shortcuts/)
 - [Troubleshooting](https://frankheat.github.io/noxen-docs/troubleshooting/)
+- [Content providers](https://frankheat.github.io/noxen-docs/providers/)
 
 [noxen playground](https://github.com/frankheat/noxen-playground) is a companion
 Android app for controlled tests.

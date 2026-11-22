@@ -12,6 +12,7 @@ DEFAULT_SETTINGS = {
     "stack": False,
     "stack_depth": 15,
     "intercept": True,
+    "cursor_previews": False,
     "intercept_command_bar": True,
     "history_command_bar": True,
     "theme": DARK_THEME,
@@ -74,6 +75,10 @@ def load_settings(path: str | Path | None = None) -> dict:
                     parsed = _parse_on_off(value)
                     if parsed is not None:
                         settings["intercept"] = parsed
+                elif key == "cursor_previews":
+                    parsed = _parse_on_off(value)
+                    if parsed is not None:
+                        settings["cursor_previews"] = parsed
                 elif key == "intercept_command_bar":
                     parsed = _parse_on_off(value)
                     if parsed is not None:
@@ -98,6 +103,7 @@ def save_settings(settings: dict, path: str | Path | None = None):
         f"stack={'on' if settings['stack'] else 'off'}",
         f"stack_depth={settings['stack_depth']}",
         f"intercept={'on' if settings['intercept'] else 'off'}",
+        f"cursor_previews={'on' if settings['cursor_previews'] else 'off'}",
         f"intercept_command_bar={'on' if settings['intercept_command_bar'] else 'off'}",
         f"history_command_bar={'on' if settings['history_command_bar'] else 'off'}",
         f"theme={settings['theme']}",

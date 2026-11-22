@@ -6,6 +6,7 @@ import math
 
 from noxen.intent_mods import normalize_component
 from noxen.rendering import INTENT_FLAGS
+from noxen.provider_fields import ordered_provider_request
 
 INTENT_OPERATIONS = (
     "startActivity", "sendBroadcast", "sendOrderedBroadcast", "startService", "startForegroundService", "stopService",
@@ -268,7 +269,7 @@ def validate_request(raw, *, for_execution=False):
                 number = value.setdefault(key, default)
                 if type(number) is not int or not 1 <= number <= maximum:
                     raise SenderError(f"{key}: expected integer between 1 and {maximum}")
-    return value
+    return ordered_provider_request(value) if operation in PROVIDER_OPERATIONS else value
 
 
 def render_sender_detail(record, current_revision=None, *, view="summary"):

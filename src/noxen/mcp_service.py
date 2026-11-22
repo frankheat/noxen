@@ -131,6 +131,9 @@ class MCPService:
             "retry_monitor_hooks": self.retry_monitor_hooks,
             "connect": self.connect, "disconnect": self.disconnect,
             "get_sender": self.get_sender,
+            "get_provider_interception": self.get_provider_interception,
+            "resolve_provider_interception": self.resolve_provider_interception,
+            "list_provider_calls": self.list_provider_calls,
             "check_sender_activity_context": self.check_sender_activity_context,
             "prepare_sender_request": self.prepare_sender_request,
             "prepare_sender_component": self.prepare_sender_component,
@@ -172,7 +175,15 @@ class MCPService:
 
     async def prepare_sender_request(self, event_id, epoch, operation):
         snapshot = await self.intent(event_id, epoch)
-        return {"request": prepare_intent_request(snapshot["intent"], operation),
+        entry = snapshot["intent"]
+        if entry.get("provider"):
+            from noxen.providers import provider_request
+            request = provider_request(entry["provider"])
+            if operation != request["operation"]:
+                raise OperationError("operation_mismatch: use the captured provider operation")
+        else:
+            request = prepare_intent_request(entry, operation)
+        return {"request": request,
                 "source": {"history_id": event_id}, "saved": False,
                 "note": "Review and save before executing. No flags are added automatically."}
 
@@ -407,6 +418,12 @@ class MCPService:
                     continue
                 row = {k: copy.deepcopy(entry.get(k)) for k in ("id", "timestamp", "class", "method", "outcome")}
                 row.update({k: copy.deepcopy(entry.get("intent", {}).get(k)) for k in ("component", "action")})
+                if entry.get("provider"):
+                    provider = entry["provider"]
+                    row.update(event_type="provider", direction=provider.get("direction"),
+                               uri=(provider.get("sentArguments") or provider.get("arguments") or {}).get("uri"))
+                else:
+                    row["event_type"] = "intent"
                 row["capture_order"] = capture_order_label(entry)
                 rows.append(row)
             unsaved = sum(row[0] <= 0 for row in snapshot)
@@ -593,12 +610,34 @@ class MCPService:
         return {"cleared": True, "epoch": current_epoch}
 
     async def interception(self):
+        is_provider = bool((self.app._current_intercepted_entry or {}).get("provider"))
         return {"connection_token": self.connection_token(), "held": self.app._intent_blocked,
                 "enabled": self.app._intercept_mode,
                 "decision_id": self.app._current_decision_id,
                 "editing": self.app._edit_mode,
                 "captured_intent": copy.deepcopy(self.app._current_intercepted_entry),
-                "note": "Use resolve_interception with modifications to edit and forward the captured Intent."}
+                "event_type": "provider" if is_provider else "intent",
+                "note": ("Use resolve_provider_interception with the provider connection and current decision ID. "
+                         "Inspect reads a held Cursor response."
+                         if is_provider else
+                         "Use resolve_interception with modifications to edit and forward the captured Intent.")}
+
+    async def get_provider_interception(self):
+        return self.app.provider_service.status()
+
+    async def resolve_provider_interception(self, provider_connection, decision_id, action,
+                                            expected_connection, arguments=None):
+        self.require_control(expected_connection)
+        if self.app._edit_mode or self.app._edit_forward_pending:
+            raise OperationError("draft_pending: finish or cancel the provider draft in the TUI")
+        result = await self.app.provider_service.resolve(provider_connection, decision_id, action, arguments)
+        self.app._provider_tick()
+        return result
+
+    async def list_provider_calls(self, before_id=None, limit=25):
+        if not 1 <= limit <= 100:
+            raise OperationError("invalid_limit: use a limit between 1 and 100")
+        return {"calls": await asyncio.to_thread(self.app.db.provider_calls, before_id, limit)}
 
     async def wait_for_interception(self, expected_connection, after_decision_id=None, timeout_ms=10000):
         if not 1 <= timeout_ms <= 30000:
@@ -707,6 +746,17 @@ class MCPService:
         if app._edit_mode or app._edit_forward_pending or app._staged_mods:
             raise OperationError("draft_pending: finish or cancel the Intent draft in the TUI")
         entry = app._current_intercepted_entry
+        if entry and entry.get("provider"):
+            if modifications:
+                raise OperationError("provider_arguments_required: use resolve_provider_interception for provider edits")
+            if action == "off":
+                await asyncio.to_thread(session.intercept_off)
+                app.update_intercept_button(False)
+            else:
+                service = app.provider_service
+                await service.resolve(service.connection, decision_id, action)
+            app._provider_tick()
+            return await self.interception()
         if modifications and entry is None:
             raise OperationError("capture_unavailable: cannot validate modifications without a captured Intent")
         mods = self._intent_modifications(modifications)

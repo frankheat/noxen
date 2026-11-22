@@ -102,6 +102,29 @@ def create_http_app(invoke, token, port):
     write = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True)
 
     @server.tool(annotations=read)
+    async def get_provider_interception() -> dict[str, Any]:
+        """Read provider directions, hook conflicts and the currently held provider request."""
+        return await invoke("get_provider_interception")
+
+    @server.tool(annotations=write)
+    async def resolve_provider_interception(provider_connection: str, decision_id: str, action: Literal["forward", "drop", "inspect"],
+                                            expected_connection: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Resolve the exact provider hold. Forward can replace captured editable arguments.
+
+        Keep every editable key; null clears a field. Drop throws OperationCanceledException
+        to the caller. Caller identity and opaque arguments are preserved. At a Cursor response hold, inspect
+        reads a bounded table; forward accepts that table as arguments to replace the response.
+        """
+        return await invoke("resolve_provider_interception", provider_connection=provider_connection,
+                            decision_id=decision_id, action=action, arguments=arguments,
+                            expected_connection=expected_connection)
+
+    @server.tool(annotations=read)
+    async def list_provider_calls(before_id: int | None = None, limit: int = 25) -> dict[str, Any]:
+        """Read persisted provider requests, decisions and original return/exception descriptions."""
+        return await invoke("list_provider_calls", before_id=before_id, limit=limit)
+
+    @server.tool(annotations=read)
     async def get_sender() -> dict[str, Any]:
         """Read the separate Sender identity and token. UID is the actual caller; it may have privileges absent in an ordinary app."""
         return await invoke("get_sender")

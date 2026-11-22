@@ -23,6 +23,7 @@ _MIGRATED_INTENT_COLUMNS = {
     "capture_metadata": "TEXT",
     "capture_order": "TEXT",
     "released_at": "INTEGER",
+    "provider_payload": "TEXT",
 }
 
 _CAPTURE_METADATA_KEYS = (
@@ -290,6 +291,13 @@ class ProjectDB:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS provider_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                connection TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                UNIQUE(connection, request_id)
+            );
             CREATE TABLE IF NOT EXISTS sender_requests (
                 id TEXT PRIMARY KEY,
                 revision INTEGER NOT NULL,
@@ -347,6 +355,50 @@ class ProjectDB:
     def save_crash(self, crash: dict) -> int:
         with self._lock, self._require_connection() as conn:
             return conn.execute("INSERT INTO crashes (payload) VALUES (?)", (json.dumps(crash),)).lastrowid
+
+    def save_provider_call(self, connection, request_id, payload):
+        from noxen.providers import provider_entry
+        entry = provider_entry(payload, connection)
+        with self._lock, self._require_connection() as conn:
+            old = conn.execute("SELECT history_id FROM provider_calls WHERE connection=? AND request_id=?",
+                               (connection, request_id)).fetchone()
+            history_id = old[0] if old else None
+            values = (entry["timestamp"], entry["class"], entry["method"], entry["outcome"],
+                      json.dumps(entry["provider"]), json.dumps(capture_order(entry)), entry.get("released_at"))
+            if history_id is not None and conn.execute("SELECT 1 FROM intents WHERE id=?", (history_id,)).fetchone():
+                conn.execute("UPDATE intents SET timestamp=?, class=?, method=?, outcome=?, provider_payload=?, capture_order=?, released_at=? WHERE id=?",
+                             (*values, history_id))
+            else:
+                history_id = conn.execute("INSERT INTO intents(timestamp,class,method,outcome,provider_payload,capture_order,released_at) VALUES (?,?,?,?,?,?,?)",
+                                          values).lastrowid
+            conn.execute("""
+                INSERT INTO provider_calls(connection, request_id, payload, history_id) VALUES (?, ?, ?, ?)
+                ON CONFLICT(connection, request_id) DO UPDATE SET payload=excluded.payload, history_id=excluded.history_id
+            """, (connection, request_id, json.dumps(payload), history_id))
+            if entry.get("captureSequence"):
+                self._save_capture_order(conn, entry["captureSequence"])
+            return history_id
+
+    def provider_calls(self, before=None, limit=100):
+        with self._lock:
+            rows = self._require_connection().execute("""
+                SELECT id, connection, payload FROM provider_calls WHERE ? IS NULL OR id<?
+                ORDER BY id DESC LIMIT ?
+            """, (before, before, limit)).fetchall()
+        return [dict(json.loads(payload), db_id=id_, connection=connection) for id_, connection, payload in rows]
+
+    def interrupt_provider_calls(self):
+        with self._lock, self._require_connection() as conn:
+            conn.execute("""
+                UPDATE provider_calls SET payload=json_set(payload, '$.state', 'unknown',
+                    '$.error', 'Controller closed before a result was recorded')
+                WHERE json_extract(payload, '$.state') IN ('held', 'forwarded', 'modified_forwarded')
+            """)
+
+        for row in self.provider_calls(limit=-1):
+            if row.get("state") == "unknown":
+                self.save_provider_call(row["connection"], row["id"],
+                                        {k: v for k, v in row.items() if k not in ("db_id", "connection")})
 
     def sender_requests(self):
         with self._lock:
@@ -494,7 +546,12 @@ class ProjectDB:
         for name, definition in _MIGRATED_INTENT_COLUMNS.items():
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE intents ADD COLUMN {name} {definition}")
+        if "history_id" not in self._table_columns("provider_calls"):
+            self._conn.execute("ALTER TABLE provider_calls ADD COLUMN history_id INTEGER")
         self._conn.commit()
+        for connection, request_id, payload in self._conn.execute(
+                "SELECT connection, request_id, payload FROM provider_calls WHERE history_id IS NULL").fetchall():
+            self.save_provider_call(connection, request_id, json.loads(payload))
         if "search_text" not in self._table_columns("monitor_events"):
             self._migrate_monitor_search()
         if not self.get_info(_CAPTURE_ORDER_KEY):
@@ -548,6 +605,12 @@ class ProjectDB:
         entries = []
         for row in rows:
             row_id = row["id"]
+            if row["provider_payload"] is not None:
+                from noxen.providers import provider_entry
+                record = self._load_json_field(row_id, "provider_payload", row["provider_payload"], {}, dict)
+                if record:
+                    entries.append(dict(provider_entry(record, record.get("connection", "")), id=row_id))
+                continue
             intent = {
                 "action": row["action"],
                 "component": row["component"],
@@ -759,6 +822,7 @@ class ProjectDB:
         with self._lock, self._conn:
             self._save_observed_capture_order(self._conn)
             self._conn.execute("DELETE FROM intents")
+            self._conn.execute("DELETE FROM provider_calls")
 
     def update_modified_intent(self, intent_id: int, original_info: dict, modified_info: dict) -> None:
         """Persist the modified intent fields and the original snapshot."""

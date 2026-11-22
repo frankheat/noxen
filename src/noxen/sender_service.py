@@ -36,7 +36,11 @@ async def sender_io(function, *args):
             pass  # App loop has closed; the durable run remains unknown.
 
     threading.Thread(target=run, name="noxen-sender", daemon=True).start()
-    return await future
+    # Keep a timer in the loop while the daemon works. Some event loops lose the
+    # cross-thread wakeup when the callback arrives just before the await begins.
+    while not future.done():
+        await asyncio.wait({future}, timeout=0.1)
+    return future.result()
 
 
 class SenderService:

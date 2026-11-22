@@ -11,7 +11,7 @@ from importlib.metadata import version as pkg_version, PackageNotFoundError
 from pathlib import Path
 
 from textual import events
-from textual import work
+from textual import work, on
 from textual.worker import get_current_worker
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
@@ -71,9 +71,12 @@ from noxen.frida_session import FridaSession, SessionConfig
 from noxen.history_columns import normalize_history_column_widths
 from noxen.history_table import HistoryTable
 from noxen.monitor_ui import MonitorPane, RecordingDialog
-from noxen.sender_service import SenderService
+from noxen.sender_service import SenderService, sender_io
 from noxen.sender import INTENT_OPERATIONS
 from noxen.sender_ui import SenderPane, SenderTabMenu
+from noxen.provider_service import ProviderService
+from noxen.providers import provider_as_json, provider_entry, render_provider
+from noxen.provider_fields import ordered_provider_arguments
 from noxen.sender_capture import (capture_as_request, capture_operation, prepare_component_request,
                                   prepare_intent_request, prepare_monitor_request)
 from noxen.sender_json import format_request, parse as parse_json
@@ -381,6 +384,11 @@ class NoxenApp(App):
         self.frida_session = None
         self.db, self._all_intents = self._init_project(cli_args)
         self.sender_service = SenderService(self.db)
+        self.provider_service = ProviderService(self.db, self._provider_changed)
+        self._provider_history_entries = {
+            (entry["provider"].get("connection"), entry["provider"].get("id")): entry
+            for entry in self._all_intents if entry.get("provider")
+        }
         self._history_search_index = {
             id(entry): history_search_text(entry) for entry in self._all_intents
         }
@@ -408,7 +416,7 @@ class NoxenApp(App):
             for warning in db.load_warnings:
                 self._startup_messages.append(log_warning(warning, "project"))
             self._startup_messages.append(
-                log_success(f"Opened project '{db.name or path}' ({len(intents)} intent(s))", "project")
+                log_success(f"Opened project '{db.name or path}' ({len(intents)} event(s))", "project")
             )
             return db, intents
 
@@ -446,6 +454,7 @@ class NoxenApp(App):
             outcome_cb=self._update_outcome,
             intercept_log_cb=self._on_intercept_display,
             initial_intercept=self._intercept_mode,
+            cursor_previews=self._settings["cursor_previews"],
             hold_start_cb=self._on_hold_start,
             hold_end_cb=self._on_hold_end,
             device_resolver=getattr(self._home_devices, "get_device", None),
@@ -454,6 +463,8 @@ class NoxenApp(App):
             release_cb=self._on_intent_released,
             crash_cb=self._record_crash,
         )
+
+        self.provider_service.bind(self.frida_session)
 
     def _record_crash(self, crash):
         crash_id = self.db.save_crash(crash)
@@ -510,7 +521,11 @@ class NoxenApp(App):
         return app_markup_renderable(self, markup)
 
     def _entry_renderable(self, entry, show_stack=False, stack_depth=15):
-        """A captured Intent as noxen's detail layout, or as JSON in Sender's request format."""
+        """Show a capture in the detail layout or as readable JSON."""
+        if entry.get("provider"):
+            if self._detail_json:
+                return json_text(format_request(provider_as_json(entry)), "light" not in str(self.theme))
+            return self._render_markup(render_provider(entry))
         if self._detail_json:
             return json_text(format_request(capture_as_request(entry)), "light" not in str(self.theme))
         return self._render_markup(render_intent_detail(entry, show_stack=show_stack, stack_depth=stack_depth))
@@ -561,8 +576,16 @@ class NoxenApp(App):
         if self._current_intent_is_null():
             self.write_cmd("[red]Cannot edit: Intent is null[/red]")
             return
-        shown, notes = editable_intent(self._current_intercepted_entry)
-        operation = capture_operation(self._current_intercepted_entry)
+        record = self._current_intercepted_entry.get("provider")
+        if record:
+            shown = record.get("editableResult", record.get("cursor")) if record.get("phase") == "response" else ordered_provider_arguments(record["arguments"])
+            if shown is None:
+                self.notify("Read Cursor before editing its response", severity="warning")
+                return
+            notes, operation = [], record["method"]
+        else:
+            shown, notes = editable_intent(self._current_intercepted_entry)
+            operation = capture_operation(self._current_intercepted_entry)
         draft = shown
         try:
             # Commands staged before opening the editor are part of what it shows.
@@ -574,6 +597,9 @@ class NoxenApp(App):
         self._staged_mods.clear()
         self._edit_shown = shown
         editor = self.query_one("#edit_form", JsonRequestEditor)
+        editor.area.root = "provider" if record else "intent"
+        if record and record.get("phase") == "response":
+            editor.area.root = "providerResponse" if "editableResult" in record else "cursor"
         editor.area.operation = operation
         editor.area.read_only = False
         editor.area.load(format_request(draft))
@@ -709,6 +735,9 @@ class NoxenApp(App):
     def _forward_from_edit_mode(self):
         """Apply the JSON and keep the editor open until Frida confirms forwarding."""
         if not self._edit_mode or self._edit_forward_pending:
+            return
+        if (self._current_intercepted_entry or {}).get("provider"):
+            self._resolve_provider_ui("forward", edited=True)
             return
         try:
             mods = self._collect_edit_mods()
@@ -952,6 +981,7 @@ class NoxenApp(App):
                 "stack_depth": depth,
                 "intercept": self.query_one("#settings_intercept", Switch).value,
                 "stack": self.query_one("#settings_stack", Switch).value,
+                "cursor_previews": self.query_one("#settings_cursor_previews", Switch).value,
                 "theme": theme,
             }
             try:
@@ -962,9 +992,28 @@ class NoxenApp(App):
                 return
             self._settings = settings
             self._apply_theme(theme)
-            self.notify("Settings saved", severity="information", timeout=2)
+            session = self.frida_session
+            if session is None:
+                self.notify("Settings saved", severity="information", timeout=2)
+            else:
+                event.button.disabled = True
+                self._apply_cursor_preview_setting(session, settings["cursor_previews"], event.button)
             return
         self.query_one("#intercept_command_input", Input).focus()
+
+    @work()
+    async def _apply_cursor_preview_setting(self, session, enabled, button: Button):
+        try:
+            await sender_io(session.set_cursor_previews, enabled)
+        except Exception as error:
+            if self.frida_session is session:
+                self.write_log(log_warning(f"Could not apply Cursor preview setting: {error}", "providers"))
+                self.notify("Settings saved. Could not update Cursor previews in this session.",
+                            severity="warning")
+                return
+        finally:
+            button.disabled = False
+        self.notify("Settings saved", severity="information", timeout=2)
 
     def update_intercept_button(self, enabled: bool):
         self._intercept_mode = enabled
@@ -1135,6 +1184,7 @@ class NoxenApp(App):
                     Button("Drop", id="btn_drop", variant="default", disabled=True),
                     Button("✎", id="btn_edit", disabled=True),
                     Button("Cancel edit", id="btn_cancel_edit"),
+                    Button("Read Cursor", id="btn_read_cursor", disabled=True),
                     Label("", id="intercept_header_spacer"),
                     ModalButton("Filters", id="btn_intercept_filters"),
                     ModalButton("Stack", id="btn_intercept_stack"),
@@ -1240,6 +1290,9 @@ class NoxenApp(App):
                         )
                     yield Label("Enter a positive integer", id="settings_depth_error")
                     with Horizontal(classes="settings_row"):
+                        yield Label("Capture Cursor previews")
+                        yield Switch(value=self._settings["cursor_previews"], id="settings_cursor_previews")
+                    with Horizontal(classes="settings_row"):
                         yield Label("Theme")
                         yield Select(
                             [("Dark", DARK_THEME), ("Light", LIGHT_THEME)],
@@ -1289,6 +1342,9 @@ class NoxenApp(App):
         self._apply_command_bar_visibility()
         self._refresh_history_table()
         self.set_interval(HISTORY_REFRESH_INTERVAL, self._do_history_refresh)
+        self.set_interval(0.1, self._provider_tick)
+        self.set_interval(1, self.provider_service.retry_save)
+        self.query_one("#btn_read_cursor").display = False
         self._init_info_tab()
         self._update_filter_count()
         self.query_one("#session_info", Label).update("Not connected")
@@ -1677,6 +1733,18 @@ class NoxenApp(App):
         if session is not None and session is not self.frida_session:
             return
         self._connection_state = "connected"
+        report = getattr(session, "_provider_hooks_report", None)
+        if isinstance(report, dict):
+            self.provider_service.enabled = dict(report.get("enabled") or {})
+            self.provider_service.hooks = list(report.get("hooks") or [])
+            missing = [hook for hook in self.provider_service.hooks
+                       if hook.get("state") in ("Conflict", "Unavailable")]
+            if missing:
+                self.write_log(log_warning(
+                    f"{len(missing)} provider hook(s) unavailable or already in use: "
+                    + ", ".join(f"{hook.get('direction')}.{hook.get('method')} ({hook.get('state')})"
+                                for hook in missing[:5])
+                    + ("…" if len(missing) > 5 else ""), "providers"))
         def _do():
             if (session is not None and session is not self.frida_session) or self._connection_state != "connected":
                 return
@@ -2020,6 +2088,120 @@ class NoxenApp(App):
 
     def write_cmd(self, text: str, notify: bool = False) -> None:
         self._write_rich("intercept_cmd_output", text, notify)
+
+    def _provider_changed(self, record, connection, history_id, error):
+        entry = provider_entry(record, connection)
+        key = (connection, record["id"])
+        with self._history_lock:
+            current = self._provider_history_entries.get(key)
+            if current is None:
+                entry["id"] = history_id or next(self._unsaved_intent_ids)
+                self._all_intents.append(entry)
+                current = entry
+                self._provider_history_entries[key] = current
+            else:
+                old_id = current["id"]
+                current.update(entry)
+                current["id"] = history_id or old_id
+            if error:
+                current["persistence_error"] = error
+            else:
+                current.pop("persistence_error", None)
+            self._history_search_index[id(current)] = history_search_text(current)
+            self._history_refresh_pending = True
+
+    def _provider_tick(self):
+        service = self.provider_service
+        service.drain()
+        if self._connection_state == "disconnected" and service.session is not None:
+            service.bind(None)
+        record = service.records.get(service.held)
+        current = self._current_intercepted_entry or {}
+        previous_provider = current.get("provider")
+        if record is not None:
+            context = {"class": record.get("class", ""), "method": record.get("method", ""),
+                       "data": record.get("arguments", {}).get("uri", ""), "flags": "", "category": []}
+            if not self.filter_manager.is_visible(context) or not self._intercept_mode:
+                if not service.busy:
+                    self._pass_provider(service.connection, record.get("decisionId"))
+                return
+            decision_id = record.get("decisionId")
+            if decision_id != self._current_decision_id:
+                with self._history_lock:
+                    entry = self._provider_history_entries.get((service.connection, record["id"]))
+                if entry:
+                    self.set_intercept_state(True)
+                    self._on_intercept_display("", entry["id"], decision_id)
+            elif self._edit_mode and record.get("error") and self._edit_forward_pending:
+                self._set_edit_forward_pending(False)
+                self._show_edit_state(record["error"])
+            elif not self._edit_mode and getattr(self, "_provider_render_version", None) != service.version:
+                self._refresh_intercept_display()
+            self._provider_render_version = service.version
+        elif previous_provider and str(self._current_decision_id).startswith("provider-"):
+            self.set_intercept_state(False)
+            self._clear_intercept_output(current)
+        self._provider_buttons()
+
+    def _provider_buttons(self):
+        record = (self._current_intercepted_entry or {}).get("provider") or {}
+        try:
+            button = self.query_one("#btn_read_cursor", Button)
+        except Exception:
+            return
+        visible = record.get("phase") == "response" and "editableResult" not in record and self._intent_blocked
+        disabled = self.provider_service.busy or record.get("cursor") is not None or self._edit_mode
+        if button.display != visible:
+            button.display = visible
+        if button.disabled != disabled:
+            button.disabled = disabled
+        if record.get("phase") == "response":
+            edit_button = self.query_one("#btn_edit", Button)
+            edit_disabled = ("editableResult" not in record and record.get("cursor") is None) or not self._intent_blocked
+            if edit_button.disabled != edit_disabled:
+                edit_button.disabled = edit_disabled
+
+    @work(group="provider_pass")
+    async def _pass_provider(self, connection, decision_id):
+        service = self.provider_service
+        if connection != service.connection or not decision_id or not service.session:
+            return
+        service.busy = True
+        try:
+            await sender_io(service.session._script.exports_sync.resolve_provider, decision_id, "forward", None, True)
+        except Exception as error:
+            self.write_log(log_error(str(error), "providers"))
+        finally:
+            service.busy = False
+
+    @on(Button.Pressed, "#btn_read_cursor")
+    def _read_provider_cursor(self, event):
+        event.stop()
+        self._resolve_provider_ui("inspect")
+
+    @work(group="provider_decision")
+    async def _resolve_provider_ui(self, action, edited=False):
+        decision_id, connection = self._current_decision_id, self.provider_service.connection
+        entry = self._current_intercepted_entry
+        if not entry or not entry.get("provider"):
+            return
+        try:
+            values = parse_json(self.query_one("#edit_form", JsonRequestEditor).area.text,
+                                self.query_one("#edit_form", JsonRequestEditor).area.folds) if edited else None
+            if edited:
+                self._set_edit_forward_pending(True)
+            await self.provider_service.resolve(connection, decision_id, action, values)
+            # Agent may immediately publish the response with a new decision ID.
+            if action != "inspect" and self._current_decision_id == decision_id and self.provider_service.held is None:
+                self.set_intercept_state(False)
+                self._clear_intercept_output(entry)
+        except Exception as error:
+            if edited:
+                self._set_edit_forward_pending(False)
+                self._show_edit_state(str(error))
+            else:
+                self.notify(str(error), severity="error")
+        self._provider_tick()
 
     # --- History callbacks ---
 
@@ -2383,6 +2565,16 @@ class NoxenApp(App):
                 if exit_anyway:
                     break
                 self.sender_service.retry_save()
+            self.provider_service.drain()
+            self.provider_service.retry_save()
+            while self.provider_service.unsaved:
+                exit_anyway = await self.push_screen_wait(RecordingDialog(
+                    f"Provider calls could not be saved.\n\n{self.provider_service.error or 'More records remain to save.'}",
+                    "Exit anyway", "Retry",
+                ))
+                if exit_anyway:
+                    break
+                self.provider_service.retry_save()
             self.exit()
 
     def set_intercept_state(self, is_intercepted):
@@ -2436,6 +2628,7 @@ class NoxenApp(App):
                 self.db.clear_intents()
                 self._history_epoch += 1
                 self._all_intents.clear()
+                self._provider_history_entries.clear()
                 self._history_search_index.clear()
                 self._history_selected_entry = None
                 self._history_refresh_pending = False
@@ -2664,6 +2857,10 @@ class NoxenApp(App):
             entry = copy.deepcopy(self._history_selected_entry)
             if entry is None:
                 raise ValueError("Select an Intent in History first")
+            if entry.get("provider"):
+                from noxen.providers import provider_request
+                self.query_one(SenderPane).receive_request(provider_request(entry["provider"]))
+                return
             operation = capture_operation(entry)
             if operation is not None:
                 self._send_capture_to_sender(entry, operation)
@@ -3128,6 +3325,11 @@ class NoxenApp(App):
             self.update_intercept_button(True)
             write_fn("[#26a368]Intercept ON[/#26a368]")
         else:
+            if (self._current_intercepted_entry or {}).get("provider"):
+                self.frida_session.intercept_off()
+                self.update_intercept_button(False)
+                write_fn("[yellow]Intercept OFF[/yellow]")
+                return
             intent_id = self._current_intercept_id
             resolved = self._current_intercepted_entry
             if self._edit_mode:
@@ -3195,6 +3397,15 @@ class NoxenApp(App):
 
             if not self.frida_session or not self.frida_session.is_ready():
                 self.write_cmd("[red]Session not ready[/red]")
+                return
+
+            if (self._current_intercepted_entry or {}).get("provider"):
+                if cmd_base in ("forward", "f", "drop", "d"):
+                    self.call_from_thread(self._resolve_provider_ui,
+                                          "forward" if cmd_base in ("forward", "f") else "drop",
+                                          self._edit_mode and cmd_base in ("forward", "f"))
+                else:
+                    self.write_cmd("[red]Use the editor to modify provider arguments or a Cursor response[/red]")
                 return
 
             if cmd_base in ["forward", "f"]:

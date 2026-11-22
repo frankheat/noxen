@@ -4,6 +4,8 @@ const path = require("path");
 const root = path.resolve(__dirname, "..");
 
 const files = [
+  ["agent/provider_cursor.js", "src/noxen/runtime/agent/provider_cursor.js"],
+  ["agent/provider_intercept.js", "src/noxen/runtime/agent/provider_intercept.js"],
   ["agent/sender.js", "src/noxen/runtime/agent/sender.js"],
   ["agent/sender_entry.js", "src/noxen/runtime/agent/sender_entry.js"],
   ["agent/sender_bundle.js", "src/noxen/runtime/agent/sender_bundle.js"],

@@ -10,6 +10,7 @@ const Java = typeof globalThis.Java !== 'undefined' ? globalThis.Java : Java_bri
 try { globalThis.Java = Java; } catch (_) {}
 let monitor = null;
 let monitorStopped = false;
+let providerInterceptor = null;
 let captureSequence = 0;
 let captureSessionNumber = 0;
 
@@ -1566,6 +1567,28 @@ function getSender() {
   return sender;
 }
 rpc.exports = {
+  stopProviders: function () {
+    return providerInterceptor === null ? true : providerInterceptor.configure(false, false);
+  },
+  configureProviders: function (outgoing, incoming, previews) {
+    if (providerInterceptor === null) {
+      providerInterceptor = require('./provider_intercept.js').createProviderInterceptor(Java, send, {
+        inspect: inspectIntent, stamp: captureStamp, begin: beginHold, end: endHold,
+        blocking: () => blockEnabled,
+        claim: context => { if (!blockEnabled || waiting) return false; waiting = true; return true; },
+        release: () => { waiting = false; }
+      });
+    }
+    return providerInterceptor.configure(outgoing, incoming, previews);
+  },
+  setCursorPreviews: function (enabled) {
+    if (providerInterceptor === null) return false;
+    providerInterceptor.setCursorPreviews(enabled);
+    return true;
+  },
+  resolveProvider: function (id, action, values, skipResponse) {
+    return providerInterceptor !== null && providerInterceptor.resolve(id, action, values, skipResponse);
+  },
   senderIdentity: function () { return getSender().identity(); },
   senderActivityContext: function () { return getSender().checkActivityContext(); },
   senderExecute: function (request, jobId) { return getSender().execute(request, jobId); },
@@ -1697,7 +1720,8 @@ rpc.exports = {
     try {
       Java.performNow(function () {
         blockEnabled = false;
-        if (waiting && lock) {
+        if (providerInterceptor !== null) providerInterceptor.release();
+        if (activeDecisionId !== null && waiting && lock) {
           Java.synchronized(lock, function () {
             if (!waiting || resumeRequested) return;
             resumeMode = "forward";

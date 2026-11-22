@@ -23,6 +23,8 @@ TOKEN = re.compile(r"""
 
 TYPES = ("String", "boolean", "byte", "short", "int", "long", "float", "double", "char", "Uri", "Bundle", "Intent",
          "String[]", "boolean[]", "byte[]", "short[]", "int[]", "long[]", "float[]", "double[]", "char[]", "Intent[]")
+CONTENT_VALUE_TYPES = ("String", "boolean", "byte", "short", "int", "long", "float", "double", "byte[]")
+INTERCEPT_CONTENT_VALUE_TYPES = ("String", "boolean", "int", "long")
 TYPE_DEFAULTS = {"String": '"$0"', "char": '"$0"', "Uri": '"$0"', "boolean": "false$0", "long": '"0$0"',
                  "float": "0.0$0", "double": "0.0$0", "Bundle": "{$0}", "Intent": "{$0}"}
 INTENT_SNIPPET = ('{\n    "component": ${null},\n    "action": null,\n    "data": null,\n    "flags": [],\n'
@@ -38,7 +40,7 @@ KEYS = {
 }
 PROVIDER_KEYS = {
     "query": ("uri", "projection", "selection", "selectionArgs", "sortOrder", "maxRows", "maxBytes"),
-    "getType": ("uri",), "insert": ("uri", "values"), "update": ("uri", "values", "selection", "selectionArgs"),
+    "getType": ("uri",), "insert": ("uri", "values"), "update": ("uri", "selection", "selectionArgs", "values"),
     "delete": ("uri", "selection", "selectionArgs"), "call": ("uri", "method", "arg", "extras"),
     "openFileDescriptor": ("uri", "maxBytes"),
 }
@@ -46,6 +48,10 @@ REQUEST_SNIPPETS = {"operation": TEXT, "intent": INTENT_SNIPPET, "receiverPermis
                     "projection": LIST, "selection": TEXT, "selectionArgs": LIST, "sortOrder": TEXT,
                     "values": BLOCK, "method": TEXT, "arg": TEXT, "extras": BLOCK, "maxRows": "100$0",
                     "maxBytes": "65536$0"}
+PROVIDER_SNIPPETS = {
+    **REQUEST_SNIPPETS, "authority": TEXT, "mode": TEXT, "mimeType": TEXT,
+    "queryArguments": BLOCK,
+}
 
 # What each operation needs before it can be saved, written after the operation of a new request.
 OPERATION_SKELETONS = {
@@ -57,6 +63,9 @@ OPERATION_SKELETONS = {
 
 
 def format_request(request):
+    if isinstance(request, dict) and request.get("operation") in PROVIDER_KEYS and "hook" not in request:
+        from noxen.provider_fields import ordered_provider_request
+        request = ordered_provider_request(request)
     return json.dumps(request, indent=4, ensure_ascii=False)
 
 
@@ -143,6 +152,12 @@ def _kind(frames, root="request"):
     for index, frame in enumerate(frames):
         parent = frames[index - 1] if index else None
         if frame.bracket == "[":
+            if kind == "cursor" and parent.key == "rows":
+                kind = "cursorRows"
+                continue
+            if kind == "cursorRows":
+                kind = "cursorRow"
+                continue
             kind = {"clip:items": "items", "entry:value": "elements", "intent:flags": "flags"}.get(
                 f"{kind}:{parent.key if parent else ''}")
             if kind == "elements" and (parent.fields.get("type") or "") != "Intent[]":
@@ -152,14 +167,20 @@ def _kind(frames, root="request"):
             kind = root
         elif kind in ("items", "elements"):
             kind = "item" if kind == "items" else "intent"
-        elif kind == "bundle":
-            kind = "entry"
+        elif kind == "cursorRow":
+            kind = "cursorCell"
+        elif kind in ("bundle", "contentValues"):
+            kind = "entry" if kind == "bundle" else "contentValue"
         elif kind == "entry" and parent.key == "value":
             kind = {"Intent": "intent", "Bundle": "bundle"}.get(parent.fields.get("type"))
         elif parent.key in ("intent", "selector") and kind in ("request", "intent", "item"):
             kind = "intent"
-        elif parent.key in ("extras", "values") and kind in ("request", "intent"):
+        elif parent.key == "values" and kind in ("request", "provider"):
+            kind = "contentValues"
+        elif parent.key == "extras" and kind in ("request", "intent", "provider"):
             kind = "bundle"
+        elif parent.key == "queryArguments" and kind == "provider":
+            kind = "queryArguments"
         elif parent.key == "clipData" and kind == "intent":
             kind = "clip"
         else:
@@ -196,6 +217,8 @@ def context(text, offset, root="request", operation=None):
         return result
     outer_intent_depth = 2 if root == "request" else 1
     kind = _kind(frames, root)
+    intercept_provider = root == "provider"
+    content_types = INTERCEPT_CONTENT_VALUE_TYPES if intercept_provider else CONTENT_VALUE_TYPES
     root = frames[0].fields
     if top.bracket == "{" and top.state in ("key", "after"):
         result["position"] = "key"
@@ -206,11 +229,29 @@ def context(text, offset, root="request", operation=None):
             names = ("operation", "intent", "receiverPermission") if operation in INTENT_OPERATIONS else \
                 ("operation", *PROVIDER_KEYS[operation]) if operation in PROVIDER_OPERATIONS else tuple(REQUEST_SNIPPETS)
             options = [(name, f'"{name}": {REQUEST_SNIPPETS[name]}') for name in names]
-        elif kind == "bundle":
-            options = [(name, f'"$0": {{"type": "{name}", "value": {_entry_value(name)}}}') for name in TYPES]
+        elif kind == "provider":
+            names = PROVIDER_KEYS.get(operation, ("uri",))
+            names = [name for name in names if name not in ("maxRows", "maxBytes", "extras")]
+            options = [(name, f'"{name}": {PROVIDER_SNIPPETS[name]}') for name in names]
+        elif kind == "queryArguments":
+            options = [(name, f'"{name}": {REQUEST_SNIPPETS[name]}')
+                       for name in ("selection", "selectionArgs", "sortOrder")]
+        elif kind == "providerResponse":
+            options = [("value", '"value": null$0')]
+        elif kind == "cursor":
+            options = [("columns", '"columns": [$0]'), ("rows", '"rows": [$0]')]
+        elif kind == "cursorCell":
+            options = [("type", '"type": "$0"'), ("value", '"value": null$0')]
+        elif kind in ("bundle", "contentValues"):
+            names = TYPES if kind == "bundle" else content_types
+            options = [(name, f'"$0": {{"type": "{name}", "value": {_entry_value(name)}}}') for name in names]
+        elif kind == "contentValue":
+            options = [("type", '"type": "$0"'),
+                       ("value", f'"value": {_entry_value(top.fields.get("type"))}$0')]
         else:
             options = [(name, f'"{name}": {snippet}') for name, snippet in KEYS.get(kind, {}).items()]
-        result["options"] = [(name, snippet) for name, snippet in options if kind == "bundle" or name not in top.fields]
+        result["options"] = [(name, snippet) for name, snippet in options
+                             if kind in ("bundle", "contentValues") or name not in top.fields]
     elif top.state == "value":
         result["position"] = "value"
         names = ()
@@ -218,6 +259,26 @@ def context(text, offset, root="request", operation=None):
             names = OPERATIONS
         elif top.bracket == "{" and top.key == "type" and kind == "entry":
             names = TYPES
+        elif top.bracket == "{" and top.key == "type" and kind == "contentValue":
+            names = content_types
+        elif kind == "providerResponse" and top.key == "value":
+            result["options"] = [("String", '"$0"'), ("null", "null$0")]
+            return result
+        elif kind == "cursorCell" and top.key == "type":
+            names = ("null", "string", "integer", "float")
+        elif kind == "cursorCell" and top.key == "value":
+            choices = {"null": [("null", "null$0")], "string": [("string", '"$0"')],
+                       "integer": [("integer", '"0$0"')], "float": [("float", "0.0$0")]}
+            result["options"] = choices.get(top.fields.get("type"), [])
+            return result
+        elif top.bracket == "{" and top.key == "value" and kind == "contentValue":
+            entry_type = top.fields.get("type")
+            snippets = {"String": [("String", '"$0"'), ("null", "null$0")],
+                        "boolean": [("true", "true$0"), ("false", "false$0")],
+                        "long": [("long", '"0$0"')], "byte[]": [("byte[]", "[]$0")]}
+            options = snippets.get(entry_type, [("number", "0$0")] if entry_type in content_types else [])
+            result["options"] = options
+            return result
         elif kind == "flags" or (kind == "intent" and top.key == "flags"):
             in_array = kind == "flags"
             names = _flag_names(root.get("operation") or operation, len(frames) == outer_intent_depth + in_array)

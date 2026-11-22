@@ -21,6 +21,31 @@ def complete(marked, pick=None, always=False):
 
 
 class SenderJsonTests(unittest.TestCase):
+    def test_provider_content_values_types_and_defaults_match_the_editor(self):
+        def offered(marked, root="provider", operation="insert"):
+            offset = marked.index("|")
+            _, options = completions(marked.replace("|", ""), offset, True, root=root, operation=operation)
+            return options
+
+        self.assertEqual([name for name, _ in offered('{"values": {|}}')],
+                         ["String", "boolean", "int", "long"])
+        self.assertEqual([name for name, _ in offered('{"values": {"x": {"type": "|"}}}')],
+                         ["String", "boolean", "int", "long"])
+        sender = '{"operation": "insert", "values": {"x": {"type": "|"}}}'
+        names = [name for name, _ in offered(sender, root="request")]
+        self.assertIn("double", names)
+        self.assertIn("byte[]", names)
+        self.assertNotIn("Intent", names)
+        self.assertNotIn("Bundle", names)
+        self.assertEqual(offered('{"values": {"x": {"type": "long", "value": |}}}'), [("long", '"0$0"')])
+        self.assertEqual([name for name, _ in offered('{"values": {"x": {"type": "boolean", "value": |}}}')],
+                         ["true", "false"])
+        self.assertEqual([name for name, _ in offered('{"queryArguments": {|}}', operation="query")],
+                         ["selection", "selectionArgs", "sortOrder"])
+        self.assertEqual(offered('{"value": |}', root="providerResponse"), [("String", '"$0"'), ("null", "null$0")])
+        self.assertEqual(offered('{"rows": [[{"type": "integer", "value": |}]]}', root="cursor"),
+                         [("integer", '"0$0"')])
+
     def test_names_follow_the_object_under_the_cursor(self):
         self.assertEqual(complete('{"operation": "sendBroadcast", "intent": {fl|}}'), ["flags"])
         self.assertEqual(complete('{"operation": "st|"}')[:2], ["startActivity", "startService"])

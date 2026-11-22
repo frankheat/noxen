@@ -292,13 +292,13 @@ def capture_as_request(entry):
         notes.append("This capture is malformed and could not be read in full")
     if notes:
         request = {"notCaptured": notes, **request}
-    hook = _hook_label(entry)
+    hook = capture_hook_label(entry)
     if hook:
         request = {"hook": hook, **request}
     return request
 
 
-def _hook_label(entry):
+def capture_hook_label(entry):
     """`Class.method()` of the hook that captured `entry`, for reading only."""
     if not isinstance(entry, dict):
         return None

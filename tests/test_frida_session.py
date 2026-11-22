@@ -549,6 +549,34 @@ class FridaSessionLifecycleTests(unittest.TestCase):
         self.assertTrue(session.is_ready())
         self.assertEqual(failures, [])
 
+    def test_provider_setup_waits_for_spawn_resume_and_main_hook_report(self):
+        setup = self._hook_setup()
+        session, script, _native, device, _logs, connected, failures, _warnings = setup
+        provider_setup = threading.Event()
+
+        session.cursor_previews = True
+
+        def configure_providers(_outgoing, _incoming, previews):
+            self.assertTrue(device.resumed.is_set())
+            self.assertIsNone(session._hook_report_event)
+            self.assertTrue(previews)
+            provider_setup.set()
+            return {"enabled": {"outgoing": True, "incoming": True}, "hooks": []}
+
+        script.exports_sync.configure_providers = configure_providers
+        fake_frida = SimpleNamespace(get_device=lambda _id, timeout=5: device)
+        with patch.dict(sys.modules, {"frida": fake_frida}), patch(
+            "noxen.frida_session.load_agent_script", return_value=ScriptLoadResult("agent", []),
+        ):
+            session.connect("device-1")
+            self.assertTrue(device.resumed.wait(1))
+            self.assertFalse(provider_setup.is_set())
+            script.emit_report({"installed": 1, "installedIndices": [0], "skipped": [], "failed": []})
+            session._connect_thread.join(2)
+        self.assertTrue(provider_setup.is_set())
+        self.assertEqual(connected, [True])
+        self.assertEqual(failures, [])
+
     def test_attach_also_waits_for_hook_report(self):
         setup = self._hook_setup(spawn=False)
         self._run_hook_setup(setup, {

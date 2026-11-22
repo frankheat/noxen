@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import unicodedata
+import json
 
 from rich.markup import escape
 from rich.text import Text
@@ -107,12 +108,14 @@ def decode_intent_flags(raw_flags):
 
 def entry_to_filter_context(entry: dict) -> dict:
     info = entry.get("intent", {}) or {}
+    provider = entry.get("provider") or {}
+    provider_args = provider.get("sentArguments") or provider.get("arguments") or {}
     return {
         "class": str(entry.get("class") or ""),
         "method": str(entry.get("method") or ""),
         "action": str(info.get("action") or ""),
         "component": str(info.get("component") or ""),
-        "data": str(info.get("data") or ""),
+        "data": str(provider_args.get("uri") or info.get("data") or ""),
         "flags": "" if (entry.get("attackSurface") or {}).get("intentPresent") is False else str(info.get("flags") or "0"),
         "category": info.get("categories", []),
     }
@@ -172,6 +175,16 @@ def capture_order_sort_value(data: dict, *, reverse=False) -> int:
 def format_capture_time(instant: datetime, *, precise=False) -> str:
     iso = instant.isoformat(sep=" ", timespec="milliseconds" if precise else "seconds")
     return iso.removesuffix("+00:00") + (" UTC" if precise else "")
+
+
+def format_detail_timestamp(timestamp: str, *, has_capture_order: bool) -> str:
+    display = timestamp[:19].replace("T", " ")
+    if has_capture_order and timestamp.endswith("+00:00"):
+        try:
+            return format_capture_time(datetime.fromisoformat(timestamp), precise=True)
+        except ValueError:
+            return display + " UTC"
+    return display if len(timestamp) >= 19 else timestamp
 
 
 def payload_to_history_entry(payload: dict, now: datetime | None = None) -> dict:
@@ -375,6 +388,18 @@ def history_search_text(entry: dict) -> str:
         add("clipdata")
         visit(clip_data)
 
+    if entry.get("provider"):
+        def provider_terms(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    add(key)
+                    provider_terms(value)
+            elif isinstance(node, list):
+                for value in node:
+                    provider_terms(value)
+            else:
+                add(node)
+        provider_terms(entry["provider"])
     return "\0".join(terms)
 
 
@@ -1245,20 +1270,17 @@ def render_intercept_block(payload: dict, intercept_counter: int, show_stack: bo
 
 
 def render_intent_detail(entry: dict, show_stack: bool = False, stack_depth: int = 15) -> str:
+    if entry.get("provider"):
+        from noxen.providers import render_provider
+        return render_provider(entry)
     info = entry.get("intent", {}) or {}
     attack_surface = entry.get("attackSurface") or {}
     outcome_label = _OUTCOME_LABEL.get(entry.get("outcome") or "", "PENDING")
     timestamp = entry.get("timestamp", "")
-    time_str = timestamp[:19].replace("T", " ") if len(timestamp) >= 19 else timestamp
     order_label = capture_order_label(entry)
+    time_str = format_detail_timestamp(timestamp, has_capture_order=bool(order_label))
     released_at = capture_datetime(entry.get("released_at"))
     utc = timestamp.endswith("+00:00")
-    if utc and order_label:
-        try:
-            time_str = format_capture_time(datetime.fromisoformat(timestamp), precise=True)
-        except ValueError:
-            time_str += " UTC"
-
     out = [
         "",
         f"[bold]#{entry['id']}[/bold] [dim]|[/dim] {_markup(time_str)} [dim]|[/dim] {outcome_label}",

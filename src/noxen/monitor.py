@@ -135,7 +135,7 @@ def missing_default_hooks(profile):
     return [hook for hook in default["hooks"] if signature(hook) not in present]
 
 
-def default_profiles():
+def _all_default_profiles():
     methods = [("loadUrl", ["java.lang.String"]),
                ("loadUrl", ["java.lang.String", "java.util.Map"]),
                ("postUrl", ["java.lang.String", "[B"]),
@@ -373,21 +373,39 @@ def validate_profiles(profiles):
     return result
 
 
+def default_profiles():
+    return [p for p in _all_default_profiles() if p["id"] not in ("content-provider", "provider-inbound")]
+
+
+def _retire_provider_profiles(profiles):
+    supported = {"query", "getType", "insert", "update", "delete", "call", "openFile", "openAssetFile",
+                 "openTypedAssetFile", "openFileDescriptor", "openInputStream", "openOutputStream", "openTypedAssetFileDescriptor"}
+    result = []
+    for profile in profiles:
+        if profile["id"] in ("content-provider", "provider-inbound"):
+            profile = dict(profile, hooks=[h for h in profile["hooks"]
+                           if not (h["class"] in (_RESOLVER, _TRANSPORT) and h["method"] in supported)])
+            if not profile["hooks"]:
+                continue
+        result.append(profile)
+    return result
+
+
 def load_profiles(raw):
     if not raw:
         return default_profiles(), None
     try:
         saved = json.loads(raw)
         if isinstance(saved, list):
-            profiles, new_defaults = validate_profiles(saved), default_profiles()[1:]
+            profiles, new_defaults = validate_profiles(saved), _all_default_profiles()[1:]
         elif isinstance(saved, dict):
             version = saved.get("version")
             if type(version) is not int or not 1 <= version <= PROFILE_FORMAT_VERSION:
                 raise ValueError("Unsupported Monitor profile format")
             profiles = validate_profiles(saved.get("profiles"))
             if version == PROFILE_FORMAT_VERSION:
-                return profiles, None
-            new_defaults = default_profiles()[version + 1:]
+                return _retire_provider_profiles(profiles), None
+            new_defaults = _all_default_profiles()[version + 1:]
         else:
             raise ValueError("Unsupported Monitor profile format")
         # The caller-side profile was renamed when the provider-side one was added.
@@ -403,7 +421,7 @@ def load_profiles(raw):
             hook_count = sum(len(p["hooks"]) for p in profiles)
             if len(profiles) < MAX_PROFILES and hook_count + len(default["hooks"]) <= MAX_HOOKS:
                 profiles.append(default)
-        return profiles, None
+        return _retire_provider_profiles(profiles), None
     except (ValueError, TypeError):
         return default_profiles(), "Saved Monitor profiles are invalid; loaded the default profiles."
 

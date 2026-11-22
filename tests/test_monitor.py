@@ -309,35 +309,25 @@ class MonitorModelTests(unittest.TestCase):
     def test_validation_and_roundtrip(self):
         profiles = default_profiles()
         self.assertEqual(load_profiles(json.dumps(profiles[:1])), (profiles, None))
-        version_one = {"version": 1, "profiles": profiles[:1]}
-        self.assertEqual(load_profiles(json.dumps(version_one)), ([profiles[0], *profiles[2:]], None))
-        version_two = {"version": 2, "profiles": profiles[:2]}
-        self.assertEqual(load_profiles(json.dumps(version_two)), ([*profiles[:2], *profiles[3:]], None))
-        version_three = {"version": 3, "profiles": profiles[:3]}
-        self.assertEqual(load_profiles(json.dumps(version_three)), ([*profiles[:3], *profiles[4:]], None))
-        version_four = {"version": 4, "profiles": profiles[:4]}
-        self.assertEqual(load_profiles(json.dumps(version_four)), ([*profiles[:4], *profiles[5:]], None))
-        version_five = {"version": 5, "profiles": profiles[:5]}
-        self.assertEqual(load_profiles(json.dumps(version_five)), ([*profiles[:5], *profiles[6:]], None))
-        version_six = {"version": 6, "profiles": profiles[:6]}
-        self.assertEqual(load_profiles(json.dumps(version_six)), ([*profiles[:6], *profiles[7:]], None))
-        version_seven = {"version": 7, "profiles": profiles[:7]}
-        self.assertEqual(load_profiles(json.dumps(version_seven)), ([*profiles[:7], *profiles[8:]], None))
-        version_eight = {"version": 8, "profiles": profiles[:9]}
-        self.assertEqual(load_profiles(json.dumps(version_eight)), (profiles, None))
-        version_nine = {"version": 9, "profiles": profiles[:10]}
-        self.assertEqual(load_profiles(json.dumps(version_nine)), (profiles, None))
-        version_ten = {"version": 10, "profiles": profiles[:11]}
-        self.assertEqual(load_profiles(json.dumps(version_ten)), (profiles, None))
-        version_eleven = {"version": 11, "profiles": profiles[:12]}
-        self.assertEqual(load_profiles(json.dumps(version_eleven)), (profiles, None))
-        legacy = [dict(profile) for profile in profiles[:12]]
-        legacy[1]["name"] = "Content Provider"
-        self.assertEqual(load_profiles(json.dumps({"version": 11, "profiles": legacy})), (profiles, None))
-        legacy[1]["name"] = "My resolver"
-        self.assertEqual(load_profiles(json.dumps({"version": 11, "profiles": legacy}))[0][1]["name"], "My resolver")
+        for version in range(1, PROFILE_FORMAT_VERSION):
+            restored, error = load_profiles(json.dumps({"version": version, "profiles": profiles[:1]}))
+            self.assertIsNone(error)
+            self.assertEqual(restored, [profiles[0], *profiles[version:]])
+            self.assertFalse(any(p["id"] in ("content-provider", "provider-inbound") for p in restored))
         current = {"version": PROFILE_FORMAT_VERSION, "profiles": profiles[:1]}
         self.assertEqual(load_profiles(json.dumps(current)), (profiles[:1], None))
+        legacy = {"version": PROFILE_FORMAT_VERSION, "profiles": [
+            {"id": "content-provider", "name": "Content Resolver", "enabled": True,
+             "hooks": [{"class": "android.content.ContentResolver", "method": "query",
+                        "args": ["android.net.Uri", "[Ljava.lang.String;", "java.lang.String",
+                                 "[Ljava.lang.String;", "java.lang.String"]}]},
+            {"id": "provider-inbound", "name": "Incoming Provider", "enabled": True,
+             "hooks": [{"class": "android.content.ContentProvider$Transport", "method": "query",
+                        "args": ["android.content.AttributionSource", "android.net.Uri",
+                                 "[Ljava.lang.String;", "android.os.Bundle",
+                                 "android.os.ICancellationSignal"]}]},
+        ]}
+        self.assertEqual(load_profiles(json.dumps(legacy)), ([], None))
         self.assertEqual(enabled_hooks(profiles), [])
         profiles[0]['enabled'] = True
         self.assertEqual(len(enabled_hooks(profiles)), 15)
@@ -918,15 +908,15 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertEqual(profiles.row_count, len(default_profiles()) + 1)
                 profiles.scroll_home(animate=False, immediate=True)
                 await pilot.pause()
-                self.assertEqual(profiles.get_row("content-provider")[0].plain, "○")
+                self.assertEqual(profiles.get_row("uri-grants")[0].plain, "○")
                 first_row_y = profiles.styles.gutter.top + profiles.header_height
-                provider_y = profiles.get_row_index("content-provider") + first_row_y
+                provider_y = profiles.get_row_index("uri-grants") + first_row_y
                 grants_y = profiles.get_row_index("uri-grants") + first_row_y
                 await pilot.click("#monitor_profiles", offset=(10, provider_y))
-                self.assertEqual(pane.profile()["id"], "content-provider")
-                self.assertEqual(profiles.get_row("content-provider")[0].plain, "○")
+                self.assertEqual(pane.profile()["id"], "uri-grants")
+                self.assertEqual(profiles.get_row("uri-grants")[0].plain, "○")
                 await pilot.click("#monitor_profiles", offset=(profiles.virtual_size.width, provider_y))
-                self.assertEqual(profiles.get_row("content-provider")[0].plain, "○")
+                self.assertEqual(profiles.get_row("uri-grants")[0].plain, "○")
                 await pilot.click("#monitor_profiles", offset=(2, grants_y))
                 self.assertEqual(pane.profile()["id"], "uri-grants")
                 self.assertEqual(profiles.get_row("uri-grants")[0].plain, "✓")
@@ -934,11 +924,11 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertEqual(profiles.get_row("uri-grants")[0].plain, "○")
                 await pilot.click("#monitor_profiles", offset=(10, provider_y))
                 await pilot.press("space")
-                self.assertEqual(profiles.get_row("content-provider")[0].plain, "✓")
+                self.assertEqual(profiles.get_row("uri-grants")[0].plain, "✓")
                 await pilot.click("#monitor_profile_actions")
                 await pilot.click("#monitor_actions_menu", offset=(3, 1))
-                self.assertEqual(profiles.get_row("content-provider")[0].plain, "○")
-                self.assertEqual(pane.profile()["id"], "content-provider")
+                self.assertEqual(profiles.get_row("uri-grants")[0].plain, "○")
+                self.assertEqual(pane.profile()["id"], "uri-grants")
                 await pilot.click("#monitor_profiles", offset=(10, first_row_y))
                 self.assertEqual(pane.selected_profile, ALL_HOOKS_ROW)
                 self.assertFalse(app.query_one("#monitor_profile_actions").display)
@@ -959,7 +949,7 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertEqual(hooks.row_count, sum(len(p["hooks"]) for p in pane.profiles))
                 provider_hook = len(pane.profiles[0]["hooks"])
                 self.assertEqual(hooks.get_row_at(provider_hook)[0], "Disabled")
-                self.assertEqual(hooks.get_row_at(provider_hook)[1].plain, "Content Resolver")
+                self.assertEqual(hooks.get_row_at(provider_hook)[1].plain, "URI Grants")
                 self.assertEqual(hooks.get_row_at(provider_hook)[2].plain, signature(pane.profiles[1]["hooks"][0]))
                 hooks.focus()
                 await pilot.pause()
@@ -976,14 +966,14 @@ class MonitorUITests(IsolatedAppTestCase):
                 hooks.move_cursor(row=provider_hook)
                 await pilot.click("#monitor_hook_details")
                 details = app.screen.query_one(TextArea).text
-                self.assertIn("android.content.ContentResolver.query(", details)
-                self.assertIn("Profile: Content Resolver", details)
+                self.assertIn("android.app.ContextImpl.grantUriPermission(", details)
+                self.assertIn("Profile: URI Grants", details)
                 await pilot.press("escape")
                 self.assertIs(app.focused, hooks)
                 await pilot.click("#monitor_hooks", offset=(17, 0))
                 profile_names = [hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)]
                 self.assertEqual(profile_names, sorted(profile_names, key=str.casefold))
-                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[1].plain, "Content Resolver")
+                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[1].plain, "URI Grants")
                 await pilot.click("#monitor_hooks", offset=(17, 0))
                 self.assertEqual([hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)],
                                  sorted(profile_names, key=str.casefold, reverse=True))
