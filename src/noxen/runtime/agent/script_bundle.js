@@ -2591,7 +2591,7 @@
               const originalResult = resultValue(result, record.method.returnType.className);
               let preview = {};
               if (owned && !skipResponse && (!options.blocking || options.blocking()) && (isCursor || isMime)) {
-                result = response(id, result, event, isMime);
+                result = response(id, result, event, isMime, previewEnabled);
               } else if (previewEnabled && isCursor) {
                 try {
                   preview = { cursorPreview: options.inspect(() => previewCursor(result)) };
@@ -2630,7 +2630,7 @@
             if (interrupted) Java2.use("java.lang.Thread").currentThread().interrupt();
           }
         }
-        function response(id, original, request, isMime = false) {
+        function response(id, original, request, isMime = false, automaticPreview = false) {
           const decisionId = id + ":response";
           const event = {
             noxenEvent: "provider_response",
@@ -2643,6 +2643,26 @@
             ...isMime ? { editableResult: { value: original === null ? null : String(original) } } : {}
           };
           pending = { id: decisionId, event, mode: null, values: null, snapshot: null, isMime };
+          if (automaticPreview && !isMime) {
+            try {
+              const preview = options.inspect(() => previewCursor(original));
+              if (preview.complete) {
+                const table = { columns: preview.columns, rows: preview.rows };
+                try {
+                  validateTable(table);
+                  pending.snapshot = table;
+                  event.cursor = table;
+                } catch (error) {
+                  event.cursorPreview = preview;
+                  event.error = String(error).slice(0, 512);
+                }
+              } else {
+                event.cursorPreview = preview;
+              }
+            } catch (error) {
+              event.cursorPreviewError = String(error).slice(0, 512);
+            }
+          }
           if (!send2(event)) {
             pending = null;
             return original;

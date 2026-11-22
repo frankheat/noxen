@@ -185,3 +185,38 @@ test('Cursor response has a distinct decision and does not read until requested'
   assert.equal(update.state, 'forwarded');
   assert.equal('sentCursor' in update, false);
 });
+test('automatic previews make complete held responses editable and keep partial responses read-only', async () => {
+  for (const count of [1, 101]) {
+    let position = -1;
+    const cursor = { $className: 'demo.Cursor', getPosition: () => position,
+      getColumnNames: () => ['title'],
+      moveToPosition: row => { position = row; return row >= 0 && row < count; },
+      getType: () => 3, getString: () => 'first', close: () => {} };
+    const f = fixture(() => cursor);
+    f.method.returnType.className = 'android.database.Cursor';
+    await f.engine.configure(true, false, true);
+    let response;
+    f.setWait(() => {
+      const event = f.events.at(-1);
+      if (event.phase === 'request') {
+        f.engine.resolve(event.decisionId, 'forward', null);
+      } else {
+        response = event;
+        assert.equal(position, -1);
+        if (count === 1) {
+          assert.equal(event.cursor.rows[0][0].value, 'first');
+          assert.equal(f.engine.resolve(event.decisionId, 'forward', event.cursor), true);
+        } else {
+          assert.equal(event.cursor, undefined);
+          assert.equal(event.cursorPreview.complete, false);
+          assert.throws(() => f.engine.resolve(event.decisionId, 'forward', {
+            columns: ['title'], rows: [] }), /Read Cursor/);
+          f.engine.resolve(event.decisionId, 'forward', null);
+        }
+      }
+    });
+    assert.equal(f.method.implementation(uri('content://test/notes'), null, null, null, null), cursor);
+    assert.equal(f.calls.length, 1);
+    assert.equal(response.state, 'held');
+  }
+});

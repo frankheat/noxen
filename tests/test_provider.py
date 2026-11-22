@@ -29,6 +29,17 @@ def request(id_="provider-1"):
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_complete_cursor_detail_is_identical_for_previews_and_held_snapshots(self):
+        table = {"columns": ["title"], "rows": [[{"type": "string", "value": "first"}]]}
+        record = dict(request(), state="returned", result={"type": "android.database.Cursor"})
+        snapshot = dict(provider_entry(dict(record, cursor=table), "test"), id=1)
+        preview = dict(provider_entry(dict(record, cursorPreview=dict(table, complete=True)), "test"), id=1)
+        snapshot_section = render_provider(snapshot).split("[CURSOR]", 1)[1]
+        self.assertEqual(snapshot_section, render_provider(preview).split("[CURSOR]", 1)[1])
+        self.assertIn("Contents", snapshot_section)
+        self.assertIn("1 row", snapshot_section)
+        self.assertIn("1 row\n\n", snapshot_section)
+
     async def test_provider_order_matches_details_json_editor_and_sender(self):
         arguments = {
             "values": {"title": {"value": "updated", "type": "String"},
@@ -424,6 +435,8 @@ class ProviderUITests(IsolatedAppTestCase):
             service.receive(service.connection, {"noxenEvent": "provider_response", "id": "provider-1", "state": "held",
                             "phase": "response", "decisionId": "provider-1:response", "cursor": table})
             app._provider_tick()
+            self.assertFalse(app.query_one("#btn_read_cursor").display)
+            self.assertFalse(app.query_one("#btn_edit").disabled)
             intercept_text = "\n".join(line.text for line in app.query_one("#intercept_output", RichLog).lines)
             self.assertIn("[RESPONSE]", intercept_text)
             self.assertIn("_display_name", intercept_text)

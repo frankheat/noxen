@@ -171,18 +171,17 @@ def render_provider(entry):
                 out.append(row("Value", "Opaque object"))
     if finished_at is not None:
         out.append(row("Returned at", format_capture_time(capture_datetime(finished_at), precise=True)))
-    if preview is not None:
-        rows = preview["rows"]
-        summary = f"{len(rows)} {'row' if len(rows) == 1 else 'rows'}"
-        if not preview["complete"]:
-            summary += f" (partial) · {preview['reason']}"
-        out += ["", "[bold]\\[CURSOR PREVIEW][/bold]", row("Contents", summary)]
-        out += _cursor_table(preview)
-    for key, title in (("cursor", "CURSOR"), ("sentCursor", "SENT CURSOR")):
-        table = record.get(key)
-        if table is None or (key == "sentCursor" and table == record.get("cursor")):
+    tables = [("CURSOR", record.get("cursor") if record.get("cursor") is not None else preview)]
+    if record.get("sentCursor") != record.get("cursor"):
+        tables.append(("SENT CURSOR", record.get("sentCursor")))
+    for title, table in tables:
+        if table is None:
             continue
-        out += ["", f"[bold]\\[{title}][/bold]", *_cursor_table(table)]
+        count = len(table["rows"])
+        summary = f"{count} {'row' if count == 1 else 'rows'}"
+        if table.get("complete") is False:
+            summary += f" (partial) · {table['reason']}"
+        out += ["", f"[bold]\\[{title}][/bold]", row("Contents", summary), "", *_cursor_table(table)]
     for key in ("error", "exception"):
         if record.get(key):
             out += ["", row(key.capitalize(), record[key])]

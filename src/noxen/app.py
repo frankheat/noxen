@@ -2149,7 +2149,9 @@ class NoxenApp(App):
             button = self.query_one("#btn_read_cursor", Button)
         except Exception:
             return
-        visible = record.get("phase") == "response" and "editableResult" not in record and self._intent_blocked
+        visible = (record.get("phase") == "response" and "editableResult" not in record
+                   and record.get("cursor") is None and record.get("cursorPreview") is None
+                   and self._intent_blocked)
         disabled = self.provider_service.busy or record.get("cursor") is not None or self._edit_mode
         if button.display != visible:
             button.display = visible
