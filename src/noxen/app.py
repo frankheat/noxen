@@ -1222,10 +1222,10 @@ class NoxenApp(App):
                 yield Rule(classes="section_separator")
                 yield RichLog(id="history_detail", markup=True, highlight=False, auto_scroll=False)
                 yield Rule(classes="section_separator")
-            with TabPane(" Monitor ", id="tab_monitor"):
-                yield MonitorPane(id="monitor_pane")
             with TabPane(" Sender ", id="tab_sender"):
                 yield SenderPane(id="sender_pane")
+            with TabPane(" Monitor ", id="tab_monitor"):
+                yield MonitorPane(id="monitor_pane")
             with TabPane(" Info app ", id="tab_info"):
                 with TabbedContent(initial="info_view_overview", id="info_views", classes="subtabs empty"):
                     with TabPane("Overview", id="info_view_overview"):
