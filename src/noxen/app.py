@@ -310,6 +310,7 @@ class NoxenApp(App):
         Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
         Binding("ctrl+g", "info_refresh", "Refresh", show=True, priority=True),
         Binding("ctrl+r", "send_to_sender", "To Sender", show=True, priority=True),
+        Binding("ctrl+r", "duplicate_sender_request", "Duplicate", show=True, priority=True),
         Binding("ctrl+t", "toggle_detail_view", "JSON / Details", show=True, priority=True),
         Binding("ctrl+f", "forward_current", "Forward", show=True, priority=True),
         Binding("ctrl+f", "apply_edit", "Apply & Forward", show=True, priority=True),
@@ -2675,7 +2676,7 @@ class NoxenApp(App):
             return self._active_tab in ("tab_log", "tab_history") or self._monitor_events_active()
         if action == "toggle_command_bar":
             return self._active_tab in ("tab_history", "tab_intercept")
-        if action == "sender_divider":
+        if action in ("sender_divider", "duplicate_sender_request"):
             return self._active_tab == "tab_sender" and not self.screen.is_modal
         if action in ("resize_panel_up", "resize_panel_down"):
             if self._active_tab == "tab_sender":
@@ -2842,6 +2843,9 @@ class NoxenApp(App):
         if button.disabled != disabled:
             button.disabled = disabled
             self.refresh_bindings()
+
+    def action_duplicate_sender_request(self):
+        self.query_one(SenderPane).duplicate_request()
 
     def action_send_to_sender(self):
         """Copy the selected History Intent, Monitor provider call or Info app component into a new Sender request."""

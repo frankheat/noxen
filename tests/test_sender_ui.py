@@ -404,6 +404,7 @@ class SenderUITests(IsolatedAppTestCase):
 
                 # Only the directions that have tabs are offered.
                 _, labels = await open_menu("A")
+                self.assertNotIn("Duplicate", labels)
                 self.assertIn("Close tabs to the right", labels)
                 self.assertNotIn("Close tabs to the left", labels)
                 await pilot.press("escape")
@@ -433,6 +434,23 @@ class SenderUITests(IsolatedAppTestCase):
                 await settle(pilot, lambda: len(app.db.sender_requests()) == 1 and names() == ["1"])
                 self.assertEqual(names(), ["1"])
                 self.assertEqual(len(app.db.sender_requests()), 1)
+
+    async def test_sender_shortcut_duplicates_the_selected_request(self):
+        app = NoxenApp(SimpleNamespace(project=None, new_project=str(self.settings_path.parent / "duplicate"),
+                                       skip_device_scan=True))
+        async with app.run_test(size=(130, 40)) as pilot:
+            request = {"operation": "sendBroadcast", "intent": {"action": "demo"}}
+            saved = app.sender_service.save_request("Example", request)
+            self.assertTrue(await pilot.click("#--content-tab-tab_sender"))
+            pane = app.query_one(SenderPane)
+            await settle(pilot, lambda: pane._editor_key == (saved["id"], saved["revision"]))
+            pane.editor.area.focus()
+            await pilot.press("ctrl+r")
+            await settle(pilot, lambda: pane.selected() is not None and pane.selected()["name"] == "Example copy")
+            self.assertEqual(pane.selected()["name"], "Example copy")
+            self.assertEqual(pane.selected()["request"], request)
+            self.assertNotEqual(pane.selected()["id"], saved["id"])
+            self.assertEqual(app.db.sender_request(saved["id"])["request"], request)
 
     async def test_request_json_is_edited_in_place_with_completion_and_sent(self):
         with tempfile.TemporaryDirectory() as directory:

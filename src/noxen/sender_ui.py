@@ -58,7 +58,7 @@ class SenderRenameModal(ModalScreen):
 
 
 class SenderTabMenu(ModalScreen):
-    """A short menu opened at a screen position: the request tab actions by default."""
+    """A short menu opened at a screen position."""
 
     BINDINGS = [("escape", "dismiss", "Close")]
     DEFAULT_CSS = """
@@ -66,7 +66,7 @@ class SenderTabMenu(ModalScreen):
     SenderTabMenu OptionList { width: auto; height: auto; border: round $foreground-muted; background: $surface; }
     """
 
-    def __init__(self, x, y, options=(("Rename", "rename"), ("Duplicate", "duplicate"), ("Close", "close"))):
+    def __init__(self, x, y, options):
         super().__init__()
         self.position, self.options = (x, y), options
 
@@ -564,6 +564,16 @@ class SenderPane(Vertical):
         names = [row["name"] for row in self.service.db.sender_requests()]  # Not the last refresh: it may be stale.
         return str(max([int(name) for name in names if name.isdecimal() and len(name) <= 9], default=0) + 1)
 
+    def duplicate_request(self):
+        try:
+            row = self.service.db.sender_request(self._selected_id)
+            if row is None:
+                return
+            name = self.next_name() if row["name"].isdecimal() else (row["name"] + " copy")[:200]
+            self.select_request(self.service.save_request(name, row["request"])["id"])
+        except (ValueError, OSError, sqlite3.Error) as error:
+            self.notify(str(error), severity="error")
+
     def receive_request(self, request):
         """Add a request prepared in another tab and select it, named with the next number like +.
 
@@ -652,9 +662,6 @@ class SenderPane(Vertical):
                         except Exception as error:
                             self.notify(str(error), severity="error")
                     self.app.push_screen(SenderRenameModal(row["name"]), renamed)
-                elif action == "duplicate":
-                    name = self.next_name() if row["name"].isdecimal() else (row["name"] + " copy")[:200]
-                    self.select_request(self.service.save_request(name, row["request"])["id"])
                 elif action == "close":
                     self.remove_requests([row])
                 elif action in closing:
@@ -667,7 +674,7 @@ class SenderPane(Vertical):
         position = order.index(request_id) if request_id in order else 0
         closing = {"close_other": order[:position] + order[position + 1:],
                    "close_left": order[:position], "close_right": order[position + 1:]}
-        options = [("Rename", "rename"), ("Duplicate", "duplicate"), ("Close", "close")]
+        options = [("Rename", "rename"), ("Close", "close")]
         options += [(label, key) for label, key in (("Close other tabs", "close_other"),
                     ("Close tabs to the left", "close_left"), ("Close tabs to the right", "close_right"))
                     if closing[key]]
