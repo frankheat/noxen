@@ -397,6 +397,8 @@ class SenderPane(Vertical):
         (tab or self.query_one("#sender_new", Button)).focus()
 
     def refresh_sender(self):
+        if not self.query("#sender_state"):
+            return  # A timer may fire while the pane is being unmounted.
         devices = [(d.name, d.id) for d in self.app._home_devices]
         if devices != self._devices:
             select = self.query_one("#sender_device", Select)
