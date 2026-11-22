@@ -7,7 +7,9 @@ stays authoritative for what a request may contain.
 import json
 import re
 
-from noxen.sender import INTENT_OPERATIONS, NAMED_INTENT_FLAGS, OPERATIONS, PROVIDER_OPERATIONS, intent_flag_family
+from noxen.sender import (
+    BROADCAST_OPERATIONS, INTENT_OPERATIONS, NAMED_INTENT_FLAGS, OPERATIONS, PROVIDER_OPERATIONS, intent_flag_family,
+)
 
 INDENT = "    "
 SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
@@ -53,12 +55,27 @@ PROVIDER_SNIPPETS = {
     "queryArguments": BLOCK,
 }
 
-# What each operation needs before it can be saved, written after the operation of a new request.
+# Fields to fill in when selecting the operation of a new request.
+NEW_INTENT_FIELDS = (
+    ',\n"intent": {\n    "component": ${null},\n    "package": null,\n'
+    '    "action": null,\n    "data": null,\n    "mimeType": null,\n'
+    '    "flags": [],\n    "categories": [],\n    "extras": null\n}'
+)
+PROVIDER_URI = ',\n"uri": "content://$0"'
+SELECTION_FIELDS = ',\n"selection": null,\n"selectionArgs": null'
+CONTENT_VALUES_FIELD = ',\n"values": {}'
+
 OPERATION_SKELETONS = {
-    **{name: ',\n"intent": {\n    $0\n}' for name in INTENT_OPERATIONS},
-    "startActivity": ',\n"intent": {\n    "flags": ["FLAG_ACTIVITY_NEW_TASK"]$0\n}',
-    **{name: ',\n"uri": "content://$0"' for name in PROVIDER_OPERATIONS},
-    **{name: ',\n"uri": "content://$0",\n"values": {}' for name in ("insert", "update")},
+    **dict.fromkeys(INTENT_OPERATIONS, NEW_INTENT_FIELDS),
+    "startActivity": NEW_INTENT_FIELDS.replace('"flags": []', '"flags": ["FLAG_ACTIVITY_NEW_TASK"]'),
+    **dict.fromkeys(BROADCAST_OPERATIONS, NEW_INTENT_FIELDS + ',\n"receiverPermission": null'),
+    "query": PROVIDER_URI + ',\n"projection": null' + SELECTION_FIELDS + ',\n"sortOrder": null',
+    "getType": PROVIDER_URI,
+    "insert": PROVIDER_URI + CONTENT_VALUES_FIELD,
+    "update": PROVIDER_URI + SELECTION_FIELDS + CONTENT_VALUES_FIELD,
+    "delete": PROVIDER_URI + SELECTION_FIELDS,
+    "call": PROVIDER_URI + ',\n"method": "",\n"arg": null,\n"extras": null',
+    "openFileDescriptor": PROVIDER_URI,
 }
 
 
@@ -255,8 +272,14 @@ def context(text, offset, root="request", operation=None):
             result["comma_at"] = top.last_end
         if kind == "request":
             operation = root.get("operation")
-            names = ("operation", "intent", "receiverPermission") if operation in INTENT_OPERATIONS else \
-                ("operation", *PROVIDER_KEYS[operation]) if operation in PROVIDER_OPERATIONS else tuple(REQUEST_SNIPPETS)
+            if operation in BROADCAST_OPERATIONS:
+                names = ("operation", "intent", "receiverPermission")
+            elif operation in INTENT_OPERATIONS:
+                names = ("operation", "intent")
+            elif operation in PROVIDER_OPERATIONS:
+                names = ("operation", *PROVIDER_KEYS[operation])
+            else:
+                names = tuple(name for name in REQUEST_SNIPPETS if name != "receiverPermission")
             options = [(name, f'"{name}": {REQUEST_SNIPPETS[name]}') for name in names]
         elif kind == "provider":
             names = PROVIDER_KEYS.get(operation, ("uri",))
@@ -336,7 +359,7 @@ def context(text, offset, root="request", operation=None):
                 for name in names if name not in top.values
             ]
             return result
-        # In a request that has nothing else yet, choosing the operation also writes what it needs.
+        # Only an empty request receives the operation template.
         skeleton = names is OPERATIONS and not set(root) - {"operation"} and re.fullmatch(r'"?[ \t]*\n\s*\}\s*', text[offset:])
         result["options"] = [(name, f'"{name}"' + (OPERATION_SKELETONS[name] if skeleton else "$0")) for name in names]
         if not names and top.bracket == "{":

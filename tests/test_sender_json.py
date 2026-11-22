@@ -2,7 +2,7 @@ import unittest
 
 from textual.app import App
 
-from noxen.sender import validate_request
+from noxen.sender import OPERATIONS, validate_request
 from noxen.sender_json import (apply_completion, completions, expand, format_request, highlights, parse,
                                toggle_fold)
 from noxen.sender_json_editor import JsonRequestEditor
@@ -21,6 +21,14 @@ def complete(marked, pick=None, always=False):
 
 
 class SenderJsonTests(unittest.TestCase):
+    def test_receiver_permission_is_only_suggested_for_broadcasts(self):
+        for operation in OPERATIONS:
+            with self.subTest(operation=operation):
+                options = complete('{"operation": "' + operation + '", |}', always=True)
+                self.assertEqual("receiverPermission" in options,
+                                 operation in ("sendBroadcast", "sendOrderedBroadcast"))
+        self.assertNotIn("receiverPermission", complete('{|}', always=True))
+
     def test_key_suggestions_exclude_fields_on_both_sides_of_cursor(self):
         query = ('{"operation":"query","uri":"content://demo/notes","projection":[],'
                  '"selection":"","selectionArgs":[],"sortOrder":"_id ASC","maxRows":100,"maxBytes":262144}')
@@ -36,8 +44,6 @@ class SenderJsonTests(unittest.TestCase):
         self.assertEqual(parse(edited)["intent"]["selector"], {"action": "example"})
 
     def test_free_keys_and_text_never_offer_types_or_literals(self):
-        from noxen.sender import OPERATIONS
-
         def choices(marked, root="request"):
             offset = marked.index("|")
             _, matches = completions(marked.replace("|", ""), offset, True, root=root)
@@ -117,13 +123,39 @@ class SenderJsonTests(unittest.TestCase):
         self.assertEqual(complete('{"operation": "call", "extras": {\n    St|\n}}', "String"),
                          '{"operation": "call", "extras": {\n    "|": {"type": "String", "value": ""}\n}}')
         self.assertEqual(complete('{"operation": "st|"}', "startActivity"), '{"operation": "startActivity"|}')
-        # In a new request, the operation brings what it needs; in one with other fields it does not.
-        self.assertEqual(complete('{\n    "operation": "|"\n}', "sendBroadcast", always=True),
-                         '{\n    "operation": "sendBroadcast",\n    "intent": {\n        |\n    }\n}')
-        self.assertEqual(complete('{\n    "operation": "|"\n}', "query", always=True),
-                         '{\n    "operation": "query",\n    "uri": "content://|"\n}')
         self.assertEqual(complete('{\n    "operation": "|",\n    "intent": {}\n}', "query", always=True),
                          '{\n    "operation": "query"|,\n    "intent": {}\n}')
+
+    def test_new_request_templates_include_operation_arguments(self):
+        provider_fields = {
+            "query": {"projection": None, "selection": None, "selectionArgs": None, "sortOrder": None},
+            "getType": {},
+            "insert": {"values": {}},
+            "update": {"selection": None, "selectionArgs": None, "values": {}},
+            "delete": {"selection": None, "selectionArgs": None},
+            "call": {"method": "", "arg": None, "extras": None},
+            "openFileDescriptor": {},
+        }
+        for operation in OPERATIONS:
+            with self.subTest(operation=operation):
+                text = complete('{\n    "operation": "|"\n}', operation, always=True)
+                if operation in provider_fields:
+                    self.assertIn('"content://|"', text)
+                    request = parse(text.replace("|", "demo/notes"))
+                    self.assertEqual(request, {"operation": operation, "uri": "content://demo/notes",
+                                               **provider_fields[operation]})
+                else:
+                    self.assertIn('"component": |null', text)
+                    request = parse(text.replace("|", ""))
+                    flags = ["FLAG_ACTIVITY_NEW_TASK"] if operation == "startActivity" else []
+                    expected = {"operation": operation, "intent": {
+                        "component": None, "package": None, "action": None, "data": None,
+                        "mimeType": None, "flags": flags, "categories": [], "extras": None,
+                    }}
+                    if operation in ("sendBroadcast", "sendOrderedBroadcast"):
+                        expected["receiverPermission"] = None
+                    self.assertEqual(request, expected)
+                validate_request(request)
 
     def test_snippets_produce_requests_that_validate(self):
         text = complete('{\n    "operation": "sendBroadcast",\n    in|\n}', "intent").replace("|", "")

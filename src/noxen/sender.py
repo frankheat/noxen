@@ -8,8 +8,9 @@ from noxen.intent_mods import normalize_component
 from noxen.rendering import INTENT_FLAGS
 from noxen.provider_fields import ordered_provider_request
 
+BROADCAST_OPERATIONS = ("sendBroadcast", "sendOrderedBroadcast")
 INTENT_OPERATIONS = (
-    "startActivity", "sendBroadcast", "sendOrderedBroadcast", "startService", "startForegroundService", "stopService",
+    "startActivity", *BROADCAST_OPERATIONS, "startService", "startForegroundService", "stopService",
 )
 PROVIDER_OPERATIONS = ("query", "getType", "insert", "update", "delete", "call", "openFileDescriptor")
 OPERATIONS = INTENT_OPERATIONS + PROVIDER_OPERATIONS
@@ -20,7 +21,7 @@ NAMED_INTENT_FLAGS = {name: bit for bit, names in INTENT_FLAGS for name in names
 def intent_flag_family(operation):
     if operation == "startActivity":
         return "FLAG_ACTIVITY_"
-    if operation in ("sendBroadcast", "sendOrderedBroadcast"):
+    if operation in BROADCAST_OPERATIONS:
         return "FLAG_RECEIVER_"
     return None
 
@@ -226,7 +227,7 @@ def validate_request(raw, *, for_execution=False):
         fields(value, ("operation", "intent", "receiverPermission"), "request")
         validate_intent(value.get("intent"), flag_mode=flag_mode)
         if "receiverPermission" in value:
-            if operation not in ("sendBroadcast", "sendOrderedBroadcast"):
+            if operation not in BROADCAST_OPERATIONS:
                 raise SenderError("receiverPermission applies only to broadcasts")
             string(value["receiverPermission"], "receiverPermission", nullable=True)
         if operation == "startActivity":
