@@ -230,14 +230,13 @@ class SenderPane(Vertical):
             self._checking_activity_send or status["state"] != "ready" or status["active_run"] is not None
             or row is None or not row["request"] or self._editor_key != (row["id"], row["revision"])
             or self._editor_run_id != self._run_id
-            or self.editor.area.read_only or self.editor_needs_save()
+            or self.editor.area.read_only
         )
 
     def on_text_area_changed(self, event):
         """Edits are saved on their own, a moment after typing stops."""
         event.stop()
         self.show_editor_state()
-        self.update_send_button()
         if self._autosave is not None:
             self._autosave.stop()
         self._autosave = self.set_timer(AUTOSAVE_DELAY, self.autosave) if self.editor_needs_save() else None
@@ -729,10 +728,10 @@ class SenderPane(Vertical):
                 self._result_view = "summary" if self._result_view == view else view
                 self.render_run_result()
             elif button == "sender_send":
-                if self._editor_run_id != self._run_id:
+                if self._checking_activity_send or self._editor_run_id != self._run_id:
                     return
                 row = self.save_editor(for_send=True)  # Send what is on screen.
-                if row is None or self._checking_activity_send:
+                if row is None:
                     return
                 if row["request"] == {}:
                     raise ValueError("Choose an operation first")

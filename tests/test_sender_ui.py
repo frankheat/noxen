@@ -108,7 +108,8 @@ class SenderUITests(IsolatedAppTestCase):
             status = pane.editor.query_one(".json_status")
             self.assertTrue(status.has_class("error"))
             self.assertEqual(str(status.content), reopened.db.sender_draft(first["id"], first["revision"])[1])
-            self.assertTrue(pane.query_one("#sender_send").disabled)
+            await settle(pilot, lambda: not pane.query_one("#sender_send").disabled)
+            self.assertFalse(pane.query_one("#sender_send").disabled)
             await pilot.click("#sender_send")
             self.assertEqual(sent, [])
             pane.select_request(second["id"])
@@ -116,6 +117,7 @@ class SenderUITests(IsolatedAppTestCase):
             self.assertEqual(pane.editor.area.text, invalid_request)
             self.assertIn("FLAG_ACTIVITY_NEW_TASK", str(pane.editor.query_one(".json_status").content))
             self.assertEqual(reopened.db.sender_request(second["id"]), second)
+            self.assertTrue(pane.query_one("#sender_send").disabled)
             pane.editor.area.load(NEW_REQUEST_TEXT)
             await settle(pilot, lambda: reopened.db.sender_draft(second["id"], second["revision"]) is None)
             self.assertIsNone(reopened.db.sender_draft(second["id"], second["revision"]))
@@ -123,7 +125,7 @@ class SenderUITests(IsolatedAppTestCase):
             pane.select_request(first["id"])
             await settle(pilot, lambda: pane.editor.area.text == invalid_json)
             pane.editor.area.load('{"operation":"sendBroadcast","intent":{"action":"fixed"}}')
-            await settle(pilot, lambda: not pane.query_one("#sender_send").disabled)
+            await settle(pilot, lambda: reopened.db.sender_request(first["id"])["revision"] > first["revision"])
             self.assertFalse(pane.query_one("#sender_send").disabled)
             self.assertEqual(str(status.content), "")
             self.assertFalse(status.has_class("error"))
@@ -277,7 +279,8 @@ class SenderUITests(IsolatedAppTestCase):
                 # Choosing the operation also writes what it needs, and the request is saved.
                 await pilot.press("down", "enter")
                 await pilot.pause(1.2)
-                self.assertEqual(pane.selected()["request"], {"operation": "sendBroadcast", "intent": {}})
+                self.assertEqual(pane.selected()["request"]["operation"], "sendBroadcast")
+                self.assertIsNone(pane.selected()["request"]["receiverPermission"])
                 self.assertFalse(pane.query_one("#sender_send").disabled)
                 # The name is the tab label: renaming the request renames its tab, and keeps text being typed.
                 area.load('{\n    "operation": "sendBroadcast",\n    "intent": {"flags": 16}\n}')
@@ -516,17 +519,29 @@ class SenderUITests(IsolatedAppTestCase):
                 pane.select_request(first["id"])
                 await pilot.pause(0.6)
 
-                # Invalid text is saved only as a draft, and Send does not send it.
+                # Send validates the visible text even before autosave can run.
                 before = service.db.sender_request(first["id"])
-                area.focus()
-                area.move_cursor(area.document.end)
-                await pilot.press("x")
-                await pilot.pause(1.2)
-                self.assertEqual(service.db.sender_request(first["id"]), before)
-                await pilot.click("#sender_send")
-                await pilot.pause(0.4)
-                self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
-                self.assertEqual(len(sent), 1)
+                send_button = pane.query_one("#sender_send")
+                with patch("noxen.sender_ui.AUTOSAVE_DELAY", 60):
+                    area.focus()
+                    area.move_cursor(area.document.end)
+                    await pilot.press("x")
+                    self.assertFalse(send_button.disabled)
+                    self.assertIsNone(app.db.sender_draft(first["id"], before["revision"]))
+                    self.assertTrue(await pilot.click(send_button))
+                    await settle(pilot, lambda: pane.editor.query_one(".json_status").has_class("error"))
+                    self.assertTrue(pane.editor.query_one(".json_status").has_class("error"))
+                    self.assertEqual(service.db.sender_request(first["id"]), before)
+                    self.assertEqual(len(sent), 1)
+                    self.assertFalse(send_button.disabled)
+
+                    area.load('{"operation":"sendBroadcast","intent":{"action":"send.immediately"}}')
+                    await pilot.pause()
+                    self.assertEqual(service.db.sender_request(first["id"]), before)
+                    self.assertFalse(send_button.disabled)
+                    self.assertTrue(await pilot.click(send_button))
+                    await settle(pilot, lambda: len(sent) == 2)
+                    self.assertEqual(sent[1]["intent"]["action"], "send.immediately")
 
     async def test_history_and_monitor_selections_are_sent_to_sender(self):
         with tempfile.TemporaryDirectory() as directory:
