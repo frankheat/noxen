@@ -35,7 +35,7 @@ function fixture(original = () => null, missingTransport = false, blocking = tru
     claim() { if (!blocking || claimed) return false; claimed = true; return true; },
     release() { claimed = false; },
   });
-  return { engine, method, events, calls, setWait: fn => { wait = fn; } };
+  return { engine, method, events, calls, Java, setWait: fn => { wait = fn; } };
 }
 test('filtered provider requests never wait and are still recorded', async () => {
   const seen = [];
@@ -89,6 +89,43 @@ test('query Bundle completeness requires only supported keys with matching types
     f.method.implementation(uri('content://test/notes'), null, bundle);
     assert.equal(f.events[0].queryArgumentsComplete, extra === null);
   }
+});
+test('editing one query Bundle field preserves absent keys and null string elements', async () => {
+  const f = fixture();
+  const key = name => 'android:query-arg-sql-' + name;
+  const captured = new Map([[key('selection-args'), [null, 'null']]]);
+  function bundle(values) {
+    return {
+      isParcelled: () => false,
+      getString: name => values.get(name) ?? null,
+      getStringArray: name => values.get(name) ?? null,
+      get: name => values.has(name) ? { $className: '[Ljava.lang.String;' } : null,
+      keySet: () => ({ size: () => values.size, iterator: () => {
+        const keys = [...values.keys()];
+        let i = 0;
+        return { hasNext: () => i < keys.length, next: () => keys[i++] };
+      } }),
+      putString: (name, value) => { values.set(name, value); },
+      putStringArray: (name, value) => { values.set(name, value); },
+      values,
+    };
+  }
+  const use = f.Java.use;
+  f.Java.use = name => name === 'android.os.Bundle'
+    ? { $new: original => bundle(new Map(original.values)) } : use(name);
+  f.method.argumentTypes = ['android.net.Uri', '[Ljava.lang.String;', 'android.os.Bundle']
+    .map(className => ({ className }));
+  await f.engine.configure(true, false);
+  f.setWait(() => {
+    const req = f.events.at(-1);
+    assert.deepEqual(req.arguments.queryArguments.selectionArgs, [null, 'null']);
+    assert.equal(f.engine.resolve(req.decisionId, 'forward', {
+      ...req.arguments, queryArguments: { ...req.arguments.queryArguments, sortOrder: 'title ASC' },
+    }), true);
+  });
+  f.method.implementation(uri('content://test/notes'), null, bundle(captured));
+  assert.deepEqual(f.calls[0][2].values, new Map([...captured, [key('sort-order'), 'title ASC']]));
+  assert.equal(captured.size, 1);
 });
 test('opted-in preview records returned rows without a hold or replacing the Cursor', async () => {
   let position = -1;

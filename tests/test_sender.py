@@ -11,6 +11,7 @@ from unittest.mock import patch
 from noxen.db import ProjectDB
 from noxen.sender import SenderError, validate_request, compare_sender_runs
 from noxen.sender_service import SenderService
+from noxen.sender_session import SenderSession
 from noxen.sender_capture import (capture_as_request, capture_operation, prepare_component_request,
                                   prepare_intent_request, prepare_monitor_request)
 from noxen.frida_session import SessionConfig
@@ -115,6 +116,33 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     def execute(self, key="one"):
         return self.service.execute(self.request["id"], self.request["revision"], self.service.token, key)
 
+    async def test_shared_agent_destruction_clears_active_run_and_detaches_listeners(self):
+        signals = {}
+
+        def unsubscribe(signal, callback):
+            self.assertEqual(signals.pop(signal), callback)
+
+        script = SimpleNamespace(on=signals.__setitem__, off=unsubscribe, exports_sync=SimpleNamespace(
+            sender_identity=lambda: {"package": "test.app", "pid": 1, "uid": 10001},
+            sender_execute=self.endpoint.execute,
+        ))
+        observer = SimpleNamespace(_script=script, is_ready=lambda: True)
+        endpoint = SenderSession("emulator", 1, None, observer=observer)
+        await self.service.connect(endpoint, "test.app", self.service.token)
+        run = self.execute()
+        self.assertTrue(await asyncio.to_thread(self.started.wait, 2))
+        await asyncio.to_thread(signals["destroyed"])
+        self.assertEqual(self.service.status()["state"], "disconnected")
+        self.assertIsNone(self.service.active_run)
+        self.release.set()
+        await self.service.task
+        self.assertEqual(self.service.get_run(run["id"])["state"], "unknown")
+        for _ in range(20):
+            if not signals:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(signals, {})
+
     async def test_drafts_follow_rename_but_not_replacement_or_deletion(self):
         row = self.request
         self.db.save_sender_draft(row["id"], row["revision"], "{", "Incomplete JSON")
@@ -198,6 +226,10 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.request = self.service.save_request("Query", {"operation": "query", "uri": "content://test/notes"})
         self.endpoint.cancel = lambda job_id: True
         run = self.execute()
+        self.service.save_request("Query", {"operation": "getType", "uri": "content://test/notes"},
+                                  self.request["id"], self.request["revision"])
+        self.assertEqual(self.service.cancellable_run(self.request["id"]), run["id"])
+        self.assertIsNone(self.service.cancellable_run("different-request"))
         result = await self.service.cancel(run["id"], self.service.token)
         self.assertTrue(result["cancellationRequested"])
         self.assertNotEqual(result["state"], "cancelled")
@@ -205,6 +237,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await self.service.wait(run["id"])
         self.assertEqual(result["state"], "returned")
         self.assertTrue(result["cancellationRequested"])
+        self.assertIsNone(self.service.cancellable_run(self.request["id"]))
 
     async def test_reopen_marks_unfinished_unknown_without_replay(self):
         self.db.create_sender_run("interrupted", {"state": "preparing", "request": {}})

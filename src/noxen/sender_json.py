@@ -5,6 +5,7 @@ stays authoritative for what a request may contain.
 """
 
 import json
+import math
 import re
 
 from noxen.sender import (
@@ -508,8 +509,23 @@ def parse(text, folds=None):
         rebuilt.append(value if start in kept else " ")
         position = end
     rebuilt.append(full[position:])
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON field: {key!r}")
+            result[key] = value
+        return result
+
+    def finite_float(literal):
+        value = float(literal)
+        if not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        return value
+
     try:
-        value = json.loads("".join(rebuilt))
+        value = json.loads("".join(rebuilt), object_pairs_hook=unique_fields,
+                           parse_float=finite_float, parse_constant=finite_float)
     except json.JSONDecodeError as error:
         raise ValueError(f"Line {error.lineno}, column {error.colno}: {error.msg}") from None
     if not isinstance(value, dict):

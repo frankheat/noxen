@@ -734,8 +734,13 @@ class SenderUITests(IsolatedAppTestCase):
                     self.assertEqual(request.region.y, result.region.y)
                     self.assertLess(request.region.right, result.region.x)
                     await pilot.click(tabs[0], button=3)
-                    await pilot.pause()
-                    await pilot.press("down", "down", "enter")  # Close
+                    await settle(pilot, lambda: isinstance(app.screen, SenderTabMenu)
+                                 and isinstance(app.focused, OptionList) and app.focused.screen is app.screen)
+                    menu = app.screen.query_one(OptionList)
+                    menu.highlighted = next(
+                        i for i in range(menu.option_count) if menu.get_option_at_index(i).id == "close"
+                    )
+                    await pilot.press("enter")
                     await settle(pilot, lambda: [str(tab.label) for tab in pane.query(RequestTab)] == ["A"])
                     self.assertEqual([row["id"] for row in app.db.sender_requests()], [pane.selected()["id"]])
                     self.assertNotEqual(pane.selected()["id"], first["id"])
@@ -752,3 +757,15 @@ class SenderUITests(IsolatedAppTestCase):
                     await pilot.press("alt+left", "alt+left")
                     await pilot.pause()
                     self.assertLess(side.region.width, width)
+
+                    for terminal_width in (72, 60):
+                        await pilot.resize_terminal(terminal_width, 36)
+                        await pilot.pause()
+                        device = pane.query_one("#sender_device")
+                        application = pane.query_one("#sender_app")
+                        refresh = pane.query_one("#sender_refresh")
+                        disconnect = pane.query_one("#sender_disconnect")
+                        self.assertEqual(device.region.height, 3)
+                        self.assertEqual(application.region.height, 3)
+                        self.assertEqual(refresh.region.y == device.region.y, terminal_width == 72)
+                        self.assertLessEqual(disconnect.region.right, pane.region.right)

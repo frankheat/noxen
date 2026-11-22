@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -319,6 +320,46 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(db.provider_calls()), 1)
             db.close()
 
+    async def test_pending_decision_cannot_affect_a_reconnected_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = ProjectDB(str(Path(tmp) / "provider.noxen"))
+            db.create("provider")
+            self.addCleanup(db.close)
+            service = ProviderService(db)
+            rpc = SimpleNamespace(resolve_provider=lambda *args: True)
+            config = SimpleNamespace(target_label=lambda: "fixture")
+            first = SimpleNamespace(_config=config, _script=SimpleNamespace(exports_sync=rpc))
+            second = SimpleNamespace(_config=config, _script=SimpleNamespace(exports_sync=rpc))
+            service.bind(first)
+            with self.assertRaisesRegex(ValueError, "hold changed"):
+                await service.resolve(service.connection, None, "forward")
+            first.provider_cb(dict(request("forwarded"), decisionId=None, state="forwarded"))
+            first.provider_cb(request("first"))
+            service.drain()
+            started = {name: asyncio.Event() for name in ("first", "second")}
+            finish = {name: asyncio.Event() for name in started}
+
+            async def blocked_rpc(_rpc, decision_id, *_args):
+                started[decision_id].set()
+                await finish[decision_id].wait()
+                return True
+
+            with patch("noxen.provider_service.sender_io", blocked_rpc):
+                first_action = asyncio.create_task(service.resolve(service.connection, "first", "forward"))
+                await asyncio.wait_for(started["first"].wait(), timeout=1)
+                service.bind(second)
+                self.assertEqual({row["state"] for row in db.provider_calls()}, {"unknown"})
+                second.provider_cb(request("second"))
+                second_action = asyncio.create_task(service.resolve(service.connection, "second", "forward"))
+                await asyncio.wait_for(started["second"].wait(), timeout=1)
+                finish["first"].set()
+                with self.assertRaisesRegex(ValueError, "hold changed"):
+                    await first_action
+                self.assertTrue(service.busy)
+                finish["second"].set()
+                self.assertTrue((await second_action)["accepted"])
+                self.assertFalse(service.busy)
+
 
 class ProviderUITests(IsolatedAppTestCase):
     async def test_get_type_response_can_be_edited_without_read_cursor(self):
@@ -425,8 +466,11 @@ class ProviderUITests(IsolatedAppTestCase):
         app = NoxenApp(SimpleNamespace(project=None, new_project=str(self.settings_path.parent / "providers"),
                                        skip_device_scan=True))
         async with app.run_test(size=(140, 48)) as pilot:
+            app.query_one("#main_tabs", TabbedContent).active = "tab_intercept"
+            await pilot.pause()
             service = app.provider_service
-            session = SimpleNamespace(_config=SimpleNamespace(target_label=lambda: "demo"), is_ready=lambda: True)
+            session = SimpleNamespace(_config=SimpleNamespace(target_label=lambda: "demo"), is_ready=lambda: True,
+                                      cleanup=lambda: None)
             service.bind(session)
             app.frida_session = session
             app._connection_state = "connected"
@@ -452,6 +496,7 @@ class ProviderUITests(IsolatedAppTestCase):
             service.receive(service.connection, {"noxenEvent": "provider_response", "id": "provider-1", "state": "held",
                             "phase": "response", "decisionId": "provider-1:response", "cursor": table})
             app._provider_tick()
+            await pilot.pause()
             self.assertFalse(app.query_one("#btn_read_cursor").display)
             self.assertFalse(app.query_one("#btn_edit").disabled)
             intercept_text = "\n".join(line.text for line in app.query_one("#intercept_output", RichLog).lines)

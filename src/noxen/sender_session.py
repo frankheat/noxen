@@ -31,6 +31,8 @@ class SenderSession:
                 self.script.load()
             self.script.on("message", self._message)
             self._listening = True
+            if self.observer is not None:
+                self.script.on("destroyed", self._observer_destroyed)
             identity = self.script.exports_sync.sender_identity()
             if identity["pid"] != self.pid or identity["package"] != expected_package:
                 raise SenderError("Sender identity changed; select the app again")
@@ -46,6 +48,9 @@ class SenderSession:
         self.detached = True
         if not was_detached and self.detached_cb:
             self.detached_cb(reason, crash)
+
+    def _observer_destroyed(self):
+        self._detached("observer-agent-destroyed")
 
     def _message(self, message, data):
         payload = message.get("payload")
@@ -80,6 +85,11 @@ class SenderSession:
                 self.script.off("message", self._message)
             except Exception:
                 pass  # The script may already have been destroyed by a detach.
+            if self.observer is not None:
+                try:
+                    self.script.off("destroyed", self._observer_destroyed)
+                except Exception:
+                    pass
             self._listening = False
         if self.session is not None:
             try:

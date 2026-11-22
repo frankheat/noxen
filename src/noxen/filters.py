@@ -57,11 +57,13 @@ class FilterManager:
 
     def replace_all(self, filters):
         with self._lock:
-            self._filter_list = [
-                normalized
-                for item in list(filters or [])
-                if (normalized := self._normalize_saved_filter(item)) is not None
-            ]
+            self._filter_list = []
+            seen = set()
+            for item in filters or ():
+                normalized = self._normalize_saved_filter(item)
+                if normalized is not None and normalized["id"] not in seen:
+                    seen.add(normalized["id"])
+                    self._filter_list.append(normalized)
             self._id_counter = max((f.get("id", 0) for f in self._filter_list), default=0) + 1
 
     def export(self):
@@ -89,7 +91,8 @@ class FilterManager:
             return None
         f_type = item.get("type")
         rule = item.get("rule")
-        if f_type not in cls.VALID_TYPES or not isinstance(rule, dict):
+        if (fid <= 0 or isinstance(item["id"], bool) or not isinstance(f_type, str)
+                or f_type not in cls.VALID_TYPES or not isinstance(rule, dict) or not rule):
             return None
         if any(key not in cls.VALID_KEYS or not isinstance(value, str)
                or (key in FILTER_CHOICES and value not in FILTER_CHOICES[key]) for key, value in rule.items()):
@@ -117,7 +120,7 @@ class FilterManager:
                 if f['type'] == f_type and f['rule'] == rule:
                     return f"[yellow]Already exists as filter #{f['id']}[/yellow]"
             self._filter_list.append({'id': self._id_counter, 'type': f_type, 'rule': rule, 'enabled': enabled})
-            msg = f"[#26a368]Added {f_type} filter #{self._id_counter}: {rule}[/#26a368]"
+            msg = f"[#26a368]Added {f_type} filter #{self._id_counter}[/#26a368]"
             self._id_counter += 1
         return msg
 

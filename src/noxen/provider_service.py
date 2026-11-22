@@ -1,6 +1,7 @@
 """Provider request decisions and durable records shared by TUI and MCP."""
 
 import copy
+import json
 import queue
 from uuid import uuid4
 
@@ -11,7 +12,6 @@ class ProviderService:
     def __init__(self, db, changed=None):
         self.db = db
         self.changed = changed
-        self.history_ids = {}
         self.session = None
         self.connection = uuid4().hex
         self.inbox = queue.Queue(maxsize=512)
@@ -32,14 +32,16 @@ class ProviderService:
     def bind(self, session):
         if session is self.session:
             return
-        if self.held is not None:
-            record = self.records[self.held]
-            record["state"] = "unknown"
-            record["error"] = "Connection ended while this request was held."
-            self.persist(record)
+        self.drain()
+        for record in self.records.values():
+            if record["state"] in ("held", "forwarded", "modified_forwarded"):
+                record.update(state="unknown", decisionId=None, error="Connection ended before a result was recorded.")
+                self.persist(record)
         self.held = None
         self.session = session
         self.connection = uuid4().hex
+        self.busy = False
+        self._control_id = None
         self.enabled = {"outgoing": False, "incoming": False}
         self.hooks = []
         self.records = {}
@@ -68,9 +70,9 @@ class ProviderService:
 
     def persist(self, record):
         key = (self.connection, record["id"])
+        history_id = None
         try:
             history_id = self.db.save_provider_call(self.connection, record["id"], record)
-            self.history_ids[key] = history_id
             self.unsaved.pop(key, None)
             if not self.unsaved:
                 self.error = None
@@ -82,7 +84,7 @@ class ProviderService:
             self.error = f"Provider call could not be saved: {error}"
         self.version += 1
         if self.changed:
-            self.changed(record, self.connection, self.history_ids.get(key), self.error)
+            self.changed(record, self.connection, history_id, self.error)
 
     def drain(self):
         while not self.control_inbox.empty():
@@ -98,7 +100,6 @@ class ProviderService:
         for (connection, id_), record in list(self.unsaved.items())[:32]:
             try:
                 history_id = self.db.save_provider_call(connection, id_, record)
-                self.history_ids[connection, id_] = history_id
                 if self.changed:
                     self.changed(record, connection, history_id, None)
             except Exception:
@@ -158,23 +159,32 @@ class ProviderService:
                 "held": copy.deepcopy(self.records.get(self.held)), "hooks": copy.deepcopy(self.hooks),
                 "busy": self.busy, "error": self.error, "lost_events": self.lost}
 
-    async def resolve(self, connection, decision_id, action, arguments=None):
+    async def resolve(self, connection, decision_id, action, arguments=None, *, skip_response=False):
         self.drain()
-        if connection != self.connection or decision_id != (self.records.get(self.held) or {}).get("decisionId") or self.session is None:
+        held = self.records.get(self.held)
+        if (connection != self.connection or not decision_id or not held
+                or decision_id != held.get("decisionId") or self.session is None):
             raise ValueError("Provider hold changed; read the current request again")
         if action not in ("forward", "drop", "inspect"):
             raise ValueError("Choose forward, drop or inspect")
         if self.busy:
             raise ValueError("Wait for the current provider operation")
-        if arguments is not None and len(str(arguments)) > 65536:
-            raise ValueError("Provider arguments exceed 64 KiB")
+        if arguments is not None:
+            try:
+                encoded = json.dumps(arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            except (ValueError, TypeError, RecursionError) as error:
+                raise ValueError("Provider edit must contain valid UTF-8 JSON values") from error
+            if len(encoded) > 65536:
+                raise ValueError("Provider arguments exceed 64 KiB")
         self.busy = True
         try:
-            accepted = await sender_io(self.session._script.exports_sync.resolve_provider,
-                                       decision_id, action, arguments)
-            if not accepted:
+            rpc = self.session._script.exports_sync.resolve_provider
+            args = (decision_id, action, arguments)
+            accepted = await sender_io(rpc, *args, True) if skip_response else await sender_io(rpc, *args)
+            if connection != self.connection or not accepted:
                 raise ValueError("Provider hold changed; read the current request again")
             self.drain()
             return {"accepted": True}
         finally:
-            self.busy = False
+            if connection == self.connection:
+                self.busy = False

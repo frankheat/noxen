@@ -115,9 +115,15 @@ class SenderPane(Vertical):
     DEFAULT_CSS = """
     SenderPane { height: 1fr; }
     SenderPane .sender_controls { height: 3; margin: 0 1; }
+    SenderPane .sender_targets { width: 1fr; height: 3; }
+    SenderPane .sender_connection_actions { width: auto; height: 3; }
+    SenderPane.narrow-controls .sender_controls { layout: vertical; height: 6; }
+    SenderPane.narrow-controls .sender_targets { width: 100%; }
+    SenderPane .sender_targets SelectCurrent { padding: 0 1; }
+    SenderPane .sender_targets SelectCurrent > Static#label { text-wrap: nowrap; text-overflow: ellipsis; }
     SenderPane Button { margin-right: 1; }
-    SenderPane #sender_device { width: 1fr; margin-right: 1; }
-    SenderPane #sender_app { width: 2fr; margin-right: 1; }
+    SenderPane #sender_device { width: 1fr; min-width: 12; margin-right: 1; }
+    SenderPane #sender_app { width: 2fr; min-width: 16; margin-right: 1; }
     SenderPane #sender_state { height: auto; margin: 0 1 1 1; }
     SenderPane #sender_tabs { height: auto; max-height: 4; margin: 0 1; scrollbar-size-horizontal: 1; }
     SenderPane #sender_new { height: 3; min-width: 5; border: none; }
@@ -167,11 +173,13 @@ class SenderPane(Vertical):
 
     def compose(self):
         with Horizontal(classes="sender_controls"):
-            yield Select([], id="sender_device", prompt="Device")
-            yield Select([], id="sender_app", prompt="Running sender application")
-            yield ModalButton("Refresh", id="sender_refresh")
-            yield ModalButton("Connect", id="sender_connect")
-            yield ModalButton("Disconnect", id="sender_disconnect")
+            with Horizontal(classes="sender_targets"):
+                yield Select([], id="sender_device", prompt="Device")
+                yield Select([], id="sender_app", prompt="Sender app")
+            with Horizontal(classes="sender_connection_actions"):
+                yield ModalButton("Refresh", id="sender_refresh")
+                yield ModalButton("Connect", id="sender_connect")
+                yield ModalButton("Disconnect", id="sender_disconnect")
         yield Label("Disconnected", id="sender_state", markup=False)
         with HorizontalScroll(id="sender_tabs"):
             yield ModalButton("+", id="sender_new")
@@ -195,6 +203,7 @@ class SenderPane(Vertical):
 
     def on_resize(self):
         self.set_class(self.size.width < 100, "stacked")
+        self.set_class(self.size.width < 72, "narrow-controls")
 
     def on_mount(self):
         self.set_interval(0.3, self.refresh_sender)
@@ -400,17 +409,16 @@ class SenderPane(Vertical):
             self._devices = devices
         status = self.service.status()
         label = status["state"].capitalize()
+        if status["state"] == "ready" and (identity := status["identity"]):
+            label += f" · {identity['package']} · PID {identity['pid']}"
         if status["active_run"]:
             label += f" · Run #{status['active_run']} pending"
         if status["error"]:
             label += f" · {status['error']}"
         self.query_one("#sender_state", Label).update(Text(label))
         self.query_one("#sender_disconnect", Button).disabled = status["state"] == "disconnected"
-        row = self.selected()
         self.update_send_button(status)
-        self.query_one("#sender_cancel_run", Button).disabled = not (
-            row is not None and status["active_run"] is not None and status["active_run"] in self._run_ids[:1]
-            and row["request"].get("operation") in ("query", "openFileDescriptor"))
+        self.query_one("#sender_cancel_run", Button).disabled = self.service.cancellable_run(self._selected_id) is None
         if self._retry_save and self._autosave is None:
             self._retry_save = False
             self._autosave = self.set_timer(AUTOSAVE_DELAY, self.autosave)
@@ -725,9 +733,8 @@ class SenderPane(Vertical):
                 self._suggest_on_load = saved["id"]
                 self.select_request(saved["id"])
             elif button == "sender_cancel_run":
-                status = self.service.status()
-                if status["active_run"] is not None:
-                    await self.service.cancel(status["active_run"], self.service.token)
+                if (run_id := self.service.cancellable_run(self._selected_id)) is not None:
+                    await self.service.cancel(run_id, self.service.token)
             elif button in ("sender_run_older", "sender_run_newer"):
                 self.browse_runs(1 if button == "sender_run_older" else -1)
             elif button in ("sender_result_raw", "sender_result_details"):

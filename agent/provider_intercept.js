@@ -77,7 +77,7 @@ function createProviderInterceptor(Java, emit, options) {
             if (name === 'selectionArgs') {
               const array = source.getStringArray(full);
               if (array !== null && array.length > 64) { value = null; break; }
-              value[name] = array === null ? null : Array.from(array, String);
+              value[name] = array === null ? null : Array.from(array, item => item == null ? null : String(item));
             } else {
               const text = source.getString(full);
               value[name] = text === null ? null : String(text);
@@ -370,8 +370,11 @@ function createProviderInterceptor(Java, emit, options) {
             args[field.index] = target;
           } else if (field.type === BUNDLE) {
             const target = args[field.index] === null ? Java.use(BUNDLE).$new() : Java.use(BUNDLE).$new(args[field.index]);
+            const captured = decision.event.arguments[field.name];
             for (const [name, key] of [['selection', 'selection'], ['selectionArgs', 'selection-args'], ['sortOrder', 'sort-order']]) {
               const item = value[name], full = 'android:query-arg-sql-' + key;
+              // Keep absent keys and unchanged values exactly as supplied in the original Bundle.
+              if (captured !== null && JSON.stringify(item) === JSON.stringify(captured[name])) continue;
               if (name === 'selectionArgs') {
                 if (item !== null && (!Array.isArray(item) || item.length > 64 || item.some(x => typeof x !== 'string')))
                   throw new Error(name + ': expected null or string array');

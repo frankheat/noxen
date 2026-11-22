@@ -9,6 +9,9 @@ from uuid import uuid4
 from noxen.sender import SenderError, validate_request
 
 
+CANCELLABLE_OPERATIONS = ("query", "openFileDescriptor")
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -127,6 +130,7 @@ class SenderService:
     def _detached(self, endpoint, token, package, reason, crash):
         if self.token != token or self.session is not endpoint:
             return
+        was_connecting = self.state == "connecting"
         crash_id = None
         if crash is not None:
             report = crash.report or ""
@@ -149,6 +153,9 @@ class SenderService:
         self.token = uuid4().hex
         self.session, self.identity = None, None
         self.state = "disconnected"
+        if not was_connecting:
+            task = asyncio.create_task(sender_io(endpoint.close))
+            task.add_done_callback(self._consume_close)
 
     async def disconnect(self, token):
         self.require_token(token)
@@ -302,7 +309,7 @@ class SenderService:
         if run_id != self.active_run or not self.session:
             raise SenderError("This run is not active")
         run = self.get_run(run_id)
-        if run["request"]["operation"] not in ("query", "openFileDescriptor"):
+        if run["request"]["operation"] not in CANCELLABLE_OPERATIONS:
             raise SenderError("This operation cannot be cancelled")
         accepted = await sender_io(self.session.cancel, run["execution_key"])
         if accepted and token == self.token and self.active_run == run_id:
@@ -310,6 +317,14 @@ class SenderService:
             run["cancellationRequested"] = True
             self._save_result(run)
         return self.get_run(run_id)
+
+    def cancellable_run(self, request_id):
+        if request_id is None or self.active_run is None:
+            return None
+        run = self.get_run(self.active_run)
+        if run["request_id"] == request_id and run["request"]["operation"] in CANCELLABLE_OPERATIONS:
+            return run["id"]
+        return None
 
     async def _execute(self, endpoint, token, run):
         if token != self.token or run["id"] != self.active_run:

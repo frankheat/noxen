@@ -2053,15 +2053,13 @@ class NoxenApp(App):
     @work(group="provider_pass")
     async def _pass_provider(self, connection, decision_id):
         service = self.provider_service
-        if connection != service.connection or not decision_id or not service.session:
+        if connection != service.connection or service.busy:
             return
-        service.busy = True
         try:
-            await sender_io(service.session._script.exports_sync.resolve_provider, decision_id, "forward", None, True)
+            await service.resolve(connection, decision_id, "forward", skip_response=True)
         except Exception as error:
-            self.write_log(log_error(str(error), "providers"))
-        finally:
-            service.busy = False
+            if connection == service.connection:
+                self.write_log(log_error(str(error), "providers"))
 
     @on(Button.Pressed, "#btn_read_cursor")
     def _read_provider_cursor(self, event):
@@ -2433,8 +2431,6 @@ class NoxenApp(App):
         elif pane_id == "tab_history":
             self._do_history_refresh()
             self._focus_history_main_panel()
-            if self._history_table_height is None:
-                self.call_after_refresh(self._init_panel_heights)
         elif pane_id == "tab_sender":
             self.query_one(SenderPane).focus_default()
         elif pane_id == "tab_info" and self.check_action("resize_panel_up", ()):
@@ -2648,10 +2644,8 @@ class NoxenApp(App):
         self._set_history_table_height(self._history_table_height + delta)
 
     def _clamp_history_table_to_available_space(self) -> None:
-        if self._history_table_height is None:
-            self._init_panel_heights()
-            return
-        self._set_history_table_height(self._history_table_height)
+        if self._history_table_height is not None:
+            self._set_history_table_height(self._history_table_height)
 
     def _adjust_info_component_detail(self, delta: int) -> None:
         detail = self.query_one("#info_comp_detail", RichLog)

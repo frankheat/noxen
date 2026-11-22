@@ -216,6 +216,14 @@ class SenderJsonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "JSON object"):
             parse("[1]")
 
+    def test_parse_rejects_duplicate_fields_and_nonfinite_numbers(self):
+        for text in ('{"operation":"query","operation":"getType"}', r'{"values":{"x":1,"\u0078":2}}'):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "Duplicate JSON field"):
+                parse(text)
+        for literal in ("NaN", "Infinity", "-Infinity", "1e999", "-1e999"):
+            with self.subTest(literal=literal), self.assertRaisesRegex(ValueError, "must be finite"):
+                parse('{"value":' + literal + '}')
+
     def test_highlight_spans_are_byte_offsets_per_line(self):
         spans = highlights('{\n  "k€y": "v", "n": -1.5e3, "b": true, {⋯₁}\n}')
         self.assertEqual(spans[1][0], (2, 9, "json.key"))        # € is three bytes.

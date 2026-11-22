@@ -63,6 +63,10 @@ class FilterManagerTests(unittest.TestCase):
             {"id": 3, "type": "unknown", "rule": {"method": "sendBroadcast"}, "enabled": True},
             {"id": 4, "type": "focus", "rule": {"bad": "key"}, "enabled": True},
             {"id": 5, "type": "focus", "rule": {"flags": 1}, "enabled": True},
+            {"id": 2, "type": "ignore", "rule": {"method": "query"}},
+            {"id": 6, "type": ["focus"], "rule": {"method": "query"}},
+            {"id": 7, "type": "ignore", "rule": {}},
+            {"id": -1, "type": "ignore", "rule": {"method": "query"}},
             "not-a-filter",
         ])
 
