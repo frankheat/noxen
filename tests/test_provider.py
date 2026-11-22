@@ -29,6 +29,23 @@ def request(id_="provider-1"):
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_complete_query_bundle_can_be_repeated_with_edited_selection(self):
+        record = dict(request(), arguments={
+            "uri": "content://demo/notes", "projection": None,
+            "queryArguments": {"selection": "title = ?", "selectionArgs": ["second"], "sortOrder": None},
+        }, queryArgumentsComplete=True)
+        converted = provider_request(record)
+        self.assertEqual(converted["selectionArgs"], ["second"])
+        self.assertEqual(converted["operation"], "query")
+        record["sentArguments"] = {**record["arguments"], "queryArguments": {
+            "selection": "_id = ?", "selectionArgs": ["2"], "sortOrder": "_id ASC",
+        }}
+        self.assertEqual(provider_request(record)["selection"], "_id = ?")
+        self.assertEqual(provider_request(record)["selectionArgs"], ["2"])
+        record.pop("queryArgumentsComplete")
+        with self.assertRaises(ValueError):
+            provider_request(record)
+
     async def test_complete_cursor_detail_is_identical_for_previews_and_held_snapshots(self):
         table = {"columns": ["title"], "rows": [[{"type": "string", "value": "first"}]]}
         record = dict(request(), state="returned", result={"type": "android.database.Cursor"})

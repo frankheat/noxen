@@ -27,6 +27,7 @@ function fixture(original = () => null, missingTransport = false, blocking = tru
       return { [methodName]: { overloads: [method] } };
     },
     array: (_, value) => value,
+    cast: value => value,
   };
   const engine = createProviderInterceptor(Java, event => events.push(event), {
     inspect: fn => fn(), stamp: () => ({ time: 1 }), begin: () => 1, end: () => {},
@@ -36,6 +37,25 @@ function fixture(original = () => null, missingTransport = false, blocking = tru
   });
   return { engine, method, events, calls, setWait: fn => { wait = fn; } };
 }
+test('query Bundle completeness requires only supported keys with matching types', async () => {
+  for (const extra of [null, 'android:query-arg-limit']) {
+    const f = fixture(() => null, false, false);
+    f.method.argumentTypes = ['android.net.Uri', '[Ljava.lang.String;', 'android.os.Bundle']
+      .map(className => ({ className }));
+    const keys = ['android:query-arg-sql-selection'];
+    if (extra) keys.push(extra);
+    const bundle = {
+      isParcelled: () => false, getString: key => key.endsWith('selection') ? 'title = ?' : null,
+      getStringArray: () => null, get: () => ({ $className: 'java.lang.String' }),
+      keySet: () => ({ size: () => keys.length, iterator: () => {
+        let i = 0; return { hasNext: () => i < keys.length, next: () => keys[i++] };
+      } }),
+    };
+    await f.engine.configure(true, false);
+    f.method.implementation(uri('content://test/notes'), null, bundle);
+    assert.equal(f.events[0].queryArgumentsComplete, extra === null);
+  }
+});
 test('opted-in preview records returned rows without a hold or replacing the Cursor', async () => {
   let position = -1;
   const cursor = {

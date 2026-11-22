@@ -2425,6 +2425,7 @@
         }
         function capture(args, fields) {
           const values = /* @__PURE__ */ Object.create(null), editable = [];
+          let queryArgumentsComplete = false;
           for (const field of fields) {
             const arg = args[field.index];
             let value = null;
@@ -2475,6 +2476,24 @@
                   }
                 }
                 if (value === null) continue;
+                const allowed = {
+                  "android:query-arg-sql-selection": STRING,
+                  "android:query-arg-sql-selection-args": STRINGS,
+                  "android:query-arg-sql-sort-order": STRING
+                };
+                const keys = source.keySet();
+                queryArgumentsComplete = keys.size() <= 3;
+                if (queryArgumentsComplete) {
+                  const iterator = keys.iterator();
+                  while (iterator.hasNext()) {
+                    const key = String(iterator.next());
+                    const item = source.get(key);
+                    if (!Object.prototype.hasOwnProperty.call(allowed, key) || item !== null && item.$className !== allowed[key]) {
+                      queryArgumentsComplete = false;
+                      break;
+                    }
+                  }
+                }
               } else if (field.type === STRINGS) {
                 if (arg.length > 64) continue;
                 value = Array.from(arg, (x) => x == null ? null : String(x));
@@ -2484,7 +2503,7 @@
             values[field.name] = value;
             editable.push(field);
           }
-          return { values, editable };
+          return { values, editable, queryArgumentsComplete };
         }
         function resultValue(result, type) {
           if (result == null || type === "void") return { type, value: null };
@@ -2529,6 +2548,7 @@
               method: record.name,
               types: record.types,
               arguments: captured.values,
+              queryArgumentsComplete: captured.queryArgumentsComplete === true,
               nullArguments: record.types.map((_, index) => index).filter((index) => args[index] == null),
               opaqueArguments: record.types.map((type, i) => ({ index: i, type })).filter((x) => !captured.editable.some((f) => f.index === x.index)),
               state: owned ? "held" : "forwarded",

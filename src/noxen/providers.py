@@ -225,9 +225,12 @@ def provider_request(record):
 
     query = args.pop("queryArguments", None)
     if query is not None:
-        # Captured SQL keys alone do not establish that all Bundle keys were captured.
-        raise ValueError("The query Bundle was captured partially; create this request in Sender")
-    if "queryArguments" in record.get("sentArguments", record["arguments"]):
+        if record.get("queryArgumentsComplete") is not True:
+            raise ValueError("The query Bundle was captured partially; create this request in Sender")
+        if method != "query" and query.get("sortOrder") is not None:
+            raise ValueError("Sender cannot preserve sortOrder for this provider operation")
+        args.update(query)
+    elif "queryArguments" in record.get("sentArguments", record["arguments"]):
         args.update(selection=None, selectionArgs=None)
         if method == "query":
             args["sortOrder"] = None
