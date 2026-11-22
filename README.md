@@ -17,13 +17,13 @@ the app continues, or drop them.
 
 ## What you can do
 
-- **Hold and edit Intents.** Stop an Intent at a hook, inspect its action, data and
-  extras, change any field and let the app continue.
-- **Review every capture.** Search all captured Intents, including those that were
-  never held.
-- **Inspect provider calls.** Hold outgoing ContentResolver and supported incoming
-  provider calls, edit their captured arguments, and inspect or replace a query
-  Cursor response when a complete bounded snapshot is available.
+- **Hold and edit Intents.** Inspect a captured Intent, edit fields such as its
+  action, data and supported extras, then forward or drop it.
+- **Search History.** Review captured Intents and provider calls, including calls
+  that continued without pausing.
+- **Inspect provider calls.** Hold outgoing and supported incoming calls, edit
+  supported arguments, and inspect query results. Replace a Cursor when noxen can
+  read its full table within the capture limits.
 - **Follow a value.** Record related Java calls, such as SQL queries, file opens and
   WebView loads, without stopping them.
 - **Send your own requests.** Start activities, send broadcasts and call content
@@ -94,8 +94,8 @@ python -m compileall -q src/noxen
 PYTHONPATH=src python -m unittest discover -s tests
 ```
 
-After changing `agent/script.js` or `agent/system_server.js`, rebuild the Frida bundles
-and the packaged runtime copies, and commit them with the source:
+After changing an agent source file, rebuild the Frida bundles and the packaged
+runtime copies. Commit the generated files with the source changes.
 
 ```bash
 npm install
