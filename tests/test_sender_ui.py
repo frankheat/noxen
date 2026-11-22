@@ -1,4 +1,5 @@
 import copy
+import json
 import sqlite3
 import tempfile
 from unittest.mock import patch
@@ -307,9 +308,15 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.click("#sender_run_older")
                 await pilot.pause(0.6)
                 self.assertEqual(pane._run_id, min(runs))
-                # The request follows the run on screen, read only.
-                self.assertEqual(pane._editor_key, ("run", min(runs)))
-                self.assertTrue(pane.editor.area.read_only)
+                original_run = service.get_run(min(runs))
+                self.assertEqual(pane._editor_run_id, min(runs))
+                self.assertFalse(area.read_only)
+                self.assertEqual(json.loads(area.text), original_run["request"])
+                area.load('{"operation":"sendBroadcast","intent":{"action":"edited"}}')
+                await settle(pilot, lambda: pane.selected()["request"]["intent"].get("action") == "edited"
+                             and not pane.query_one("#sender_send").disabled)
+                self.assertEqual(pane._run_id, min(runs))
+                self.assertEqual(service.get_run(min(runs))["request"], original_run["request"])
                 for button in ("#sender_send", "#sender_cancel_run"):
                     widget = pane.query_one(button)  # Border and one space each side: no lopsided padding.
                     self.assertEqual(widget.region.width, len(str(widget.label)) + 4)
@@ -317,6 +324,13 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.click("#sender_run_newer")
                 await pilot.pause(0.6)
                 self.assertIsNone(pane._run_id)  # Back on the latest run, which later sends keep following.
+                self.assertEqual(json.loads(area.text)["intent"]["action"], "edited")
+                await pilot.click("#sender_run_older")
+                await settle(pilot, lambda: pane._editor_run_id == min(runs)
+                             and not pane.query_one("#sender_send").disabled)
+                await pilot.click("#sender_send")
+                await settle(pilot, lambda: len(pane._run_ids) == 3 and pane._editor_run_id is None)
+                self.assertEqual(service.get_run(pane._run_ids[0])["request"], original_run["request"])
 
     async def test_the_only_device_is_selected_and_a_rescan_keeps_the_choice(self):
         with tempfile.TemporaryDirectory() as directory:

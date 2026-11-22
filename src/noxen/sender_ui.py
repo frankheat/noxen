@@ -146,7 +146,8 @@ class SenderPane(Vertical):
         self._checking_activity_send = False
         self._run_ids = []      # Runs of the selected request, newest first.
         self._run_id = None     # None follows the latest run.
-        self._editor_key = None       # What the JSON editor shows: (request id, revision) or ("run", id).
+        self._editor_key = None       # Request id and revision used for saving.
+        self._editor_run_id = None    # Historical run used to populate the editor.
         self._editor_baseline = ""    # Its text as saved, to tell edits apart.
         self._drafts = {}             # Unsaved text of requests that are not on screen.
         self._saved_draft = None      # (full text, validation error), for the current editor revision.
@@ -228,6 +229,7 @@ class SenderPane(Vertical):
         self.query_one("#sender_send", Button).disabled = (
             self._checking_activity_send or status["state"] != "ready" or status["active_run"] is not None
             or row is None or not row["request"] or self._editor_key != (row["id"], row["revision"])
+            or self._editor_run_id != self._run_id
             or self.editor.area.read_only or self.editor_needs_save()
         )
 
@@ -257,7 +259,7 @@ class SenderPane(Vertical):
         self._retry_save = isinstance(error, (OSError, sqlite3.Error))
         self.editor.say(f"Could not save draft: {error}", error=True)
 
-    def save_editor(self, quiet=False):
+    def save_editor(self, quiet=False, *, for_send=False):
         """Save the JSON on screen. Returns the saved request, or None if it is not valid.
 
         `quiet` is the automatic save: text that is not valid yet is normal
@@ -269,7 +271,8 @@ class SenderPane(Vertical):
             return None  # The editor has not caught up with the selected tab yet: nothing here belongs to it.
         text = area.full_text()
         db = self.service.db
-        if text == self._editor_baseline:
+        if text == self._editor_baseline and (not for_send or self._editor_run_id is None
+                                             or text == request_text(row["request"])):
             if self._saved_draft is not None:
                 try:
                     db.clear_sender_draft(*key)
@@ -293,6 +296,7 @@ class SenderPane(Vertical):
                 self._editor_write_failed(write_error)
             else:
                 self._saved_draft = (text, str(error))
+                self._drafts.pop(row["id"], None)
                 self.show_editor_state()
             self.update_send_button()
             if not quiet:
@@ -304,6 +308,7 @@ class SenderPane(Vertical):
             self._editor_write_failed(error)
             return None
         self._saved_draft = None  # Cleared in the same transaction as the valid revision.
+        self._drafts.pop(row["id"], None)
         self._editor_baseline = text
         self._editor_key = (saved["id"], saved["revision"])
         self._requests = [dict(r, revision=saved["revision"], request=saved["request"]) if r["id"] == saved["id"] else r
@@ -316,22 +321,27 @@ class SenderPane(Vertical):
         """Put the right text in the editor without discarding what the user is typing."""
         area = self.editor.area
         if row is None:
+            self._editor_run_id = None
             self._editor_key, self._editor_baseline = None, ""
             self._saved_draft = None
             area.read_only = True
             area.load("")
             self.editor.say("No requests yet. Press + to create one.")
         elif run is not None and self._run_id is not None:
-            key = ("run", run["id"])
-            if key != self._editor_key:
+            key = (row["id"], row["revision"])
+            if run["id"] != self._editor_run_id or key != self._editor_key:
                 self.stash_draft()
-                self._editor_key, self._editor_baseline = key, ""
+                self._editor_run_id = run["id"]
+                self._editor_key = key
+                self._editor_baseline = sender_json.format_request(run["request"])
                 self._saved_draft = None
-                area.read_only = True
-                area.load(sender_json.format_request(run["request"]))
-            self.editor.say(f"As sent in run #{run['id']} · read only")
+                area.read_only = False
+                area.load(self._editor_baseline)
         else:
             key = (row["id"], row["revision"])
+            if self._editor_run_id is not None:
+                self._editor_run_id = None
+                self._editor_key = None
             if key != self._editor_key and self._editor_key is not None and self._editor_key[0] == row["id"]:
                 # Changed elsewhere (e.g. over MCP): show that. Text here that was never valid is dropped.
                 self._drafts.pop(row["id"], None)
@@ -359,7 +369,7 @@ class SenderPane(Vertical):
     def stash_draft(self):
         """Keep what the automatic save cannot: text that is not valid yet, and which blocks are folded."""
         key, area = self._editor_key, self.editor.area
-        if key is not None and key[0] != "run" and (self.editor_dirty() or area.folds):
+        if key is not None and self._editor_run_id is None and (self.editor_dirty() or area.folds):
             self._drafts[key[0]] = (area.text, dict(area.folds), key[1], self._editor_baseline)
 
     def select_request(self, request_id):
@@ -439,9 +449,12 @@ class SenderPane(Vertical):
         row = self.selected()
         if row is None or (run is not None and run.get("request_id") != row["id"]):
             run = None
-        # An earlier run is shown with the request exactly as it was sent.
+        # Start the editor from the request that was sent in the selected run.
         self.show_request_json(row, run)
-        same_revision = run is not None and (self._run_id is not None or run["revision"] == row["revision"])
+        same_revision = run is not None and (
+            self._editor_baseline == sender_json.format_request(run["request"]) if self._run_id is not None
+            else run["revision"] == row["revision"]
+        )
         self._result_record = (row, run, len(run_ids) - position, len(run_ids), same_revision)
         self.render_run_result()
         # A stale signature means the selection moved while this ran; read again.
@@ -716,7 +729,9 @@ class SenderPane(Vertical):
                 self._result_view = "summary" if self._result_view == view else view
                 self.render_run_result()
             elif button == "sender_send":
-                row = self.save_editor()  # Send what is on screen.
+                if self._editor_run_id != self._run_id:
+                    return
+                row = self.save_editor(for_send=True)  # Send what is on screen.
                 if row is None or self._checking_activity_send:
                     return
                 if row["request"] == {}:
