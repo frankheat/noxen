@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import unicodedata
 import json
+from noxen.filters import FilterManager, provider_filter_context
 
 from rich.markup import escape
 from rich.text import Text
@@ -107,15 +108,16 @@ def decode_intent_flags(raw_flags):
 
 
 def entry_to_filter_context(entry: dict) -> dict:
+    if provider := entry.get("provider"):
+        return provider_filter_context(provider, history=True)
     info = entry.get("intent", {}) or {}
-    provider = entry.get("provider") or {}
-    provider_args = provider.get("sentArguments") or provider.get("arguments") or {}
     return {
+        "event": "intent",
         "class": str(entry.get("class") or ""),
         "method": str(entry.get("method") or ""),
         "action": str(info.get("action") or ""),
         "component": str(info.get("component") or ""),
-        "data": str(provider_args.get("uri") or info.get("data") or ""),
+        "data": str(info.get("data") or ""),
         "flags": "" if (entry.get("attackSurface") or {}).get("intentPresent") is False else str(info.get("flags") or "0"),
         "category": info.get("categories", []),
     }
@@ -124,6 +126,7 @@ def entry_to_filter_context(entry: dict) -> dict:
 def payload_to_filter_context(payload: dict) -> dict:
     info = payload.get("infoIntent", {}) or {}
     return {
+        "event": "intent",
         "class": str(payload.get("className", "")),
         "method": str(payload.get("methodName", "")),
         "action": str(info.get("action") or ""),
@@ -416,11 +419,14 @@ def filter_sort_history_entries(
     sort_reverse: bool = False,
     search_index: dict[int, str] | None = None,
 ) -> list[dict]:
-    filtered = []
-    for entry in list(entries):
-        if not filter_manager.is_visible(entry_to_filter_context(entry)):
-            continue
-        filtered.append(entry)
+    ignore, focus = filter_manager.get_active()
+    rules = focus or ignore
+    filtered = list(entries)
+    if rules:
+        filtered = [
+            entry for entry in filtered
+            if FilterManager.check_match(entry_to_filter_context(entry), rules) == bool(focus)
+        ]
 
     if search_text:
         filtered = [

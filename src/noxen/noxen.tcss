@@ -240,30 +240,6 @@ TabPane {
     margin: 0;
 }
 #monitor_pane #monitor_columns { margin-left: 1; }
-#intercept_cmd_output {
-    height: 7;
-    margin: 0 1;
-    background: $background;
-}
-#intercept_input_wrapper {
-    height: 4;
-    padding: 0 1 0 1;
-}
-#intercept_input_bar {
-    height: 3;
-    border: round $warning;
-    padding: 0 1;
-    align: left middle;
-    background: $background;
-}
-#intercept_command_input, #history_command_input { background: transparent; }
-#intercept_prompt_char {
-    width: auto;
-    height: 100%;
-    content-align: left middle;
-    margin-right: 1;
-    color: $warning;
-}
 Input {
     border: none;
     width: 1fr;
@@ -275,20 +251,6 @@ Input:focus {
 Input:light > .input--placeholder,
 Input:light > .input--suggestion {
     color: $foreground-muted;
-}
-#intercept_input_bar.intercepted {
-    border: round $error;
-}
-#intercept_input_bar.intercepted #intercept_prompt_char {
-    color: $error;
-}
-#intercept_cmd_suggestions {
-    display: none;
-    height: auto;
-    max-height: 8;
-    margin: 0 1;
-    border: none;
-    background: $surface;
 }
 DataTable:focus,
 DataTable:focus > .datatable--header,
@@ -322,42 +284,6 @@ SelectOverlay {
 OptionList > .option-list--option-highlighted {
     background: $primary;
     color: $button-color-foreground;
-}
-#history_bar_container {
-    display: none;
-    height: auto;
-    background: $background;
-}
-#history_cmd_output {
-    height: 4;
-    margin: 0 1;
-    background: $background;
-}
-#history_cmd_suggestions {
-    display: none;
-    height: auto;
-    max-height: 8;
-    margin: 0 1;
-    border: none;
-    background: $surface;
-}
-#history_input_wrapper {
-    height: 4;
-    padding: 0 1 0 1;
-}
-#history_input_bar {
-    height: 3;
-    border: round $warning;
-    padding: 0 1;
-    align: left middle;
-    background: $background;
-}
-#history_prompt_char {
-    width: auto;
-    height: 100%;
-    content-align: left middle;
-    margin-right: 1;
-    color: $warning;
 }
 #settings_pane {
     padding: 1 2;

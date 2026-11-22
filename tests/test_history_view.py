@@ -152,7 +152,7 @@ class HistoryViewTests(IsolatedAppTestCase):
             self.assertEqual(app.db.load_history_column_widths(), {'action': 17})
             self.assertEqual(len(app.db._load_all()), 1)
 
-    async def test_resize_panel_theme_and_command_bar_preserve_selection_and_clicks(self):
+    async def test_resize_panel_and_theme_preserve_selection_and_clicks(self):
         app = self.make_app(60)
         async with app.run_test(size=(120, 45)) as pilot:
             table = await self.open_history(app, pilot)
@@ -163,7 +163,6 @@ class HistoryViewTests(IsolatedAppTestCase):
                 app.theme = theme
                 app._refresh_theme_content()
                 app._adjust_history_split(2)
-                app._toggle_history_command_bar()
                 await pilot.resize_terminal(100, 35)
                 await pilot.pause()
                 self.assertEqual(table.selected_id, selected)

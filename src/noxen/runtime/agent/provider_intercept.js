@@ -143,7 +143,14 @@ function createProviderInterceptor(Java, emit, options) {
       try { captured = options.inspect(() => capture(args, record.fields)); }
       catch (_) { captured = { values: {}, editable: [] }; }
       id = 'provider-' + Process.id + '-' + (++serial);
-      owned = options.claim({ class: record.className, method: record.name, data: captured.values.uri || '', flags: '', category: [] });
+      const uri = captured.values.uri || '';
+      const authority = (captured.values.authority || /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(uri)?.[1] || '')
+        .replace(/^\d+@/, '');
+      const filterMatch = options.filter ? options.filter({
+        event: 'provider', direction: record.direction, class: record.className, method: record.name,
+        data: uri, uri, authority, flags: '', category: [],
+      }) : null;
+      owned = filterMatch !== false && options.claim();
       const event = { noxenEvent: 'provider_request', ...options.stamp(), id,
         direction: record.direction, class: record.className, method: record.name,
         types: record.types, arguments: captured.values,
@@ -151,8 +158,10 @@ function createProviderInterceptor(Java, emit, options) {
         nullArguments: record.types.map((_, index) => index).filter(index => args[index] == null),
         opaqueArguments: record.types.map((type, i) => ({ index: i, type }))
           .filter(x => !captured.editable.some(f => f.index === x.index)),
-        state: owned ? 'held' : 'forwarded', phase: 'request', decisionId: owned ? id : null };
-      if (!owned) event.decision = options.blocking && !options.blocking() ? 'forwarded' : 'forwarded_busy';
+        state: owned ? 'held' : 'forwarded', phase: 'request', decisionId: owned ? id : null,
+        filterChecked: filterMatch !== null };
+      if (!owned) event.decision = filterMatch === false || (options.blocking && !options.blocking())
+        ? 'forwarded' : 'forwarded_busy';
       if (record.direction === 'incoming')
         event.callingUid = Java.use('android.os.Binder').getCallingUid();
       if (owned) pending = { id, event, args: Array.from(args), fields: captured.editable, mode: null };

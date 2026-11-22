@@ -122,7 +122,7 @@ class ThemeRuntimeTests(IsolatedAppTestCase):
                         "#history_search", "#history_table", "#history_detail", "#tab_history",
                         "#monitor_search", "#monitor_events", "#monitor_profiles",
                         "#monitor_hooks", "#monitor_detail", "#log_verbose_group", "#log_output",
-                        "#history_input_bar", "#intercept_input_bar", "#info_perm_search",
+                        "#info_perm_search",
                         "#info_perm_table", "#info_comp_table", "#info_comp_detail", "#tab_info",
                         "Footer",
                     ):

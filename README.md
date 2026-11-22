@@ -75,8 +75,7 @@ reopens one, and `noxen --new-project session` creates a named one.
 The full documentation is at **https://frankheat.github.io/noxen-docs/**:
 
 - [Quick start](https://frankheat.github.io/noxen-docs/quick-start/)
-- [Commands](https://frankheat.github.io/noxen-docs/commands/) and
-  [keyboard shortcuts](https://frankheat.github.io/noxen-docs/keyboard-shortcuts/)
+- [Keyboard shortcuts](https://frankheat.github.io/noxen-docs/keyboard-shortcuts/)
 - [Troubleshooting](https://frankheat.github.io/noxen-docs/troubleshooting/)
 - [Content providers](https://frankheat.github.io/noxen-docs/providers/)
 

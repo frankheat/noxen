@@ -2554,7 +2554,20 @@
               captured = { values: {}, editable: [] };
             }
             id = "provider-" + Process.id + "-" + ++serial;
-            owned = options.claim({ class: record.className, method: record.name, data: captured.values.uri || "", flags: "", category: [] });
+            const uri = captured.values.uri || "";
+            const authority = (captured.values.authority || /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(uri)?.[1] || "").replace(/^\d+@/, "");
+            const filterMatch = options.filter ? options.filter({
+              event: "provider",
+              direction: record.direction,
+              class: record.className,
+              method: record.name,
+              data: uri,
+              uri,
+              authority,
+              flags: "",
+              category: []
+            }) : null;
+            owned = filterMatch !== false && options.claim();
             const event = {
               noxenEvent: "provider_request",
               ...options.stamp(),
@@ -2569,9 +2582,10 @@
               opaqueArguments: record.types.map((type, i) => ({ index: i, type })).filter((x) => !captured.editable.some((f) => f.index === x.index)),
               state: owned ? "held" : "forwarded",
               phase: "request",
-              decisionId: owned ? id : null
+              decisionId: owned ? id : null,
+              filterChecked: filterMatch !== null
             };
-            if (!owned) event.decision = options.blocking && !options.blocking() ? "forwarded" : "forwarded_busy";
+            if (!owned) event.decision = filterMatch === false || options.blocking && !options.blocking() ? "forwarded" : "forwarded_busy";
             if (record.direction === "incoming")
               event.callingUid = Java2.use("android.os.Binder").getCallingUid();
             if (owned) pending = { id, event, args: Array.from(args), fields: captured.editable, mode: null };
@@ -15355,6 +15369,42 @@ std_string_c_str (StdString * self)
   var ObjectJava = null;
   var UriJava = null;
   var blockEnabled = true;
+  var interceptFilters = null;
+  function interceptGlob(value, pattern) {
+    const chars = Array.from(value), parts = Array.from(pattern);
+    let i = 0, j = 0, star = -1, consumed = 0;
+    while (i < chars.length) {
+      if (parts[j] === "*") {
+        star = j++;
+        consumed = i;
+      } else if (parts[j] === "?" || parts[j] === chars[i]) {
+        i++;
+        j++;
+      } else if (star >= 0) {
+        j = star + 1;
+        i = ++consumed;
+      } else {
+        return false;
+      }
+    }
+    while (parts[j] === "*") j++;
+    return j === parts.length;
+  }
+  function matchesInterceptFilters(context) {
+    if (interceptFilters === null) return null;
+    const { focus, rules } = interceptFilters;
+    if (rules.length && Object.values(context).some((value) => Array.isArray(value) ? value.some((item) => item.length > 4096) : value.length > 4096)) return null;
+    const matched = rules.some((rule) => Object.entries(rule).every(([key, pattern]) => {
+      if (!Object.prototype.hasOwnProperty.call(context, key)) return false;
+      const value = context[key];
+      if (pattern === "set" || pattern === "unset" || key === "component" && (pattern === "explicit" || pattern === "implicit")) {
+        const present = Array.isArray(value) ? value.length > 0 : !!value;
+        return present === (pattern === "set" || pattern === "explicit");
+      }
+      return Array.isArray(value) ? value.some((item) => interceptGlob(item, pattern)) : interceptGlob(value, pattern);
+    }));
+    return focus ? matched : !matched;
+  }
   var waiting = false;
   var activeDecisionId = null;
   var activeIntentPresent = false;
@@ -16566,7 +16616,18 @@ std_string_c_str (StdString * self)
     var interrupted = false;
     var released = false;
     try {
-      var willBlock = blockEnabled && !waiting;
+      var infoIntent = inspectIntent(() => dumpIntent(intent));
+      const filterMatch = matchesInterceptFilters({
+        event: "intent",
+        class: className,
+        method: methodName,
+        action: infoIntent.action || "",
+        component: infoIntent.component || "",
+        data: infoIntent.data || "",
+        flags: intent === null ? "" : String(infoIntent.flags || 0),
+        category: infoIntent.categories || []
+      });
+      var willBlock = filterMatch !== false && blockEnabled && !waiting;
       if (willBlock) {
         waiting = true;
         isBlocking = true;
@@ -16578,7 +16639,6 @@ std_string_c_str (StdString * self)
         resumeRequested = false;
         modQueue = [];
       }
-      var infoIntent = inspectIntent(() => dumpIntent(intent));
       send({
         ...stamp,
         "noxenEvent": "intent",
@@ -16592,7 +16652,8 @@ std_string_c_str (StdString * self)
         "decision": {
           "required": willBlock,
           "id": decisionId,
-          "reason": willBlock ? null : blockEnabled ? "busy" : "intercept_off"
+          "reason": willBlock ? null : !blockEnabled ? "intercept_off" : filterMatch === false ? "filtered" : "busy",
+          "filterChecked": filterMatch !== null
         }
       });
       if (!willBlock) return false;
@@ -16818,7 +16879,8 @@ std_string_c_str (StdString * self)
           begin: beginHold,
           end: endHold,
           blocking: () => blockEnabled,
-          claim: (context) => {
+          filter: matchesInterceptFilters,
+          claim: () => {
             if (!blockEnabled || waiting) return false;
             waiting = true;
             return true;
@@ -16829,6 +16891,10 @@ std_string_c_str (StdString * self)
         });
       }
       return providerInterceptor.configure(outgoing, incoming, previews);
+    },
+    setInterceptFilters: function(rules) {
+      interceptFilters = rules;
+      return true;
     },
     setCursorPreviews: function(enabled) {
       if (providerInterceptor === null) return false;

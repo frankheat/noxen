@@ -2,6 +2,7 @@ import copy
 import logging
 import os
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -17,32 +18,16 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import (
     Button, DataTable, Input, Label,
-    OptionList, RichLog, Rule, Select, Static, Switch, TabbedContent, TabPane,
+    RichLog, Rule, Select, Static, Switch, TabbedContent, TabPane,
 )
 from textual.binding import Binding
 
 from rich.text import Text
 
 from noxen.commands import (
-    CommandSuggester,
-    HELP_MENU,
-    HELP_MENU_HISTORY,
-    HISTORY_COMPLETIONS,
-    INTERCEPT_COMPLETIONS,
-    completion_fill_from_prompt,
-    format_completion_option,
-    matching_completions,
-    parse_clear_command,
     parse_command,
-    parse_export_command,
-    parse_filter_command,
     parse_intent_command,
     parse_intercept_command,
-    parse_save_command,
-    parse_search_command,
-    parse_stack_command,
-    parse_theme_command,
-    resolve_submitted_command,
 )
 from noxen.app_info import (
     COMPONENT_COLUMNS,
@@ -60,12 +45,7 @@ from noxen.agent_loader import ExtraScriptError, HookConfigError, load_extra_scr
 from noxen.db import ProjectDB
 from noxen.mcp_service import MCPService
 from noxen.mcp_ui import MCPPane
-from noxen.exporting import (
-    history_entries_label,
-    write_filter_export,
-    write_history_export,
-)
-from noxen.filters import FilterManager
+from noxen.filters import FilterManager, provider_filter_context
 from noxen.frida_devices import scan_devices
 from noxen.frida_session import FridaSession, SessionConfig
 from noxen.history_columns import normalize_history_column_widths
@@ -96,7 +76,6 @@ from noxen.modals import (
     ColumnSelectModal,
     CrashesModal,
     FileBrowserModal,
-    HelpModal,
     FilterModal,
     ModalButton,
     StackModal,
@@ -130,9 +109,6 @@ LOGGER = logging.getLogger(__name__)
 
 MIN_PANEL_HEIGHT = 3
 MIN_HISTORY_DETAIL_HEIGHT = 3
-MAX_COMMAND_OUTPUT_HEIGHT = 20
-INTERCEPT_COMMAND_OUTPUT_HEIGHT = 7
-HISTORY_COMMAND_OUTPUT_HEIGHT = 4
 INTERCEPT_ACTION_BUTTON_CLASSES = (
     "intercept-on",
     "intercept-off",
@@ -307,7 +283,6 @@ class NoxenApp(App):
         Binding("alt+down", "resize_panel_down", "▼", show=True),
         Binding("alt+left", "sender_divider(-1)", "◀", show=True),
         Binding("alt+right", "sender_divider(1)", "▶", show=True),
-        Binding("ctrl+b", "toggle_command_bar", "Command area", show=True, priority=True),
         Binding("ctrl+g", "info_refresh", "Refresh", show=True, priority=True),
         Binding("ctrl+r", "send_to_sender", "To Sender", show=True, priority=True),
         Binding("ctrl+r", "duplicate_sender_request", "Duplicate", show=True, priority=True),
@@ -365,10 +340,6 @@ class NoxenApp(App):
         self._startup_messages = []
         self._history_search_text = ""
         self._history_table_height: int | None = None
-        self._history_cmd_height = HISTORY_COMMAND_OUTPUT_HEIGHT
-        self._intercept_cmd_height = INTERCEPT_COMMAND_OUTPUT_HEIGHT
-        self._intercept_command_bar_visible = self._settings["intercept_command_bar"]
-        self._history_command_bar_visible = self._settings["history_command_bar"]
         self._home_devices = []
         self._connect_scan_generation = 0
         self._target_scan_generation = 0
@@ -656,7 +627,7 @@ class NoxenApp(App):
         self.query_one("#btn_edit", Button).display = True
         self.refresh_bindings()
         try:
-            still_intercepted = "intercepted" in self.query_one("#intercept_input_bar").classes
+            still_intercepted = self._intent_blocked
             self.query_one("#btn_edit").disabled = not still_intercepted or self._current_intent_is_null()
             if still_intercepted:
                 self.query_one("#btn_forward", Button).disabled = False
@@ -922,6 +893,7 @@ class NoxenApp(App):
                 self.filter_manager,
                 on_filters_changed=self._on_intercept_filters_changed,
                 title="Intercept Filters",
+                copy_to=("History", lambda item: self._copy_filter(item, "History")),
             ))
             return
         elif event.button.id == "btn_history_filters":
@@ -929,6 +901,7 @@ class NoxenApp(App):
                 self._history_filter_manager,
                 on_filters_changed=self._on_history_filters_changed,
                 title="History Filters",
+                copy_to=("Intercept", lambda item: self._copy_filter(item, "Intercept")),
             ))
             return
         elif event.button.id == "btn_columns":
@@ -1000,7 +973,6 @@ class NoxenApp(App):
                 event.button.disabled = True
                 self._apply_cursor_preview_setting(session, settings["cursor_previews"], event.button)
             return
-        self.query_one("#intercept_command_input", Input).focus()
 
     @work()
     async def _apply_cursor_preview_setting(self, session, enabled, button: Button):
@@ -1042,54 +1014,6 @@ class NoxenApp(App):
         for class_name in classes:
             button.add_class(class_name)
 
-    def _set_widget_display(self, selector: str, visible: bool) -> None:
-        try:
-            self.query_one(selector).display = visible
-        except Exception:
-            LOGGER.debug("Unable to set display for %s", selector, exc_info=True)
-
-    def _save_command_bar_settings(self) -> None:
-        self._settings["intercept_command_bar"] = self._intercept_command_bar_visible
-        self._settings["history_command_bar"] = self._history_command_bar_visible
-        try:
-            save_settings(self._settings)
-        except OSError:
-            LOGGER.warning("Unable to save command bar settings", exc_info=True)
-            self.notify("Unable to save command bar settings", severity="warning", timeout=3)
-
-    def _apply_intercept_command_bar_visibility(self) -> None:
-        visible = self._intercept_command_bar_visible
-        self._set_widget_display("#intercept_cmd_output", visible)
-        self._set_widget_display("#intercept_input_wrapper", visible)
-        self._set_widget_display("#intercept_cmd_suggestions", False)
-        if visible:
-            self.call_after_refresh(self._clamp_intercept_command_output_to_available_space)
-        elif getattr(self.focused, "id", None) in ("intercept_command_input", "intercept_cmd_output"):
-            self._focus_intercept_main_panel()
-
-    def _apply_history_command_bar_visibility(self) -> None:
-        visible = self._history_command_bar_visible and self._active_tab == "tab_history"
-        self._set_widget_display("#history_bar_container", visible)
-        self._set_widget_display("#history_cmd_suggestions", False)
-        if self._active_tab == "tab_history":
-            self.call_after_refresh(self._clamp_history_table_to_available_space)
-            if not visible and getattr(self.focused, "id", None) in ("history_command_input", "history_cmd_output"):
-                self._focus_history_main_panel()
-
-    def _apply_command_bar_visibility(self) -> None:
-        self._apply_intercept_command_bar_visibility()
-        self._apply_history_command_bar_visibility()
-
-    def _toggle_intercept_command_bar(self) -> None:
-        self._intercept_command_bar_visible = not self._intercept_command_bar_visible
-        self._apply_intercept_command_bar_visibility()
-        self._save_command_bar_settings()
-
-    def _toggle_history_command_bar(self) -> None:
-        self._history_command_bar_visible = not self._history_command_bar_visible
-        self._apply_history_command_bar_visibility()
-        self._save_command_bar_settings()
-
     def _focus_intercept_main_panel(self) -> None:
         try:
             self.query_one("#intercept_output", RichLog).focus()
@@ -1101,15 +1025,6 @@ class NoxenApp(App):
             self.query_one("#history_table", HistoryTable).focus()
         except Exception:
             LOGGER.debug("Unable to focus history table", exc_info=True)
-
-    def _focus_intercept_default(self) -> None:
-        try:
-            if self._intercept_command_bar_visible:
-                self.query_one("#intercept_command_input", Input).focus()
-            else:
-                self._focus_intercept_main_panel()
-        except Exception:
-            LOGGER.debug("Unable to focus intercept default widget", exc_info=True)
 
     def compose(self) -> ComposeResult:
         yield Horizontal(Label("", id="session_info"), id="session_bar")
@@ -1195,21 +1110,6 @@ class NoxenApp(App):
                 yield RichLog(id="intercept_output", markup=True, highlight=False, auto_scroll=False)
                 yield JsonRequestEditor(id="edit_form", root="intent", escape_leaves=False)
                 yield Rule(classes="section_separator")
-                yield RichLog(id="intercept_cmd_output", markup=True, highlight=False)
-                yield OptionList(id="intercept_cmd_suggestions")
-                yield Vertical(
-                    Horizontal(
-                        Label("❯", id="intercept_prompt_char"),
-                        Input(
-                            id="intercept_command_input",
-                            placeholder="Intent command, or / for app commands",
-                            suggester=CommandSuggester(INTERCEPT_COMPLETIONS),
-                            select_on_focus=False,
-                        ),
-                        id="intercept_input_bar"
-                    ),
-                    id="intercept_input_wrapper"
-                )
             with TabPane(" History ", id="tab_history"):
                 with Horizontal(id="history_header"):
                     yield ModalButton("Filters", id="btn_history_filters")
@@ -1304,22 +1204,6 @@ class NoxenApp(App):
                         )
                     yield Rule(classes="section_separator")
                     yield Button("Save", id="settings_save", classes="confirm")
-        with Vertical(id="history_bar_container"):
-            yield RichLog(id="history_cmd_output", markup=True, highlight=False)
-            yield OptionList(id="history_cmd_suggestions")
-            yield Vertical(
-                Horizontal(
-                    Label("❯", id="history_prompt_char"),
-                    Input(
-                        id="history_command_input",
-                        placeholder="Type / for history commands",
-                        suggester=CommandSuggester(HISTORY_COMPLETIONS, use_cache=False),
-                        select_on_focus=False,
-                    ),
-                    id="history_input_bar",
-                ),
-                id="history_input_wrapper",
-            )
         with Horizontal(id="app_footer"):
             yield ShortcutFooter()
             yield Label("", id="filter_count_label")
@@ -1340,7 +1224,6 @@ class NoxenApp(App):
             "btn_columns",
         ):
             self.query_one(f"#{btn_id}", Button).active_effect_duration = 0
-        self._apply_command_bar_visibility()
         self._refresh_history_table()
         self.set_interval(HISTORY_REFRESH_INTERVAL, self._do_history_refresh)
         self.set_interval(0.1, self._provider_tick)
@@ -2088,7 +1971,7 @@ class NoxenApp(App):
             self.call_from_thread(_do)
 
     def write_cmd(self, text: str, notify: bool = False) -> None:
-        self._write_rich("intercept_cmd_output", text, notify)
+        self.write_log(text, notify=True)
 
     def _provider_changed(self, record, connection, history_id, error):
         entry = provider_entry(record, connection)
@@ -2120,9 +2003,12 @@ class NoxenApp(App):
         current = self._current_intercepted_entry or {}
         previous_provider = current.get("provider")
         if record is not None:
-            context = {"class": record.get("class", ""), "method": record.get("method", ""),
-                       "data": record.get("arguments", {}).get("uri", ""), "flags": "", "category": []}
-            if not self.filter_manager.is_visible(context) or not self._intercept_mode:
+            key = record["id"]
+            if key not in service.filter_admissions:
+                service.filter_admissions[key] = record.get("filterChecked") is True or self.filter_manager.is_visible(
+                    provider_filter_context(record)
+                )
+            if not service.filter_admissions[key] or not self._intercept_mode:
                 if not service.busy:
                     self._pass_provider(service.connection, record.get("decisionId"))
                 return
@@ -2305,10 +2191,22 @@ class NoxenApp(App):
         except Exception:
             pass
 
-    def _on_intercept_filters_changed(self):
+    def _on_intercept_filters_changed(self, filters=None):
         """Save intercept filters to DB."""
-        self.db.save_intercept_filters(self.filter_manager.export())
+        self.db.save_intercept_filters(self.filter_manager.export() if filters is None else filters)
+        if filters is not None:
+            self.filter_manager.replace_all(filters)
         self._update_filter_count()
+        if self.frida_session is not None:
+            self._sync_intercept_filters(self.frida_session)
+
+    @work()
+    async def _sync_intercept_filters(self, session):
+        try:
+            await sender_io(session.sync_intercept_filters)
+        except Exception as error:
+            if session is self.frida_session:
+                self.write_log(log_warning(f"Could not sync Intercept filters: {error}", "filters"), notify=True)
 
     def _on_columns_changed(self, visible: set):
         """Save visible columns to DB and refresh table."""
@@ -2322,11 +2220,29 @@ class NoxenApp(App):
         self.db.save_history_column_widths(self._history_column_widths)
         self._refresh_history_table()
 
-    def _on_history_filters_changed(self):
+    def _on_history_filters_changed(self, filters=None):
         """Save history filters to DB then refresh the table."""
-        self.db.save_history_filters(self._history_filter_manager.export())
+        self.db.save_history_filters(self._history_filter_manager.export() if filters is None else filters)
+        if filters is not None:
+            self._history_filter_manager.replace_all(filters)
         self._refresh_history_table()
         self._update_filter_count()
+
+    def _copy_filter(self, item, scope):
+        manager, persist = (
+            (self.filter_manager, self._on_intercept_filters_changed) if scope == "Intercept"
+            else (self._history_filter_manager, self._on_history_filters_changed)
+        )
+        draft = FilterManager.from_saved(manager.export())
+        message = draft.add(item["type"], [f"{key}={value}" for key, value in item["rule"].items()],
+                            enabled=item["enabled"])
+        if message.startswith(("[red]", "[yellow]")):
+            return message
+        try:
+            persist(draft.export())
+        except (OSError, sqlite3.Error) as error:
+            return Text(f"Could not save filters: {error}", style="red")
+        return f"Copied to {scope}."
 
     def _get_filtered_sorted(self):
         """Return filtered+sorted snapshot of all intents."""
@@ -2508,13 +2424,12 @@ class NoxenApp(App):
             return
         self._active_tab = pane_id
         self.refresh_bindings()
-        self._apply_history_command_bar_visibility()
         if pane_id == "tab_intercept":
             try:
                 self.query_one("#main_tabs", TabbedContent).get_tab("tab_intercept").remove_class("intercepted")
             except Exception:
                 pass
-            self._focus_intercept_default()
+            self._focus_intercept_main_panel()
         elif pane_id == "tab_history":
             self._do_history_refresh()
             self._focus_history_main_panel()
@@ -2586,11 +2501,6 @@ class NoxenApp(App):
         def _do_update():
             self.mcp_service.interception_changed()
             try:
-                bar = self.query_one("#intercept_input_bar")
-                if is_intercepted:
-                    bar.add_class("intercepted")
-                else:
-                    bar.remove_class("intercepted")
                 fwd = self.query_one("#btn_forward", Button)
                 drp = self.query_one("#btn_drop", Button)
                 edit = self.query_one("#btn_edit", Button)
@@ -2674,15 +2584,11 @@ class NoxenApp(App):
             return self._active_tab == "tab_history" and not self.screen.is_modal
         if action == "clear_log":
             return self._active_tab in ("tab_log", "tab_history") or self._monitor_events_active()
-        if action == "toggle_command_bar":
-            return self._active_tab in ("tab_history", "tab_intercept")
         if action in ("sender_divider", "duplicate_sender_request"):
             return self._active_tab == "tab_sender" and not self.screen.is_modal
         if action in ("resize_panel_up", "resize_panel_down"):
             if self._active_tab == "tab_sender":
                 return False
-            if self._active_tab == "tab_intercept":
-                return True if self._intercept_command_bar_visible else None
             if self._active_tab == "tab_info":
                 return bool(
                     self._app_info
@@ -2696,8 +2602,6 @@ class NoxenApp(App):
     def on_resize(self, _event: events.Resize) -> None:
         if self._active_tab == "tab_history":
             self.call_after_refresh(self._clamp_history_table_to_available_space)
-        if self._active_tab == "tab_intercept" and self._intercept_command_bar_visible:
-            self.call_after_refresh(self._clamp_intercept_command_output_to_available_space)
         if self._active_tab == "tab_info" and self.check_action("resize_panel_up", ()):
             self.call_after_refresh(self._clamp_info_component_detail_to_available_space)
 
@@ -2766,52 +2670,6 @@ class NoxenApp(App):
 
     def _clamp_info_component_detail_to_available_space(self) -> None:
         self._adjust_info_component_detail(0)
-
-    def _max_intercept_command_output_height(self) -> int:
-        cmd_height = self._widget_height("#intercept_cmd_output")
-        body_height = self._widget_height("#edit_form" if self._edit_mode else "#intercept_output")
-        dynamic_max = None
-        if cmd_height is not None and body_height is not None:
-            dynamic_max = max_primary_panel_height(cmd_height, body_height, MIN_PANEL_HEIGHT)
-        hard_max = MAX_COMMAND_OUTPUT_HEIGHT
-        if dynamic_max is not None:
-            hard_max = min(hard_max, clamp_height(dynamic_max, MIN_PANEL_HEIGHT))
-        return hard_max
-
-    def _adjust_intercept_cmd(self, delta: int):
-        new_height = clamp_height(
-            self._intercept_cmd_height + delta,
-            MIN_PANEL_HEIGHT,
-            self._max_intercept_command_output_height(),
-        )
-        if self._set_widget_height("#intercept_cmd_output", new_height):
-            self._intercept_cmd_height = new_height
-
-    def _clamp_intercept_command_output_to_available_space(self) -> None:
-        new_height = clamp_height(
-            self._intercept_cmd_height,
-            MIN_PANEL_HEIGHT,
-            self._max_intercept_command_output_height(),
-        )
-        if new_height != self._intercept_cmd_height and self._set_widget_height("#intercept_cmd_output", new_height):
-            self._intercept_cmd_height = new_height
-
-    def _adjust_history_cmd_output_height(self, delta: int):
-        new_height = clamp_height(
-            self._history_cmd_height + delta,
-            MIN_PANEL_HEIGHT,
-            MAX_COMMAND_OUTPUT_HEIGHT,
-        )
-        if self._set_widget_height("#history_cmd_output", new_height):
-            self._history_cmd_height = new_height
-
-    def _focused_in_cmd_area(self) -> bool:
-        fid = getattr(self.focused, "id", None)
-        if fid in ("intercept_command_input", "intercept_cmd_output"):
-            return self._intercept_command_bar_visible
-        if fid in ("history_command_input", "history_cmd_output"):
-            return self._history_command_bar_visible
-        return False
 
     def _info_components_active(self):
         return (
@@ -2911,40 +2769,20 @@ class NoxenApp(App):
         self.query_one(SenderPane).adjust_detail(direction)
 
     def action_resize_panel_up(self):
-        if self._active_tab == "tab_intercept":
-            if not self._intercept_command_bar_visible:
-                return
-            self._adjust_intercept_cmd(1)
-        elif self._active_tab == "tab_history":
-            if self._focused_in_cmd_area():
-                self._adjust_history_cmd_output_height(1)
-            else:
-                self._adjust_history_split(-1)
+        if self._active_tab == "tab_history":
+            self._adjust_history_split(-1)
         elif self._active_tab == "tab_info" and self.check_action("resize_panel_up", ()):
             self._adjust_info_component_detail(1)
         elif self._monitor_events_active():
             self.query_one(MonitorPane).adjust_event_detail(1)
 
     def action_resize_panel_down(self):
-        if self._active_tab == "tab_intercept":
-            if not self._intercept_command_bar_visible:
-                return
-            self._adjust_intercept_cmd(-1)
-        elif self._active_tab == "tab_history":
-            if self._focused_in_cmd_area():
-                self._adjust_history_cmd_output_height(-1)
-            else:
-                self._adjust_history_split(1)
+        if self._active_tab == "tab_history":
+            self._adjust_history_split(1)
         elif self._active_tab == "tab_info" and self.check_action("resize_panel_down", ()):
             self._adjust_info_component_detail(-1)
         elif self._monitor_events_active():
             self.query_one(MonitorPane).adjust_event_detail(-1)
-
-    def action_toggle_command_bar(self):
-        if self._active_tab == "tab_intercept":
-            self._toggle_intercept_command_bar()
-        elif self._active_tab == "tab_history":
-            self._toggle_history_command_bar()
 
     def action_apply_edit(self):
         self._forward_from_edit_mode()
@@ -2973,74 +2811,6 @@ class NoxenApp(App):
                 except Exception:
                     pass
             return
-        if fid not in ("intercept_command_input", "history_command_input"):
-            return
-        ol_id = "intercept_cmd_suggestions" if fid == "intercept_command_input" else "history_cmd_suggestions"
-        try:
-            ol = self.query_one(f"#{ol_id}", OptionList)
-        except Exception:
-            return
-        if not ol.display:
-            return
-
-        if event.key == "down":
-            event.prevent_default()
-            event.stop()
-            count = ol.option_count
-            if count > 0:
-                ol.highlighted = min((ol.highlighted or 0) + 1, count - 1)
-        elif event.key == "up":
-            event.prevent_default()
-            event.stop()
-            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
-        elif event.key == "tab":
-            event.prevent_default()
-            event.stop()
-            self._apply_suggestion_from(ol_id, fid)
-        elif event.key == "escape":
-            event.stop()
-            ol.display = False
-
-    def _get_suggestion_fill(self, ol_id: str) -> str | None:
-        try:
-            ol = self.query_one(f"#{ol_id}", OptionList)
-        except Exception:
-            return None
-        if ol.option_count == 0:
-            return None
-        idx = ol.highlighted if ol.highlighted is not None else 0
-        return completion_fill_from_prompt(ol.get_option_at_index(idx).prompt)
-
-    def _apply_suggestion_from(self, ol_id: str, inp_id: str):
-        try:
-            ol = self.query_one(f"#{ol_id}", OptionList)
-            inp = self.query_one(f"#{inp_id}", Input)
-        except Exception:
-            return
-        fill = self._get_suggestion_fill(ol_id)
-        if fill is None:
-            return
-        inp.value = fill
-        inp.cursor_position = len(inp.value)
-        ol.display = False
-        inp.focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected):
-        ol_id = getattr(event.option_list, "id", None)
-        if ol_id not in ("intercept_cmd_suggestions", "history_cmd_suggestions"):
-            return
-        event.stop()
-        fill = completion_fill_from_prompt(event.option.prompt)
-        inp_id = "intercept_command_input" if ol_id == "intercept_cmd_suggestions" else "history_command_input"
-        try:
-            inp = self.query_one(f"#{inp_id}", Input)
-            ol = self.query_one(f"#{ol_id}", OptionList)
-            inp.value = fill
-            inp.cursor_position = len(fill)
-            ol.display = False
-            inp.focus()
-        except Exception:
-            pass
 
     def on_input_changed(self, event: Input.Changed):
         inp_id = event.input.id
@@ -3055,29 +2825,6 @@ class NoxenApp(App):
         if inp_id == "info_comp_search":
             self._refresh_info_components()
             return
-        if inp_id == "intercept_command_input":
-            ol_id = "intercept_cmd_suggestions"
-            matches = matching_completions(INTERCEPT_COMPLETIONS, text)
-        elif inp_id == "history_command_input":
-            ol_id = "history_cmd_suggestions"
-            matches = matching_completions(HISTORY_COMPLETIONS, text)
-        else:
-            return
-        try:
-            ol = self.query_one(f"#{ol_id}", OptionList)
-        except Exception:
-            return
-        if not text:
-            ol.display = False
-            return
-        ol.clear_options()
-        if not matches:
-            ol.display = False
-            return
-        for template, desc in matches:
-            ol.add_option(format_completion_option(template, desc))
-        ol.highlighted = 0
-        ol.display = True
 
     def on_input_submitted(self, event: Input.Submitted):
         inp_id = getattr(event.input, "id", None)
@@ -3094,221 +2841,6 @@ class NoxenApp(App):
                 self._show_settings_depth_error(True)
             return
 
-        if inp_id == "history_command_input":
-            ol_id = "history_cmd_suggestions"
-            cmd_to_run = event.value.strip()
-            try:
-                ol = self.query_one(f"#{ol_id}", OptionList)
-                if ol.display and ol.option_count > 0:
-                    suggestion = self._get_suggestion_fill(ol_id)
-                    submitted = resolve_submitted_command(event.value, suggestion)
-                    if submitted.should_complete:
-                        self._apply_suggestion_from(ol_id, inp_id)
-                        return
-                    cmd_to_run = submitted.command
-                ol.display = False
-            except Exception:
-                pass
-            event.input.value = ""
-            if not cmd_to_run:
-                return
-            self.process_slash_command_worker(cmd_to_run)
-            return
-
-        ol_id = "intercept_cmd_suggestions"
-        cmd_to_run = event.value.strip()
-        try:
-            ol = self.query_one(f"#{ol_id}", OptionList)
-            if ol.display and ol.option_count > 0:
-                suggestion = self._get_suggestion_fill(ol_id)
-                submitted = resolve_submitted_command(event.value, suggestion)
-                if submitted.should_complete:
-                    self._apply_suggestion_from(ol_id, inp_id)
-                    return
-                cmd_to_run = submitted.command
-            ol.display = False
-        except Exception:
-            pass
-        event.input.value = ""
-        if not cmd_to_run:
-            return
-        self.write_cmd(f"[dim]> {cmd_to_run}[/dim]")
-        self.process_command_worker(cmd_to_run)
-
-    def _write_history_command(self, text: str, log: bool = True) -> None:
-        if log:
-            self.write_log(text)
-        self._write_rich("history_cmd_output", text)
-
-    def _handle_slash_command(self, cmd_base: str, parts: list, write_fn=None, raw_command=None):
-        if write_fn is None:
-            write_fn = self.write_cmd
-
-        if cmd_base == "/export":
-            parsed = parse_export_command(parts)
-            if parsed is None:
-                write_fn("[red]Usage: /export entries | /export filtered entries[/red]")
-                return
-            entries = self._get_filtered_sorted() if parsed.filtered else list(self._all_intents)
-            label = history_entries_label(len(entries), filtered=parsed.filtered)
-            if not entries:
-                write_fn("[dim]No entries to export.[/dim]")
-                return
-            try:
-                result = write_history_export(entries)
-                write_fn(f"[#26a368]Exported {result.item_count} {label} to {result.filename}[/#26a368]")
-            except Exception as e:
-                write_fn(f"[red]Export failed: {e}[/red]")
-
-        elif cmd_base == "/save":
-            parsed = parse_save_command(parts)
-            if parsed is None:
-                write_fn("[red]Usage: /save history filters | /save intercept filters[/red]")
-                return
-            if parsed.target == "history":
-                fm = self._history_filter_manager
-            else:
-                fm = self.filter_manager
-            ignore_list, focus_list = fm.get_active()
-            if not ignore_list and not focus_list:
-                write_fn("[dim]No active filters to save.[/dim]")
-                return
-            try:
-                result = write_filter_export(ignore_list, focus_list, parsed.file_label)
-                write_fn(f"[#26a368]Saved {result.item_count} filter(s) to {result.filename}[/#26a368]")
-            except Exception as e:
-                write_fn(f"[red]Save failed: {e}[/red]")
-
-        elif cmd_base == "/help":
-            menu = HELP_MENU_HISTORY if self._active_tab == "tab_history" else HELP_MENU
-            self.call_from_thread(lambda: self.push_screen(HelpModal(menu)))
-
-        elif cmd_base == "/quit":
-            self.call_from_thread(self.action_quit)
-
-        elif cmd_base == "/theme" and parse_theme_command(parts):
-            self.call_from_thread(self.action_toggle_theme)
-
-        elif cmd_base == "/clear":
-            parsed = parse_clear_command(parts)
-            if parsed and parsed.target == "history":
-                self.call_from_thread(self.action_clear_history)
-            else:
-                write_fn("[red]Usage: /clear history[/red]")
-
-        elif cmd_base == "/search" and self._active_tab == "tab_history":
-            parsed = parse_search_command(raw_command or " ".join(parts))
-            if parsed is None:
-                write_fn("[red]Usage: /search <text> | /search[/red]")
-                return
-            self.call_from_thread(self._set_history_search, parsed.query)
-
-        elif cmd_base == "/stack":
-            self._handle_stack_command(parts, write_fn)
-
-        elif cmd_base == "/filter":
-            self._handle_filter_command(parts, write_fn)
-
-        elif cmd_base == "/intercept":
-            self._handle_intercept_command(parts, write_fn)
-
-        else:
-            write_fn(f"[red]Unknown command: {' '.join(parts)} (Try '/help')[/red]")
-
-    @work(thread=True)
-    def process_slash_command_worker(self, cmd):
-        parsed = parse_command(cmd)
-        if parsed is None:
-            return
-        if parsed.base.startswith("/"):
-            self._handle_slash_command(
-                parsed.base,
-                parsed.parts,
-                write_fn=self._write_history_command,
-                raw_command=parsed.raw,
-            )
-        else:
-            self._write_history_command("[red]History commands must start with '/' (Try '/help')[/red]", log=False)
-
-    def _handle_stack_command(self, parts, write_fn):
-        is_history = self._active_tab == "tab_history"
-        current_show = self._history_show_stack if is_history else self.show_stack
-        current_depth = self._history_stack_depth if is_history else self.stack_depth
-
-        parsed = parse_stack_command(parts)
-        if parsed is None:
-            write_fn("[red]Usage: /stack on | /stack off | /stack <number>[/red]")
-            return
-
-        if parsed.action == "status":
-            state = "ON" if current_show else "OFF"
-            color = "green" if current_show else "yellow"
-            write_fn(f"[{color}]Stack Trace: {state} (Depth: {current_depth})[/{color}]")
-            return
-
-        if parsed.action == "on":
-            current_show = True
-            write_fn(f"[#26a368]Stack Trace: ON (Depth: {current_depth})[/#26a368]")
-        elif parsed.action == "off":
-            current_show = False
-            write_fn("[yellow]Stack Trace: OFF[/yellow]")
-        elif parsed.action == "depth":
-            current_depth = parsed.depth
-            write_fn(f"[#26a368]Stack Depth set to {current_depth}[/#26a368]")
-
-        if is_history:
-            self._history_show_stack = current_show
-            self._history_stack_depth = current_depth
-            self.call_from_thread(self._refresh_history_detail)
-        else:
-            self.show_stack = current_show
-            self.stack_depth = current_depth
-            self.call_from_thread(self._refresh_intercept_display)
-
-    def _set_history_search(self, query: str) -> None:
-        self.query_one("#history_search", Input).value = query
-
-    def _active_filter_manager(self):
-        if self._active_tab == "tab_history":
-            return self._history_filter_manager
-        return self.filter_manager
-
-    def _persist_active_filters(self):
-        if self._active_tab == "tab_history":
-            self.call_from_thread(self._on_history_filters_changed)
-        else:
-            self._on_intercept_filters_changed()
-
-    def _handle_filter_command(self, parts, write_fn):
-        fm = self._active_filter_manager()
-        parsed = parse_filter_command(parts)
-        if parsed is None:
-            if len(parts) >= 2 and parts[1].lower() == "add":
-                write_fn("[red]Usage: /filter add ignore key=value | /filter add focus key=value[/red]")
-                return
-            if len(parts) >= 2 and parts[1].lower() == "remove":
-                write_fn("[red]Usage: /filter remove <id>[/red]")
-                return
-            write_fn("[red]Usage: /filter list | /filter add ignore key=value | /filter add focus key=value | /filter remove <id>[/red]")
-            return
-
-        if parsed.action == "list":
-            write_fn(fm.format())
-            return
-
-        if parsed.action == "add":
-            msg = fm.add(parsed.filter_type, parsed.rule_parts)
-            write_fn(msg)
-            if not msg.startswith("[red]") and not msg.startswith("[yellow]Already exists"):
-                self._persist_active_filters()
-            return
-
-        if parsed.action == "remove":
-            msg = fm.remove(parsed.filter_id)
-            write_fn(msg)
-            if not msg.startswith("[red]"):
-                self._persist_active_filters()
-            return
 
     def _handle_intercept_command(self, parts, write_fn):
         parsed = parse_intercept_command(parts)
@@ -3394,7 +2926,8 @@ class NoxenApp(App):
 
         try:
             if cmd_base.startswith("/"):
-                self._handle_slash_command(cmd_base, parts, raw_command=parsed.raw)
+                if cmd_base == "/intercept":
+                    self._handle_intercept_command(parts, self.write_cmd)
                 return
 
             if parse_intent_command(cmd) is None:

@@ -62,6 +62,28 @@ test('intent events identify protocol and retain explicit blocking/passive decis
   }
 });
 
+test('Intent filters do not acquire the hold slot for a nonmatching call', () => {
+  const { context, messages, exports } = agent();
+  context.getStackTrace = () => [];
+  context.dumpIntent = () => ({ action: 'demo.CHECK', categories: ['demo.test'] });
+  context.lock = { wait() { assert.fail('filtered Intent must not wait'); } };
+  exports.setInterceptFilters({ focus: true, rules: [{ event: 'provider', method: 'query' }] });
+  context.processIntercept('Example', 'onReceive', {}, null, null);
+  const [event] = messages;
+  assert.equal(event.decision.reason, 'filtered');
+  assert.equal(event.decision.required, false);
+  assert.equal(context.waiting, false);
+  assert.equal(messages.length, 1);
+
+  exports.setInterceptFilters({ focus: true, rules: [{ action: 'demo.?????', category: '*.test' }] });
+  context.beginHold = () => 'h1';
+  context.endHold = () => {};
+  context.lock = { wait() { context.resumeRequested = true; } };
+  context.processIntercept('Example', 'onReceive', {}, null, null);
+  assert.equal(messages[1].decision.required, true);
+  assert.equal(messages[1].decision.filterChecked, true);
+});
+
 test('Intent and Monitor share observation order across a device clock adjustment', () => {
   const { context, messages, exports } = agent();
   context.require = () => ({ createMonitor });

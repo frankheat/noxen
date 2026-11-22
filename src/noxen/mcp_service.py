@@ -457,7 +457,6 @@ class MCPService:
 
     async def set_filters(self, scope, filters, expected_revision, expected_connection):
         self.require_control(expected_connection)
-        manager = self._filter_manager(scope)
         if expected_revision != (await self.filters(scope))["revision"]:
             raise OperationError("filters_changed: reread get_filters")
         ids = set()
@@ -469,15 +468,12 @@ class MCPService:
                 raise OperationError("invalid_filter: supply unique positive IDs and valid nonempty rules")
             ids.add(item["id"])
         normalized = FilterManager.from_saved(filters).export()
-        persist = self.app.db.save_intercept_filters if scope == "intercept" else self.app.db.save_history_filters
+        apply = (self.app._on_intercept_filters_changed if scope == "intercept"
+                 else self.app._on_history_filters_changed)
         try:
-            persist(normalized)
+            apply(normalized)
         except (OSError, sqlite3.Error) as error:
             raise OperationError(f"save_failed: {error}") from None
-        manager.replace_all(normalized)
-        if scope == "history":
-            self.app._refresh_history_table()
-        self.app._update_filter_count()
         return await self.filters(scope)
 
     async def stack_settings(self):

@@ -201,6 +201,7 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(
             entry_to_filter_context(entry),
             {
+                "event": "intent",
                 "class": "com.example.MainActivity",
                 "method": "startActivity",
                 "action": "android.intent.action.VIEW",
@@ -225,6 +226,7 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(
             payload_to_filter_context(payload),
             {
+                "event": "intent",
                 "class": "com.example.MainActivity",
                 "method": "startActivity",
                 "action": "android.intent.action.VIEW",

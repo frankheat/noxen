@@ -1,7 +1,9 @@
+import sqlite3
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+from rich.cells import cell_len
 from rich.text import Text
 
 from textual.app import ComposeResult
@@ -20,7 +22,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from noxen.filters import FilterManager
+from noxen.filters import FILTER_CHOICES, FilterManager
 from noxen.history_columns import (
     RESIZABLE_HISTORY_COLUMN_KEYS,
     normalize_column_widths,
@@ -666,21 +668,26 @@ class FilterModal(ModalScreen):
     """
 
     TYPE_OPTIONS = [("ignore", "ignore"), ("focus", "focus")]
-    CONDITION_OPTIONS = [(key, key) for key in sorted(FilterManager.VALID_KEYS)]
-    SELECT_CHROME_WIDTH = 6
+    CONDITION_OPTIONS = [(key.upper() if key == "uri" else key.title(), key)
+                         for key in sorted(FilterManager.VALID_KEYS)]
+    # The open menu uses four border cells, two option padding cells and a scrollbar.
+    SELECT_CHROME_WIDTH = 7
 
-    def __init__(self, filter_manager: FilterManager, on_filters_changed: callable, title: str = "Filters"):
+    def __init__(self, filter_manager: FilterManager, on_filters_changed: callable, title: str = "Filters",
+                 copy_to=None):
         super().__init__()
         self._fm = filter_manager
         self._on_filters_changed = on_filters_changed
         self._title = title
+        self._copy_to = copy_to
+        self._editing_id = None
         self._selected_filter_id: int | None = None
         self._pair_counter = 0
         self._active_pairs: list[int] = []
 
     @classmethod
     def _fit_select_width(cls, select: Select) -> None:
-        width = max(len(label) for label, _ in (*cls.TYPE_OPTIONS, *cls.CONDITION_OPTIONS))
+        width = max(cell_len(label) for label, _ in (*cls.TYPE_OPTIONS, *cls.CONDITION_OPTIONS))
         width += cls.SELECT_CHROME_WIDTH
         select.styles.width = width
         select.styles.min_width = width
@@ -700,9 +707,12 @@ class FilterModal(ModalScreen):
             yield Label(self._title, id="hfm_title")
             yield DataTable(id="hfm_filters_table", cursor_type="row")
             with Horizontal(id="hfm_remove_row"):
+                yield Button("Edit", id="hfm_btn_edit", disabled=True)
                 yield Button("Remove selected", id="hfm_btn_remove", classes="danger", disabled=True)
+                if self._copy_to:
+                    yield Button(f"Copy to {self._copy_to[0]}", id="hfm_btn_copy", disabled=True)
             yield Rule()
-            yield Label("Add filter", classes="hfm_section")
+            yield Label("Add filter", id="hfm_form_title", classes="hfm_section")
             with Horizontal(id="hfm_type_row"):
                 yield Label("Type      :", classes="hfm_field_label")
                 yield type_select
@@ -710,6 +720,9 @@ class FilterModal(ModalScreen):
             with Horizontal(id="hfm_add_ctrl"):
                 yield Button("+ Add condition", id="hfm_btn_add_pair")
                 yield Label("", id="hfm_add_ctrl_spacer")
+                cancel = Button("Cancel", id="hfm_btn_cancel")
+                cancel.display = False
+                yield cancel
                 yield Button("Add Filter", id="hfm_btn_add_filter", classes="confirm")
             yield Label("", id="hfm_status", markup=True)
 
@@ -731,14 +744,19 @@ class FilterModal(ModalScreen):
             rule_str = " ".join(f"{k}={v}" for k, v in f["rule"].items())
             table.add_row(on_cell, str(f["id"]), f["type"], rule_str, key=str(f["id"]))
         self._selected_filter_id = None
-        self.query_one("#hfm_btn_remove", Button).disabled = True
+        self._selection_changed()
+
+    def _selection_changed(self):
+        for button_id in ("hfm_btn_remove", "hfm_btn_edit", "hfm_btn_copy"):
+            for button in self.query(f"#{button_id}"):
+                button.disabled = self._selected_filter_id is None
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
         if event.data_table.id != "hfm_filters_table":
             return
         if event.row_key and event.row_key.value is not None:
             self._selected_filter_id = int(event.row_key.value)
-        self.query_one("#hfm_btn_remove", Button).disabled = self._selected_filter_id is None
+        self._selection_changed()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
         if event.data_table.id != "hfm_filters_table":
@@ -752,35 +770,53 @@ class FilterModal(ModalScreen):
     def _toggle_selected(self):
         if self._selected_filter_id is None:
             return
-        msg = self._fm.toggle(str(self._selected_filter_id))
-        self._rebuild_table()
-        self._on_filters_changed()
-        self._set_status(msg)
+        draft = FilterManager.from_saved(self._fm.export())
+        self._commit(draft, draft.toggle(str(self._selected_filter_id)))
 
     def _remove_selected(self):
         if self._selected_filter_id is None:
             return
-        self._fm.remove(str(self._selected_filter_id))
-        self._rebuild_table()
-        self._on_filters_changed()
-        self._set_status("")
+        draft = FilterManager.from_saved(self._fm.export())
+        if self._commit(draft, draft.remove(str(self._selected_filter_id))) and self._editing_id is not None:
+            self._finish_edit()
 
-    def _add_pair(self):
+    def _commit(self, draft, message):
+        if message.startswith(("[red]", "[yellow]")):
+            self._set_status(message)
+            return False
+        try:
+            self._on_filters_changed(draft.export())
+        except (OSError, sqlite3.Error) as error:
+            self._set_status(Text(f"Could not save filters: {error}", style="red"))
+            return False
+        self._rebuild_table()
+        self._set_status(message)
+        return True
+
+    def _add_pair(self, key="action", value=""):
         self._pair_counter += 1
         pid = self._pair_counter
         self._active_pairs.append(pid)
         key_select = Select(
             self.CONDITION_OPTIONS,
             id=f"hfm_pk_{pid}",
-            value=self.CONDITION_OPTIONS[0][1],
+            value=key,
             allow_blank=False,
             classes="compact_select",
         )
         self._fit_select_width(key_select)
+        field = Input(id=f"hfm_pv_{pid}", placeholder="value  (* wildcards)", value=value, select_on_focus=False)
+        choices = FILTER_CHOICES.get(key)
+        available = [(item.title(), item) for item in choices or FILTER_CHOICES["event"]]
+        choice = Select(available, id=f"hfm_choice_{pid}", classes="compact_select",
+                        **({"value": value} if choices and value else {}))
+        field.display = choices is None
+        choice.display = choices is not None
         row = Horizontal(
             Label("Condition :", classes="hfm_field_label"),
             key_select,
-            Input(id=f"hfm_pv_{pid}", placeholder="value  (* wildcards)"),
+            field,
+            choice,
             Button("✕", id=f"hfm_prm_{pid}", classes="hfm_pair_rm"),
             id=f"hfm_pair_{pid}",
             classes="hfm_pair_row",
@@ -811,39 +847,80 @@ class FilterModal(ModalScreen):
         for pid in self._active_pairs:
             try:
                 key = self.query_one(f"#hfm_pk_{pid}", Select).value
-                val = self.query_one(f"#hfm_pv_{pid}", Input).value.strip()
+                if key in FILTER_CHOICES:
+                    val = self.query_one(f"#hfm_choice_{pid}", Select).value
+                    if is_select_empty(val):
+                        continue
+                else:
+                    val = self.query_one(f"#hfm_pv_{pid}", Input).value.strip()
                 if val and not is_select_empty(key):
                     parts.append(f"{key}={val}")
             except Exception:
                 pass
         return parts
 
-    def _reset_pairs(self):
-        for pid in list(self._active_pairs[1:]):
-            self._remove_pair(pid)
-        if self._active_pairs:
-            try:
-                self.query_one(f"#hfm_pv_{self._active_pairs[0]}", Input).value = ""
-            except Exception:
-                pass
-
     def _add_filter(self):
         f_type = self.query_one("#hfm_sel_type", Select).value
         if is_select_empty(f_type):
             return
         parts = self._collect_pairs()
-        if not parts:
-            self._set_status("[red]Enter at least one condition.[/red]")
+        if not parts or len(parts) != len(self._active_pairs):
+            self._set_status("[red]Complete every condition before saving.[/red]")
             return
-        msg = self._fm.add(str(f_type), parts)
-        self._set_status(msg)
-        self._reset_pairs()
-        self._rebuild_table()
-        self._on_filters_changed()
+        if len({part.split("=", 1)[0] for part in parts}) != len(parts):
+            self._set_status("[red]Use each condition only once per rule.[/red]")
+            return
+        draft = FilterManager.from_saved(self._fm.export())
+        msg = (draft.add(str(f_type), parts) if self._editing_id is None
+               else draft.edit(self._editing_id, str(f_type), parts))
+        if self._commit(draft, msg):
+            self._finish_edit()
 
-    def _set_status(self, msg: str):
+    def _replace_pairs(self, rule):
+        for pid in self._active_pairs:
+            self.query_one(f"#hfm_pair_{pid}").remove()
+        self._active_pairs.clear()
+        for key, value in rule.items():
+            self._add_pair(key, value)
+
+    def _edit_selected(self):
+        item = next((f for f in self._fm.export() if f["id"] == self._selected_filter_id), None)
+        if item is None:
+            return
+        self._editing_id = item["id"]
+        self.query_one("#hfm_sel_type", Select).value = item["type"]
+        self.query_one("#hfm_form_title", Label).update(f"Edit filter #{self._editing_id}")
+        self.query_one("#hfm_btn_add_filter", Button).label = "Save filter"
+        self.query_one("#hfm_btn_cancel", Button).display = True
+        self._replace_pairs(item["rule"])
+
+    def _finish_edit(self):
+        self._editing_id = None
+        self.query_one("#hfm_form_title", Label).update("Add filter")
+        self.query_one("#hfm_btn_add_filter", Button).label = "Add Filter"
+        self.query_one("#hfm_btn_cancel", Button).display = False
+        self._replace_pairs({"action": ""})
+
+    def on_select_changed(self, event: Select.Changed):
+        selector = event.select.id or ""
+        if not selector.startswith("hfm_pk_"):
+            return
+        pid = int(selector.rsplit("_", 1)[1])
+        if pid not in self._active_pairs:
+            return
+        choices = FILTER_CHOICES.get(event.value)
+        choice = self.query_one(f"#hfm_choice_{pid}", Select)
+        previous = choice.value
+        if choices:
+            choice.set_options([(item.title(), item) for item in choices])
+            if previous in choices:
+                choice.value = previous
+        choice.display = bool(choices)
+        self.query_one(f"#hfm_pv_{pid}", Input).display = not choices
+
+    def _set_status(self, msg):
         self.query_one("#hfm_status", Label).update(
-            Text.from_markup(themed_markup(msg, self.app.current_theme.dark), emoji=False)
+            msg if isinstance(msg, Text) else Text.from_markup(themed_markup(msg, self.app.current_theme.dark), emoji=False)
         )
 
     def on_button_pressed(self, event: Button.Pressed):
@@ -853,6 +930,14 @@ class FilterModal(ModalScreen):
             self.dismiss()
         elif button_id == "hfm_btn_remove":
             self._remove_selected()
+        elif button_id == "hfm_btn_edit":
+            self._edit_selected()
+        elif button_id == "hfm_btn_cancel":
+            self._finish_edit()
+        elif button_id == "hfm_btn_copy":
+            item = next((f for f in self._fm.export() if f["id"] == self._selected_filter_id), None)
+            if item is not None:
+                self._set_status(self._copy_to[1](item))
         elif button_id == "hfm_btn_add_pair":
             self._add_pair()
         elif button_id == "hfm_btn_add_filter":

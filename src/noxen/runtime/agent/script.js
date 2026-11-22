@@ -33,6 +33,46 @@ var UriJava = null;
 
 // State
 var blockEnabled = true;
+let interceptFilters = null;
+
+function interceptGlob(value, pattern) {
+  const chars = Array.from(value), parts = Array.from(pattern);
+  let i = 0, j = 0, star = -1, consumed = 0;
+  while (i < chars.length) {
+    if (parts[j] === '*') {
+      star = j++;
+      consumed = i;
+    } else if (parts[j] === '?' || parts[j] === chars[i]) {
+      i++;
+      j++;
+    } else if (star >= 0) {
+      j = star + 1;
+      i = ++consumed;
+    } else {
+      return false;
+    }
+  }
+  while (parts[j] === '*') j++;
+  return j === parts.length;
+}
+
+function matchesInterceptFilters(context) {
+  if (interceptFilters === null) return null;
+  const {focus, rules} = interceptFilters;
+  if (rules.length && Object.values(context).some(value =>
+    Array.isArray(value) ? value.some(item => item.length > 4096) : value.length > 4096)) return null;
+  const matched = rules.some(rule => Object.entries(rule).every(([key, pattern]) => {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) return false;
+    const value = context[key];
+    if (pattern === 'set' || pattern === 'unset'
+        || (key === 'component' && (pattern === 'explicit' || pattern === 'implicit'))) {
+      const present = Array.isArray(value) ? value.length > 0 : !!value;
+      return present === (pattern === 'set' || pattern === 'explicit');
+    }
+    return Array.isArray(value) ? value.some(item => interceptGlob(item, pattern)) : interceptGlob(value, pattern);
+  }));
+  return focus ? matched : !matched;
+}
 var waiting = false;
 var activeDecisionId = null;
 var activeIntentPresent = false;
@@ -1290,7 +1330,13 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
   var released = false;
 
   try {
-    var willBlock = blockEnabled && !waiting;
+    var infoIntent = inspectIntent(() => dumpIntent(intent));
+    const filterMatch = matchesInterceptFilters({
+      event: 'intent', class: className, method: methodName, action: infoIntent.action || '',
+      component: infoIntent.component || '', data: infoIntent.data || '',
+      flags: intent === null ? '' : String(infoIntent.flags || 0), category: infoIntent.categories || [],
+    });
+    var willBlock = filterMatch !== false && blockEnabled && !waiting;
     if (willBlock) {
       waiting = true;
       isBlocking = true;
@@ -1302,8 +1348,6 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
       resumeRequested = false;
       modQueue = [];
     }
-
-    var infoIntent = inspectIntent(() => dumpIntent(intent));
 
     // --- SEND STACK TRACE ---
     send({
@@ -1319,7 +1363,8 @@ function processIntercept(className, methodName, intent, pendingIntentFlags, att
         "decision": {
           "required": willBlock,
           "id": decisionId,
-          "reason": willBlock ? null : (blockEnabled ? "busy" : "intercept_off")
+          "reason": willBlock ? null : (!blockEnabled ? "intercept_off" : filterMatch === false ? "filtered" : "busy"),
+          "filterChecked": filterMatch !== null
         }
     })
     
@@ -1575,11 +1620,16 @@ rpc.exports = {
       providerInterceptor = require('./provider_intercept.js').createProviderInterceptor(Java, send, {
         inspect: inspectIntent, stamp: captureStamp, begin: beginHold, end: endHold,
         blocking: () => blockEnabled,
-        claim: context => { if (!blockEnabled || waiting) return false; waiting = true; return true; },
+        filter: matchesInterceptFilters,
+        claim: () => { if (!blockEnabled || waiting) return false; waiting = true; return true; },
         release: () => { waiting = false; }
       });
     }
     return providerInterceptor.configure(outgoing, incoming, previews);
+  },
+  setInterceptFilters: function (rules) {
+    interceptFilters = rules;
+    return true;
   },
   setCursorPreviews: function (enabled) {
     if (providerInterceptor === null) return false;

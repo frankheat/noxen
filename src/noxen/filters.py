@@ -1,13 +1,48 @@
 import threading
 import fnmatch
 import copy
+import os
+from urllib.parse import urlsplit
 
 from tabulate import tabulate
 
 
+FILTER_CHOICES = {"event": ("intent", "provider"), "direction": ("incoming", "outgoing")}
+
+
+def provider_filter_context(record, *, history=False):
+    arguments = record.get("arguments") or {}
+    uri = str(arguments.get("uri") or "")
+    authority = str(arguments.get("authority") or "")
+    if not authority and uri:
+        try:
+            authority = urlsplit(uri).netloc
+        except ValueError:
+            pass
+    if "@" in authority and authority.split("@", 1)[0].isdigit():
+        authority = authority.split("@", 1)[1]
+    legacy_args = (record.get("sentArguments") or arguments) if history else arguments
+    result = {
+        "event": "provider",
+        "class": str(record.get("class") or ""),
+        "method": str(record.get("method") or ""),
+        "uri": uri,
+        "authority": str(authority),
+        "data": str(legacy_args.get("uri") or ""),
+        "flags": "0" if history else "",
+        "category": [],
+    }
+    if history:
+        result.update(action="", component="")
+    if record.get("direction") in FILTER_CHOICES["direction"]:
+        result["direction"] = record["direction"]
+    return result
+
+
 class FilterManager:
     VALID_TYPES = {"ignore", "focus"}
-    VALID_KEYS = {"class", "method", "action", "data", "flags", "category", "component"}
+    VALID_KEYS = {"class", "method", "action", "data", "flags", "category", "component",
+                  "event", "direction", "authority", "uri"}
 
     def __init__(self):
         self._filter_list = []
@@ -56,7 +91,8 @@ class FilterManager:
         rule = item.get("rule")
         if f_type not in cls.VALID_TYPES or not isinstance(rule, dict):
             return None
-        if any(key not in cls.VALID_KEYS or not isinstance(value, str) for key, value in rule.items()):
+        if any(key not in cls.VALID_KEYS or not isinstance(value, str)
+               or (key in FILTER_CHOICES and value not in FILTER_CHOICES[key]) for key, value in rule.items()):
             return None
         return {
             "id": fid,
@@ -65,7 +101,7 @@ class FilterManager:
             "enabled": bool(item.get("enabled", True)),
         }
 
-    def add(self, f_type, rule_parts) -> str:
+    def add(self, f_type, rule_parts, *, enabled=True) -> str:
         if f_type not in self.VALID_TYPES:
             return f"[red]Unknown filter type: {f_type}[/red]"
         valid, rule = self._parse_rule_string(rule_parts)
@@ -74,11 +110,13 @@ class FilterManager:
         invalid_keys = [k for k in rule if k not in self.VALID_KEYS]
         if invalid_keys:
             return f"[red]Unknown key(s): {', '.join(invalid_keys)} — valid: {', '.join(sorted(self.VALID_KEYS))}[/red]"
+        if any(key in rule and rule[key] not in choices for key, choices in FILTER_CHOICES.items()):
+            return "[red]Select a valid event and direction.[/red]"
         with self._lock:
             for f in self._filter_list:
                 if f['type'] == f_type and f['rule'] == rule:
                     return f"[yellow]Already exists as filter #{f['id']}[/yellow]"
-            self._filter_list.append({'id': self._id_counter, 'type': f_type, 'rule': rule, 'enabled': True})
+            self._filter_list.append({'id': self._id_counter, 'type': f_type, 'rule': rule, 'enabled': enabled})
             msg = f"[#26a368]Added {f_type} filter #{self._id_counter}: {rule}[/#26a368]"
             self._id_counter += 1
         return msg
@@ -107,6 +145,29 @@ class FilterManager:
             focus_list = [copy.deepcopy(f['rule']) for f in self._filter_list if f['type'] == 'focus' and f.get('enabled', True)]
         return ignore_list, focus_list
 
+    def agent_rules(self):
+        """Use the host matcher for legacy shell classes and platform-specific globs."""
+        ignore, focus = self.get_active()
+        relevant = focus or ignore
+        if (os.name == "nt" or len(relevant) > 128
+                or any("[" in pattern or len(pattern) > 256 for rule in relevant for pattern in rule.values())):
+            return None
+        return {"focus": bool(focus), "rules": relevant}
+
+    def edit(self, fid, f_type, rule_parts):
+        ok, rule = self._parse_rule_string(rule_parts)
+        with self._lock:
+            candidate = next((item for item in self._filter_list if item["id"] == fid), None)
+            if candidate is None:
+                return "[red]Filter no longer exists.[/red]"
+            replacement = {**candidate, "type": f_type, "rule": rule}
+            if not ok or not rule or self._normalize_saved_filter(replacement) is None:
+                return "[red]Invalid filter conditions.[/red]"
+            if any(item["id"] != fid and item["type"] == f_type and item["rule"] == rule
+                   for item in self._filter_list):
+                return "[yellow]A filter with these conditions already exists.[/yellow]"
+            candidate.update(replacement)
+            return ""
     def is_visible(self, context: dict) -> bool:
         ignore_list, focus_list = self.get_active()
         if focus_list:

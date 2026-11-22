@@ -20,15 +20,14 @@ class UISettingsIsolationTests(IsolatedAppTestCase):
                 app.db.close()
     def test_settings_persistence_is_real_and_confined_to_the_test_directory(self):
         with patch("noxen.settings.user_config_dir", side_effect=AssertionError("Personal settings accessed")):
-            settings = {**DEFAULT_SETTINGS, "intercept_command_bar": False, "history_command_bar": False}
+            settings = {**DEFAULT_SETTINGS, "cursor_previews": True}
             save_settings(settings)
             self.assertTrue(self.settings_path.is_file())
             self.assertEqual(load_settings(), settings)
             app = NoxenApp(SimpleNamespace(project=None,
                 new_project=str(self.settings_path.parent / "session.noxen"), skip_device_scan=True))
             try:
-                self.assertFalse(app._intercept_command_bar_visible)
-                self.assertFalse(app._history_command_bar_visible)
+                self.assertTrue(app._settings["cursor_previews"])
             finally:
                 app.db.close()
 
@@ -42,7 +41,7 @@ class SettingsFixtureCleanupTests(unittest.TestCase):
             def runTest(self):
                 paths.append(self.settings_path)
                 if len(paths) == 1:
-                    save_settings({"intercept_command_bar": False})
+                    save_settings({"cursor_previews": True})
                     self.fail("Deliberate fixture cleanup check")
                 self.assertEqual(load_settings(), DEFAULT_SETTINGS)
 

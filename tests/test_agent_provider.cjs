@@ -4,7 +4,7 @@ const { createProviderInterceptor } = require('../agent/provider_intercept.js');
 global.Process = { id: 7, getCurrentThreadId: () => 1 };
 const uri = value => ({ $className: 'android.net.Uri$StringUri', toString: () => value });
 
-function fixture(original = () => null, missingTransport = false, blocking = true, methodName = 'query') {
+function fixture(original = () => null, missingTransport = false, blocking = true, methodName = 'query', filter) {
   let implementation = null, wait, claimed = false;
   const events = [], calls = [];
   const types = ['android.net.Uri', '[Ljava.lang.String;', 'java.lang.String', '[Ljava.lang.String;', 'java.lang.String'];
@@ -31,12 +31,46 @@ function fixture(original = () => null, missingTransport = false, blocking = tru
   };
   const engine = createProviderInterceptor(Java, event => events.push(event), {
     inspect: fn => fn(), stamp: () => ({ time: 1 }), begin: () => 1, end: () => {},
-    blocking: () => blocking,
+    blocking: () => blocking, filter,
     claim() { if (!blocking || claimed) return false; claimed = true; return true; },
     release() { claimed = false; },
   });
   return { engine, method, events, calls, setWait: fn => { wait = fn; } };
 }
+test('filtered provider requests never wait and are still recorded', async () => {
+  const seen = [];
+  const f = fixture(() => null, false, true, 'query', context => {
+    seen.push(context);
+    return false;
+  });
+  await f.engine.configure(true, false);
+  f.setWait(() => { assert.fail('filtered provider request must not wait'); });
+  const address = 'content://10@demo.notes/items';
+  f.method.implementation(uri(address), null, null, null, null);
+  assert.equal(seen[0].authority, 'demo.notes');
+  assert.equal(seen[0].direction, 'outgoing');
+  assert.equal(seen[0].uri, address);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.events[0].decision, 'forwarded');
+  assert.equal(f.events[0].decisionId, null);
+  assert.equal(f.events[1].state, 'returned');
+});
+test('changing filters while a request is held preserves its response hold', async () => {
+  let admitted = true, checks = 0;
+  const f = fixture(() => 'text/plain', false, true, 'getType', () => {
+    checks++;
+    return admitted;
+  });
+  f.method.returnType.className = 'java.lang.String';
+  await f.engine.configure(true, false);
+  f.setWait(() => {
+    admitted = false;
+    f.engine.resolve(f.events.at(-1).decisionId, 'forward', null);
+  });
+  f.method.implementation(uri('content://demo.notes/items'), null, null, null, null);
+  assert.equal(checks, 1);
+  assert.ok(f.events.find(event => event.noxenEvent === 'provider_response')?.decisionId);
+});
 test('query Bundle completeness requires only supported keys with matching types', async () => {
   for (const extra of [null, 'android:query-arg-limit']) {
     const f = fixture(() => null, false, false);

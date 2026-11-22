@@ -7,12 +7,28 @@ from unittest.mock import patch
 
 from noxen.db import ProjectDB
 from noxen.filters import FilterManager
+from noxen.rendering import entry_to_filter_context, payload_to_filter_context
 from noxen.history_columns import parse_history_column_width
 from noxen.rendering import render_intent_detail
 from noxen.settings import DARK_THEME, LIGHT_THEME, load_settings, save_settings, settings_file_path
 
 
 class FilterManagerTests(unittest.TestCase):
+    def test_provider_rules_use_captured_uri_and_authority_with_legacy_data_intact(self):
+        manager = FilterManager()
+        manager.add("focus", ["event=provider", "direction=incoming", "method=query",
+                              "authority=demo.notes", "uri=*/original"])
+        provider = {"method": "query", "direction": "incoming",
+                    "arguments": {"uri": "content://10@demo.notes/original"},
+                    "sentArguments": {"uri": "content://demo.notes/modified"}}
+        history = entry_to_filter_context({"provider": provider})
+        self.assertTrue(manager.is_visible(history))
+        self.assertEqual(history["data"], "content://demo.notes/modified")
+        self.assertFalse(manager.is_visible(payload_to_filter_context({"methodName": "query"})))
+        call = entry_to_filter_context({"provider": {"method": "call", "arguments": {"authority": "demo.notes"}}})
+        self.assertEqual(call["authority"], "demo.notes")
+        self.assertEqual(call["uri"], "")
+
     def test_from_saved_preserves_next_id(self):
         manager = FilterManager.from_saved([
             {"id": 4, "type": "focus", "rule": {"method": "sendBroadcast"}, "enabled": True}
@@ -127,8 +143,7 @@ class SettingsTests(unittest.TestCase):
                     "stack": False,
                     "stack_depth": 15,
                     "intercept": True,
-                    "intercept_command_bar": True,
-                    "history_command_bar": True,
+                    "cursor_previews": False,
                     "theme": DARK_THEME,
                 },
             )
@@ -140,8 +155,6 @@ class SettingsTests(unittest.TestCase):
                 "stack": True,
                 "stack_depth": 7,
                 "intercept": False,
-                "intercept_command_bar": False,
-                "history_command_bar": True,
                 "theme": LIGHT_THEME,
             }, path)
             self.assertEqual(
@@ -150,8 +163,7 @@ class SettingsTests(unittest.TestCase):
                     "stack": True,
                     "stack_depth": 7,
                     "intercept": False,
-                    "intercept_command_bar": False,
-                    "history_command_bar": True,
+                    "cursor_previews": False,
                     "theme": LIGHT_THEME,
                 },
             )
@@ -173,8 +185,7 @@ class SettingsTests(unittest.TestCase):
                     "stack": False,
                     "stack_depth": 15,
                     "intercept": True,
-                    "intercept_command_bar": True,
-                    "history_command_bar": True,
+                    "cursor_previews": False,
                     "theme": DARK_THEME,
                 },
             )
@@ -195,8 +206,7 @@ class SettingsTests(unittest.TestCase):
                     "stack": False,
                     "stack_depth": 3,
                     "intercept": False,
-                    "intercept_command_bar": False,
-                    "history_command_bar": False,
+                    "cursor_previews": False,
                     "theme": DARK_THEME,
                 },
             )

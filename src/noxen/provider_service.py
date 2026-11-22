@@ -21,6 +21,7 @@ class ProviderService:
         self.enabled = {"outgoing": False, "incoming": False}
         self.hooks = []
         self.records = {}
+        self.filter_admissions = {}
         self.held = None
         self.version = 0
         self.error = None
@@ -42,6 +43,7 @@ class ProviderService:
         self.enabled = {"outgoing": False, "incoming": False}
         self.hooks = []
         self.records = {}
+        self.filter_admissions.clear()
         self.version += 1
         if session is not None:
             connection = self.connection
@@ -131,6 +133,7 @@ class ProviderService:
                 update["responseAt"] = update.pop("time")
                 update["responseCaptureSequence"] = update.pop("captureSequence", None)
             if event.get("noxenEvent") == "provider_result":
+                self.filter_admissions.pop(id_, None)
                 update["finishedAt"] = update.pop("time", None)
                 update["resultCaptureSequence"] = update.pop("captureSequence", None)
             record.update(update)

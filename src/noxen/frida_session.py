@@ -267,6 +267,10 @@ class FridaSession:
                 if script.exports_sync.set_capture_order_start(previous, session_number) is not True:
                     raise RuntimeError("Could not initialize the project's capture order")
             self._hooks_result = hooks_result
+            try:
+                self.sync_intercept_filters()
+            except Exception as error:
+                self.log_cb(log_warning(f"Could not sync Intercept filters: {error}", "filters"))
             hook_report = script.exports_sync.proxy(hooks_data)
             if self.monitor_hooks:
                 try:
@@ -653,7 +657,9 @@ class FridaSession:
                             if len(self._pending_releases) >= MAX_PENDING_RELEASES:
                                 del self._pending_releases[next(iter(self._pending_releases))]
                             self._pending_releases[decision_id] = db_id
-                is_visible = self.filter_manager.is_visible(payload_to_filter_context(payload))
+                is_visible = decision.get("filterChecked") is True or self.filter_manager.is_visible(
+                    payload_to_filter_context(payload)
+                )
 
                 if not requires_decision:
                     if self.outcome_cb and db_id:
@@ -830,6 +836,13 @@ class FridaSession:
                 return  # Startup will read the new value when installing the hooks.
             if script.exports_sync.set_cursor_previews(enabled) is not True:
                 raise RuntimeError("Agent did not apply the Cursor preview setting")
+
+    def sync_intercept_filters(self):
+        with self._cursor_previews_lock:
+            with self._lock:
+                script = self._script
+            if script is not None:
+                script.exports_sync.set_intercept_filters(self.filter_manager.agent_rules())
 
     def cleanup(self):
         with self._modification_lock:

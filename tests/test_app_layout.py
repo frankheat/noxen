@@ -12,11 +12,8 @@ from textual.widgets import Label, Switch
 from tests.ui_test_case import IsolatedAppTestCase
 
 from noxen.app import (
-    HISTORY_COMMAND_OUTPUT_HEIGHT,
     HomeLayout,
     HomeLogo,
-    INTERCEPT_COMMAND_OUTPUT_HEIGHT,
-    MAX_COMMAND_OUTPUT_HEIGHT,
     MIN_PANEL_HEIGHT,
     NoxenApp,
     clamp_height,
@@ -24,15 +21,6 @@ from noxen.app import (
 )
 from noxen.logging_ui import log_debug, log_info
 from noxen.sender_ui import SenderPane
-
-
-def css_int_property(selector: str, property_name: str) -> int:
-    css_path = Path(__file__).resolve().parents[1] / "src" / "noxen" / "noxen.tcss"
-    css = css_path.read_text(encoding="utf-8")
-    match = re.search(rf"{re.escape(selector)}\s*\{{[^}}]*{property_name}:\s*(\d+);", css, re.S)
-    if match is None:
-        raise AssertionError(f"{selector} {property_name} not found in noxen.tcss")
-    return int(match.group(1))
 
 
 def css_property(selector: str, property_name: str) -> str:
@@ -44,22 +32,7 @@ def css_property(selector: str, property_name: str) -> str:
     return match.group(1).strip()
 
 
-def css_height(selector: str) -> int:
-    return css_int_property(selector, "height")
-
-
 class AppLayoutTests(unittest.TestCase):
-    def test_command_output_defaults_match_tcss(self):
-        self.assertEqual(css_height("#intercept_cmd_output"), INTERCEPT_COMMAND_OUTPUT_HEIGHT)
-        self.assertEqual(css_height("#history_cmd_output"), HISTORY_COMMAND_OUTPUT_HEIGHT)
-
-    def test_command_output_defaults_are_inside_resize_bounds(self):
-        self.assertGreaterEqual(INTERCEPT_COMMAND_OUTPUT_HEIGHT, MIN_PANEL_HEIGHT)
-        self.assertLessEqual(INTERCEPT_COMMAND_OUTPUT_HEIGHT, MAX_COMMAND_OUTPUT_HEIGHT)
-        self.assertGreaterEqual(HISTORY_COMMAND_OUTPUT_HEIGHT, MIN_PANEL_HEIGHT)
-        self.assertLessEqual(HISTORY_COMMAND_OUTPUT_HEIGHT, MAX_COMMAND_OUTPUT_HEIGHT)
-
-
     def test_home_anr_bypass_label_width_fits_text(self):
         label = "Input ANR bypass (experimental)"
         width = css_property("#home_anr_bypass_label", "width")
@@ -180,7 +153,7 @@ class ShortcutOrderTests(IsolatedAppTestCase):
             sender.query_one("#sender_new").focus()
             await expect("ctrl+q", "alt+left", "alt+right", "ctrl+r")
             await open_tab("tab_history")
-            await expect("ctrl+q", "ctrl+l", "alt+up", "alt+down", "ctrl+b", "ctrl+r", "ctrl+t")
+            await expect("ctrl+q", "ctrl+l", "alt+up", "alt+down", "ctrl+r", "ctrl+t")
             await open_tab("tab_log")
             await expect("ctrl+q", "ctrl+l")
             await open_tab("tab_info")
@@ -191,7 +164,7 @@ class ShortcutOrderTests(IsolatedAppTestCase):
             app._current_intercepted_entry = {"id": 1, "method": "getIntent", "intent": {"flags": 0}}
             app._intent_blocked = True
             app._enter_edit_mode()
-            await expect("ctrl+q", "alt+up", "alt+down", "ctrl+b", "ctrl+f", "ctrl+d", "escape",
+            await expect("ctrl+q", "ctrl+f", "ctrl+d", "escape",
                          "ctrl+space", "ctrl+o", "ctrl+n")
 
 
