@@ -21,6 +21,36 @@ def complete(marked, pick=None, always=False):
 
 
 class SenderJsonTests(unittest.TestCase):
+    def test_free_keys_and_text_never_offer_types_or_literals(self):
+        from noxen.sender import OPERATIONS
+
+        def choices(marked, root="request"):
+            offset = marked.index("|")
+            _, matches = completions(marked.replace("|", ""), offset, True, root=root)
+            return matches
+
+        for operation in ("insert", "update"):
+            for key in ('"|', '"tit|'):
+                document = '{"operation": "' + operation + '", "values": {' + key + '": {"type": "String", "value": "demo"}}}'
+                self.assertEqual(choices(document), [], document)
+        for operation in OPERATIONS:
+            document = '{"operation": "' + operation + '", "extras": {"|": {"type": "String", "value": ""}}}'
+            self.assertEqual(choices(document), [], operation)
+        for marked in (
+            '{"intent":{"extras":{"|":{"type":"String","value":""}}}}',
+            '{"operation":"query","selection":"tit|"}',
+            '{"operation":"query","selectionArgs":["fir|"]}',
+            '{"operation":"insert","values":{"title":{"type":"String","value":"te|"}}}',
+            '{"operation":"call","method":"ec|"}',
+            '{"operation":"query","uri":"content://de|"}',
+        ):
+            self.assertEqual(choices(marked), [], marked)
+        self.assertEqual(choices('{"values":{"|":{"type":"String","value":""}}}', root="provider"), [])
+        self.assertEqual(choices('{"value":"te|"}', root="providerResponse"), [])
+        self.assertEqual(choices('{"rows":[[{"type":"string","value":"te|"}]]}', root="cursor"), [])
+        self.assertEqual(choices('{"operation":"query","maxRows":|}'), [("maxRows", "100$0")])
+        self.assertEqual(choices('{"operation":"query","projection":[|]}'), [])
+
     def test_provider_content_values_types_and_defaults_match_the_editor(self):
         def offered(marked, root="provider", operation="insert"):
             offset = marked.index("|")
@@ -148,6 +178,28 @@ class SenderJsonTests(unittest.TestCase):
 
 
 class SenderFlagEditorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_column_name_has_no_type_popup_but_type_field_does(self):
+        class EditorApp(App):
+            def compose(self):
+                yield JsonRequestEditor()
+
+        app = EditorApp()
+        async with app.run_test(size=(100, 30)) as pilot:
+            editor = app.query_one(JsonRequestEditor).area
+            text = '{"operation":"insert","values":{"":{"type":"String","value":"test2"}}}'
+            editor.load(text)
+            editor.focus()
+            editor.move_cursor((0, text.index('"":') + 1))
+            await pilot.press("ctrl+space")
+            self.assertFalse(editor.popup.display)
+            await pilot.press("t", "i", "t", "l", "e")
+            self.assertEqual(parse(editor.text)["values"]["title"]["value"], "test2")
+            self.assertFalse(editor.popup.display)
+            editor.move_cursor((0, editor.text.index("String") + 1))
+            await pilot.press("ctrl+space")
+            self.assertTrue(editor.popup.display)
+            self.assertTrue(any(name == "String" for name, _ in editor._matches))
+
     async def test_flag_picker_completes_a_json_string_with_the_keyboard(self):
         class EditorApp(App):
             def compose(self):

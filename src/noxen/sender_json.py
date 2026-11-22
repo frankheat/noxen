@@ -243,6 +243,9 @@ def context(text, offset, root="request", operation=None):
         elif kind == "cursorCell":
             options = [("type", '"type": "$0"'), ("value", '"value": null$0')]
         elif kind in ("bundle", "contentValues"):
+            # Quoted keys are user-defined names, including after inserting a typed snippet.
+            if result["quoted"]:
+                return result
             names = TYPES if kind == "bundle" else content_types
             options = [(name, f'"$0": {{"type": "{name}", "value": {_entry_value(name)}}}') for name in names]
         elif kind == "contentValue":
@@ -254,6 +257,12 @@ def context(text, offset, root="request", operation=None):
                              if kind in ("bundle", "contentValues") or name not in top.fields]
     elif top.state == "value":
         result["position"] = "value"
+        # Text already inside quotes is free input unless this is an enum.
+        enum_field = ((top.key == "operation" and kind == "request") or
+                      (top.key == "type" and kind in ("entry", "contentValue", "cursorCell")) or
+                      kind == "flags" or (kind == "intent" and top.key == "flags"))
+        if result["quoted"] and not enum_field:
+            return result
         names = ()
         if top.bracket == "{" and top.key == "operation" and kind == "request":
             names = OPERATIONS
@@ -279,6 +288,15 @@ def context(text, offset, root="request", operation=None):
             options = snippets.get(entry_type, [("number", "0$0")] if entry_type in content_types else [])
             result["options"] = options
             return result
+        elif top.bracket == "{" and top.key == "value" and kind == "entry":
+            entry_type = top.fields.get("type")
+            if entry_type == "boolean":
+                result["options"] = [(name, name + "$0") for name in ("true", "false")]
+            elif entry_type in TYPES:
+                result["options"] = [(entry_type, _entry_value(entry_type) + "$0")]
+                if entry_type in ("String", "Uri", "Bundle", "Intent"):
+                    result["options"].append(("null", "null$0"))
+            return result
         elif kind == "flags" or (kind == "intent" and top.key == "flags"):
             in_array = kind == "flags"
             names = _flag_names(root.get("operation") or operation, len(frames) == outer_intent_depth + in_array)
@@ -290,8 +308,14 @@ def context(text, offset, root="request", operation=None):
             return result
         # In a request that has nothing else yet, choosing the operation also writes what it needs.
         skeleton = names is OPERATIONS and not set(root) - {"operation"} and re.fullmatch(r'"?[ \t]*\n\s*\}\s*', text[offset:])
-        result["options"] = [(name, f'"{name}"' + (OPERATION_SKELETONS[name] if skeleton else "$0")) for name in names] or \
-            ([] if result["quoted"] else [(name, name + "$0") for name in ("null", "true", "false")])
+        result["options"] = [(name, f'"{name}"' + (OPERATION_SKELETONS[name] if skeleton else "$0")) for name in names]
+        if not names and top.bracket == "{":
+            if kind in ("request", "provider", "queryArguments"):
+                snippet = PROVIDER_SNIPPETS.get(top.key)
+                if snippet:
+                    result["options"] = [(top.key, snippet)]
+            elif kind in KEYS and top.key in KEYS[kind]:
+                result["options"] = [(top.key, KEYS[kind][top.key])]
     return result
 
 
