@@ -383,7 +383,10 @@ class SenderUITests(IsolatedAppTestCase):
                 self.assertEqual(names(), list("ABCDE"))
 
                 async def open_menu(name):
-                    self.assertTrue(await pilot.click(tab(name), button=3))
+                    target = tab(name)
+                    target.scroll_visible()
+                    await pilot.pause()
+                    self.assertTrue(await pilot.click(target, button=3))
                     # The editor also contains an OptionList. Wait until the
                     # context menu is mounted and owns keyboard focus.
                     await settle(pilot, lambda: isinstance(app.screen, SenderTabMenu)
