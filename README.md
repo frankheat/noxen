@@ -77,7 +77,7 @@ The full documentation is at **https://frankheat.github.io/noxen-docs/**:
 - [Quick start](https://frankheat.github.io/noxen-docs/quick-start/)
 - [Keyboard shortcuts](https://frankheat.github.io/noxen-docs/keyboard-shortcuts/)
 - [Troubleshooting](https://frankheat.github.io/noxen-docs/troubleshooting/)
-- [Content providers](https://frankheat.github.io/noxen-docs/providers/)
+- [Intercept provider calls](https://frankheat.github.io/noxen-docs/intercept/#intercept-provider-requests)
 
 [noxen playground](https://github.com/frankheat/noxen-playground) is a companion
 Android app for controlled tests.
