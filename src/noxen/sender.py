@@ -281,8 +281,11 @@ def render_sender_detail(record, current_revision=None, *, view="summary"):
     from rich.text import Text
     from rich.pretty import Pretty
     from rich.console import Group
+    from rich.padding import Padding
     from noxen.rendering import capture_datetime, format_capture_time
     from noxen.sender_result import summarize_result
+
+    field_indent = 2
 
     def device_time(value):
         instant = capture_datetime(value)
@@ -293,7 +296,7 @@ def render_sender_detail(record, current_revision=None, *, view="summary"):
         text.append(f"[{title}]\n", style="bold")
         width = max((len(label) for label, _ in rows), default=0)
         for label, value in rows:
-            text.append(f"  {label:<{width}} : ", style="dim")
+            text.append(f"{' ' * field_indent}{label:<{width}} : ", style="dim")
             if isinstance(value, Text):
                 text.append_text(value)
             else:
@@ -325,7 +328,8 @@ def render_sender_detail(record, current_revision=None, *, view="summary"):
     if changed and view != "details":
         rows.append(("Request", "Changed since this run · See Details for the request as sent"))
     if view == "summary":
-        return Group(section("RESULT", rows + fields), *body)
+        return Group(section("RESULT", rows + fields),
+                     *(Padding(item, (0, 0, 0, field_indent), expand=False) for item in body))
     outcome = [section("RESULT", rows)]
     if view == "raw":
         if "result" in record:
