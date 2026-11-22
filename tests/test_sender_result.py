@@ -51,7 +51,14 @@ class SenderResultTests(unittest.TestCase):
                 self.assertIn("[RAW RESULT]", render(operation, result, view="raw"))
 
     def test_cursor_distinguishes_null_empty_omissions_and_limits(self):
-        self.assertIn("No cursor returned", render("query", {"kind": "cursor", "value": None}))
+        null_cursor = {"kind": "cursor", "value": None}
+        summary = render("query", null_cursor)
+        self.assertIn("No cursor returned", summary)
+        self.assertNotIn("Provider lookup", summary)
+        summary = render("query", dict(null_cursor, providerResolution="unresolved"))
+        self.assertIn("No cursor returned", summary)
+        self.assertIn("Unresolved for this sender", summary)
+        self.assertIn("Check the URI authority and app visibility", summary)
         self.assertIn("Result not captured", render("query", {"kind": "cursor", "rows": [], "truncated": True,
                                                              "reason": "Column names exceed the byte limit"}))
         result = {"kind": "cursor", "columns": ["id", "payload"], "rows": [

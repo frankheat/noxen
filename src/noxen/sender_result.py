@@ -125,7 +125,10 @@ def summarize_result(operation, record):
         return "Service stopped" if value else "No matching running service", [], []
     if operation == "query" and kind == "cursor":
         if "value" in result and value is None:
-            return "Call returned · No cursor returned", [], []
+            fields = []
+            if result.get("providerResolution") == "unresolved":
+                fields.append(("Provider lookup", "Unresolved for this sender · Check the URI authority and app visibility"))
+            return "Call returned · No cursor returned", fields, []
         columns, rows = result.get("columns"), result.get("rows")
         if not isinstance(columns, list) or not isinstance(rows, list) or not all(isinstance(row, list) for row in rows):
             if result.get("truncated"):

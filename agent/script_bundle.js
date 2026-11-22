@@ -1965,7 +1965,8 @@
           }
           return result;
         }
-        function query(resolver, request, signal) {
+        function query(c, u, request, signal) {
+          const resolver = c.getContentResolver();
           const cursor = resolver.query.overload(
             "android.net.Uri",
             "[Ljava.lang.String;",
@@ -1975,14 +1976,28 @@
             "android.os.CancellationSignal"
           ).call(
             resolver,
-            uri(request.uri),
+            u,
             strings(request.projection),
             javaText(request.selection),
             strings(request.selectionArgs),
             javaText(request.sortOrder),
             signal
           );
-          if (cursor === null) return { kind: "cursor", value: null };
+          if (cursor === null) {
+            const result = { kind: "cursor", value: null };
+            try {
+              withoutRecording(() => {
+                const authority = text(u.getAuthority());
+                if (authority && !authority.includes("@")) {
+                  const pm = c.getPackageManager();
+                  const provider = pm.resolveContentProvider.overload("java.lang.String", "int").call(pm, authority, 0);
+                  if (provider === null) result.providerResolution = "unresolved";
+                }
+              });
+            } catch (_) {
+            }
+            return result;
+          }
           try {
             if (cursor.getColumnCount() > 256) return { kind: "cursor", captured: false, truncated: true, reason: "More than 256 columns" };
             const result = { kind: "cursor", columns: Array.from(cursor.getColumnNames(), String), rows: [], truncated: false };
@@ -2092,8 +2107,9 @@
             }
             throw new Error("Unsupported Intent operation");
           }
-          const r = c.getContentResolver(), u = uri(request.uri);
-          if (op === "query") return query(r, request, signal);
+          const u = uri(request.uri);
+          if (op === "query") return query(c, u, request, signal);
+          const r = c.getContentResolver();
           if (op === "getType") return { kind: "String", value: text(r.getType(u)) };
           if (op === "insert") return { kind: "uri", value: text(r.insert(u, withoutRecording(() => putValues(use("android.content.ContentValues").$new(), request.values, true)))) };
           if (op === "update") return { kind: "int", value: r.update(
