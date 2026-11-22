@@ -21,6 +21,20 @@ def complete(marked, pick=None, always=False):
 
 
 class SenderJsonTests(unittest.TestCase):
+    def test_key_suggestions_exclude_fields_on_both_sides_of_cursor(self):
+        query = ('{"operation":"query","uri":"content://demo/notes","projection":[],'
+                 '"selection":"","selectionArgs":[],"sortOrder":"_id ASC","maxRows":100,"maxBytes":262144}')
+        for value in ('"projection":[]', '"maxRows":100'):
+            self.assertEqual(complete(query.replace(value, value + "|"), always=True), [])
+        self.assertEqual(complete(query.replace('"maxBytes":262144', '"max|Bytes":262144'), always=True), [])
+
+        nested = '{"operation":"startActivity","intent":{"flags":[],| "selector":{"action":"example"}}}'
+        self.assertIn("action", complete(nested, always=True))
+        self.assertNotIn("selector", complete(nested, always=True))
+        edited = complete(nested, "action", always=True).replace("|", "parent")
+        self.assertEqual(parse(edited)["intent"]["action"], "parent")
+        self.assertEqual(parse(edited)["intent"]["selector"], {"action": "example"})
+
     def test_free_keys_and_text_never_offer_types_or_literals(self):
         from noxen.sender import OPERATIONS
 

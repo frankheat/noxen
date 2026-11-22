@@ -146,6 +146,26 @@ def _plain(literal):
         return literal.strip('"')
 
 
+def _following_fields(suffix):
+    """Find sibling keys after the cursor, stopping at the end of the object."""
+    depth, candidate = 0, None
+    fields = set()
+    for kind, _, _, value in tokens(suffix):
+        if value in ("}", "]"):
+            if depth == 0:
+                break
+            depth -= 1
+        elif value in ("{", "["):
+            depth += 1
+        elif depth == 0 and kind in ("string", "key"):
+            candidate = value
+            continue
+        elif depth == 0 and value == ":" and candidate is not None:
+            fields.add(_plain(candidate))
+        candidate = None
+    return fields
+
+
 def _kind(frames, root="request"):
     """What the innermost object describes: request, intent, bundle, entry, clip or item."""
     kind = None
@@ -212,7 +232,7 @@ def context(text, offset, root="request", operation=None):
     frames = _scan(text[:start])
     top = frames[-1] if frames else None
     result = {"prefix": word.lstrip('"'), "start": start, "quoted": word.startswith('"'), "options": [],
-              "comma_at": None, "position": None}
+              "comma_at": None, "trailing_comma": False, "position": None}
     if top is None:
         return result
     outer_intent_depth = 2 if root == "request" else 1
@@ -222,6 +242,15 @@ def context(text, offset, root="request", operation=None):
     root = frames[0].fields
     if top.bracket == "{" and top.state in ("key", "after"):
         result["position"] = "key"
+        suffix = text[offset:]
+        if word:
+            token = next(tokens(text[start:]), None)
+            if token is not None and token[1] == 0:
+                suffix = text[start + token[2]:]
+            if suffix.lstrip().startswith(":"):
+                return result  # A key with its own value already exists here.
+        following = _following_fields(suffix)
+        result["trailing_comma"] = bool(following) and not suffix.lstrip().startswith(",")
         if top.state == "after":
             result["comma_at"] = top.last_end
         if kind == "request":
@@ -254,7 +283,8 @@ def context(text, offset, root="request", operation=None):
         else:
             options = [(name, f'"{name}": {snippet}') for name, snippet in KEYS.get(kind, {}).items()]
         result["options"] = [(name, snippet) for name, snippet in options
-                             if kind in ("bundle", "contentValues") or name not in top.fields]
+                             if kind in ("bundle", "contentValues") or
+                             (name not in top.fields and name not in following)]
     elif top.state == "value":
         result["position"] = "value"
         # Text already inside quotes is free input unless this is an enum.
@@ -370,6 +400,8 @@ def apply_completion(text, offset, found, snippet):
     else:
         cursor = body.find("$0")
     body = body.replace("$0", "")
+    if found.get("trailing_comma"):
+        body += ","
     head = text[:start]
     comma = found.get("comma_at")
     if comma is not None and comma <= len(head):
