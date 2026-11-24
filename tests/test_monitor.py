@@ -860,7 +860,8 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertTrue(group.content_region.contains_region(button.region))
                 await pilot.click("#monitor_profile_actions")
                 menu = app.screen.query_one("#monitor_actions_menu")
-                self.assertEqual(menu.option_count, 3)
+                self.assertEqual([menu.get_option_at_index(i).id for i in range(menu.option_count)],
+                                 ["toggle", "caller_settings", "rename", "delete"])
                 self.assertEqual(menu.region.y, app.query_one("#monitor_profile_actions").region.bottom)
                 self.assertEqual(app.screen.styles.background.a, 0)
                 await pilot.press("escape")
@@ -869,15 +870,17 @@ class MonitorUITests(IsolatedAppTestCase):
                 restore_button = app.query_one("#monitor_restore")
                 self.assertFalse(restore_button.display)
                 selected = signature(pane.profile()["hooks"][1])
-                await pilot.click("#monitor_hooks", offset=(17, 0))
-                self.assertEqual(table.get_row_at(table.cursor_row)[1].plain, selected)
+                await pilot.click("#monitor_hooks", offset=(25, 0))
+                self.assertEqual(table.get_cell(table.ordered_rows[table.cursor_row].key, "method").plain, selected)
                 for _ in range(2):
                     await pilot.click("#monitor_remove")
                 before = pane.profile()["hooks"][:]
                 self.assertEqual(len(before), 14)
                 self.assertNotIn(selected, {signature(hook) for hook in before})
                 await pilot.click("#monitor_profile_actions")
-                self.assertEqual(app.screen.query_one("#monitor_actions_menu").option_count, 3)
+                menu = app.screen.query_one("#monitor_actions_menu")
+                self.assertEqual([menu.get_option_at_index(i).id for i in range(menu.option_count)],
+                                 ["toggle", "caller_settings", "rename", "delete"])
                 await pilot.press("escape")
                 self.assertTrue(restore_button.display)
                 self.assertEqual(str(restore_button.label), "Restore missing hooks (2)")
