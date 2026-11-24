@@ -469,14 +469,24 @@ def create_http_app(invoke, token, port):
     async def add_monitor_hook(profile_id: str, clazz: str, method: str, args: list[str],
                                expected_revision: str, expected_connection: str,
                                capture_arguments: bool = True, capture_return: bool = True,
-                               capture_stack: bool = False) -> dict[str, Any]:
+                               capture_stack: bool = False, caller_filter: str = "",
+                               caller_match: str = "direct", stack_depth: int = 16, enabled: bool = True,
+                               use_profile_caller: bool | None = None) -> dict[str, Any]:
         """Add an exact Java overload to an existing project Monitor profile. Requires Allow control.
 
         Supply all argument types in order, or an empty list for a no-argument method.
+        caller_filter matches class.method with * and ? wildcards. caller_match is direct or anywhere.
+        stack_depth accepts 16, 32 or 64 and also bounds the caller search.
+        use_profile_caller=true inherits callerSettings from the profile. False uses this hook's settings.
+        When omitted, hooks with custom caller settings keep their own configuration.
+        Custom caller filters require capture_stack=true. An inherited profile filter enables it automatically.
         Check get_monitor_profiles for runtime hook status after saving.
         """
         hook = {"class": clazz, "method": method, "args": args, "captureArguments": capture_arguments,
-                "captureReturn": capture_return, "captureStack": capture_stack}
+                "captureReturn": capture_return, "captureStack": capture_stack,
+                "callerFilter": caller_filter, "callerMatch": caller_match, "stackDepth": stack_depth, "enabled": enabled}
+        if use_profile_caller is not None:
+            hook["useProfileCaller"] = use_profile_caller
         return await invoke("add_monitor_hook", profile_id=profile_id, hook=hook,
                             expected_revision=expected_revision, expected_connection=expected_connection)
 
@@ -486,7 +496,10 @@ def create_http_app(invoke, token, port):
         """Create or replace a project Monitor profile by ID. Requires Allow control.
 
         Supply id, name, enabled and the full hooks list from get_monitor_profiles.
-        To edit or remove a hook, update that list and save the profile again.
+        To edit, remove or toggle a hook, update that list and save the profile again.
+        Set enabled=false on a hook to disable it while retaining its configuration.
+        Profile callerSettings holds callerFilter, callerMatch and stackDepth. Hooks can inherit it
+        with useProfileCaller=true or override it with useProfileCaller=false.
         """
         return await invoke("save_monitor_profile", profile=profile, expected_revision=expected_revision,
                             expected_connection=expected_connection)

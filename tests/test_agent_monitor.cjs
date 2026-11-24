@@ -511,3 +511,123 @@ test('in-memory DEX capture reads only remaining sizes from a bounded buffer lis
     ({ type: bufferType, remainingBytes: 100 + index })));
   assert.equal(event.arguments[1].opaque, true);
 });
+
+test('String equals captures both strings without stringifying other objects', () => {
+  const f = fixture(function (other) { return other === 'pending'; }, 'equals');
+  f.method.returnType.className = 'boolean';
+  f.Java.cast = v => v;
+  Object.assign(f.hook, { class: 'java.lang.String', args: ['java.lang.Object'] });
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+  const receiver = { toString: () => 'pending' };
+  assert.equal(f.method.implementation.call(receiver, 'pending'), true);
+  assert.equal(f.method.implementation.call(receiver, null), false);
+  const other = { $className: 'Example', toString() { assert.fail('must stay opaque'); } };
+  assert.equal(f.method.implementation.call(receiver, other), false);
+  const events = f.monitor.stop().events;
+  assert.equal(events[0].receiver.value, 'pending');
+  assert.equal(events[0].arguments[0].value, 'pending');
+  assert.equal(events[0].result.value, true);
+  assert.equal(events[1].arguments[0].value, null);
+  assert.deepEqual(events[2].arguments[0], { type: 'Example', opaque: true });
+  assert.equal(f.calls(), 3);
+});
+
+test('caller filters distinguish direct callers and deeper frames and preserve original calls', () => {
+  const f = fixture();
+  let traces = 0;
+  f.Java.backtrace = ({ limit }) => {
+    traces++;
+    assert.equal(limit, 32);
+    return { frames: [
+      { className: 'Example', methodName: 'run', signature: 'hook' },
+      { className: 'Library', methodName: 'call', signature: 'library' },
+      { className: 'com.example.Screen', methodName: 'click', signature: 'app' },
+    ] };
+  };
+  Object.assign(f.hook, { callerFilter: 'com.example.*', callerMatch: 'direct', stackDepth: 32 });
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+  assert.equal(f.method.implementation('excluded'), 'excluded');
+  assert.equal(f.monitor.stop().events.length, 0);
+  assert.equal(f.calls(), 1);
+  assert.equal(traces, 1);
+
+  const g = fixture();
+  g.Java.backtrace = f.Java.backtrace;
+  Object.assign(g.hook, { callerFilter: 'com.example.Screen.clic?', callerMatch: 'anywhere',
+    stackDepth: 32, captureStack: true });
+  g.monitor.configure([g.hook], 0);
+  g.settle();
+  assert.equal(g.method.implementation('included'), 'included');
+  const event = g.monitor.stop().events[0];
+  assert.deepEqual(event.stack, ['hook', 'library', 'app']);
+  assert.equal(traces, 2);
+});
+
+test('caller filter retains events on stack capture failure', () => {
+  const f = fixture();
+  f.Java.backtrace = () => { throw new Error('unavailable'); };
+  f.hook.callerFilter = 'com.example.*';
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+  assert.equal(f.method.implementation('test'), 'test');
+  assert.equal(f.monitor.stop().events[0].callerFilterError, true);
+});
+
+test('stack depth bounds caller search and marks a full trace as possibly incomplete', () => {
+  const f = fixture();
+  const frames = Array.from({ length: 32 }, (_, i) => ({
+    className: i === 20 ? 'App' : 'Library', methodName: 'call', signature: String(i),
+  }));
+  f.Java.backtrace = ({ limit }) => ({ frames: frames.slice(0, limit) });
+  Object.assign(f.hook, { callerFilter: 'App.call', callerMatch: 'anywhere', captureStack: true });
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+  assert.equal(f.method.implementation('excluded'), 'excluded');
+  f.hook.stackDepth = 32;
+  assert.equal(f.method.implementation('included'), 'included');
+  const events = f.monitor.stop().events;
+  assert.equal(events.length, 1);
+  assert.equal(events[0].stack.length, 32);
+  assert.equal(events[0].stackTruncated, true);
+});
+
+test('String comparisons capture receiver, string argument and optional offset', () => {
+  for (const [methodName, types, args] of [
+    ['equalsIgnoreCase', ['java.lang.String'], ['APPROVED']],
+    ['startsWith', ['java.lang.String'], ['app']],
+    ['startsWith', ['java.lang.String', 'int'], ['app', 2]],
+    ['endsWith', ['java.lang.String'], ['ved']],
+    ['contains', ['java.lang.CharSequence'], [{ $className: 'java.lang.String', toString: () => 'prov' }]],
+  ]) {
+    const f = fixture(() => true, methodName);
+    f.Java.cast = v => v;
+    f.method.returnType.className = 'boolean';
+    Object.assign(f.hook, { class: 'java.lang.String', args: types });
+    f.monitor.configure([f.hook], 0);
+    f.settle();
+    assert.equal(f.method.implementation.call({ toString: () => 'approved' }, ...args), true);
+    const event = f.monitor.stop().events[0];
+    assert.equal(event.receiver.value, 'approved');
+    assert.equal(event.arguments[0].type, 'java.lang.String');
+    assert.equal(event.arguments[0].value, String(args[0]));
+    if (args.length === 2) assert.equal(event.arguments[1].value, 2);
+    assert.equal(event.result.value, true);
+    assert.equal(f.calls(), 1);
+  }
+});
+
+test('String contains preserves exceptions and does not inspect custom CharSequence', () => {
+  const error = new Error('original failure');
+  const f = fixture(() => { throw error; }, 'contains');
+  Object.assign(f.hook, { class: 'java.lang.String', args: ['java.lang.CharSequence'] });
+  f.monitor.configure([f.hook], 0);
+  f.settle();
+  const custom = { $className: 'AppSequence', toString() { assert.fail('must stay opaque'); } };
+  assert.throws(() => f.method.implementation.call({ toString: () => 'approved' }, custom), e => e === error);
+  const event = f.monitor.stop().events[0];
+  assert.deepEqual(event.arguments[0], { type: 'AppSequence', opaque: true });
+  assert.equal(event.outcome, 'exception');
+  assert.equal(f.calls(), 1);
+});

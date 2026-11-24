@@ -17,13 +17,13 @@ from textual import work
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, Label, OptionList, Rule, Static, Switch, TabbedContent, TabPane
+from textual.widgets import Button, DataTable, Input, Label, OptionList, Rule, Select, Static, Switch, TabbedContent, TabPane
 from textual.widgets.option_list import Option
 
 from noxen.history_columns import normalize_column_widths
 from noxen.logging_ui import log_success
 from noxen.modals import ColumnSelectModal, ExtraKeyModal, ModalButton
-from noxen.monitor import (PROFILE_FORMAT_VERSION, default_profiles, enabled_hooks, event_method_label,
+from noxen.monitor import (PROFILE_FORMAT_VERSION, caller_settings, effective_hook, default_profiles, enabled_hooks, event_method_label,
                            event_search_text, event_sort_value, load_profiles,
                            missing_default_hooks, new_profile, render_event_detail, signature, validate_hook,
                            validate_profiles)
@@ -40,7 +40,7 @@ class MonitorDialog(ModalScreen):
     BINDINGS = [("escape", "dismiss", "Cancel")]
     DEFAULT_CSS = """
     MonitorDialog { align: center middle; }
-    #monitor_dialog { width: 85%; max-width: 84; height: 90%; max-height: 28;
+    #monitor_dialog { width: 85%; max-width: 84; height: 90%; max-height: 40;
         background: $surface; border: solid $foreground-muted; padding: 0 2; }
     #monitor_dialog.profile-name-dialog { height: auto; max-height: 90%; }
     #monitor_dialog_body { height: 1fr; }
@@ -48,6 +48,7 @@ class MonitorDialog(ModalScreen):
     #monitor_dialog_title { text-style: bold; margin-bottom: 1; }
     #monitor_dialog Label { height: auto; }
     #monitor_args { margin-bottom: 1; }
+    #monitor_apply_profiles_title { margin-bottom: 1; }
     .monitor-capture-row { height: auto; align: left middle; margin-bottom: 1; }
     .monitor-capture-row:last-child { margin-bottom: 0; }
     .monitor-capture-row Switch { padding: 0; }
@@ -58,10 +59,18 @@ class MonitorDialog(ModalScreen):
     #monitor_error { color: $error; }
     """
 
-    def __init__(self, hook=None, name=None):
+    def __init__(self, hook=None, name=None, profile_caller=None):
         super().__init__()
         self.hook = copy.deepcopy(hook)
+        self.profile_caller = profile_caller or {}
         self.profile_name = name
+        self._local_caller = {
+            "callerFilter": (hook or {}).get("callerFilter", ""),
+            "callerMatch": (hook or {}).get("callerMatch", "direct"),
+            "stackDepth": (hook or {}).get("stackDepth", 16),
+        }
+        self._local_stack = (hook or {}).get("captureStack", False)
+        self._shown_inherit = None
 
     def compose(self):
         is_profile = self.profile_name is not None
@@ -88,6 +97,8 @@ class MonitorDialog(ModalScreen):
     def on_mount(self):
         selector = "#monitor_name" if self.profile_name is not None else "#monitor_class"
         self.query_one(selector, Input).focus()
+        if self.query("#monitor_inherit_caller"):
+            self.update_caller_fields()
 
     def compose_hook_fields(self):
         hook = self.hook or {}
@@ -102,10 +113,70 @@ class MonitorDialog(ModalScreen):
                     select_on_focus=False, classes="field")
         for key, title, default in (("captureArguments", "Capture arguments", True),
                                     ("captureReturn", "Capture return value", True),
-                                    ("captureStack", "Capture stack (up to 16 frames)", False)):
+                                    ("captureStack", "Capture stack", False)):
             with Horizontal(classes="monitor-capture-row"):
                 yield Switch(value=hook.get(key, default), id=key)
                 yield Label(title)
+
+        inherited = hook.get("useProfileCaller", not (hook.get("callerFilter") or hook.get("stackDepth", 16) != 16))
+        with Horizontal(classes="monitor-capture-row"):
+            yield Switch(value=inherited, id="monitor_inherit_caller")
+            yield Label("Use profile settings")
+        settings = self.profile_caller if inherited else hook
+        yield from self.caller_fields(settings)
+
+    def caller_fields(self, settings):
+        yield Label("Caller filter (class.method, * and ? wildcards; blank for all)")
+        yield Input(settings.get("callerFilter", ""), placeholder="com.example.*", id="monitor_caller",
+                    select_on_focus=False, classes="field")
+        yield Label("Match caller")
+        yield Select([("Direct caller", "direct"), ("Anywhere in stack", "anywhere")],
+                     value=settings.get("callerMatch", "direct"), allow_blank=False, id="monitor_caller_match")
+        yield Label("Stack depth")
+        yield Select([(str(depth), depth) for depth in (16, 32, 64)],
+                     value=settings.get("stackDepth", 16), allow_blank=False, id="monitor_stack_depth")
+
+    def read_caller_fields(self):
+        return {
+            "callerFilter": self.query_one("#monitor_caller", Input).value,
+            "callerMatch": self.query_one("#monitor_caller_match", Select).value,
+            "stackDepth": self.query_one("#monitor_stack_depth", Select).value,
+        }
+
+    def on_switch_changed(self, event):
+        if event.value != event.switch.value:
+            return
+        if event.switch.id == "captureStack":
+            if not event.switch.disabled:
+                self._local_stack = event.switch.value
+            self.update_caller_fields()
+        elif event.switch.id == "monitor_inherit_caller":
+            self.update_caller_fields()
+
+    def update_caller_fields(self):
+        inherit = self.query_one("#monitor_inherit_caller", Switch).value
+        stack = self.query_one("#captureStack", Switch)
+        if self._shown_inherit is False and inherit:
+            self._local_caller = self.read_caller_fields()
+            self._local_stack = stack.value
+        if self._shown_inherit is True and not inherit:
+            self.query_one("#monitor_caller", Input).value = self._local_caller["callerFilter"]
+            self.query_one("#monitor_caller_match", Select).value = self._local_caller["callerMatch"]
+            self.query_one("#monitor_stack_depth", Select).value = self._local_caller["stackDepth"]
+            stack.value = self._local_stack
+        self._shown_inherit = inherit
+        requires_stack = inherit and bool(self.profile_caller.get("callerFilter"))
+        stack.disabled = requires_stack
+        if requires_stack:
+            stack.value = True
+        for key in ("monitor_caller", "monitor_caller_match"):
+            self.query_one(f"#{key}").disabled = inherit or not stack.value
+        self.query_one("#monitor_stack_depth").disabled = inherit
+        if inherit:
+            self.query_one("#monitor_caller", Input).value = self.profile_caller.get("callerFilter", "")
+            self.query_one("#monitor_caller_match", Select).value = self.profile_caller.get("callerMatch", "direct")
+            self.query_one("#monitor_stack_depth", Select).value = self.profile_caller.get("stackDepth", 16)
+
 
     def on_button_pressed(self, event):
         event.stop()
@@ -124,11 +195,63 @@ class MonitorDialog(ModalScreen):
                      "args": args.split(",") if args else []}
                 for key in ("captureArguments", "captureReturn", "captureStack"):
                     h[key] = self.query_one(f"#{key}", Switch).value
+                h["useProfileCaller"] = self.query_one("#monitor_inherit_caller", Switch).value
+                if h["useProfileCaller"]:
+                    h.update(self._local_caller)
+                    h["captureStack"] = self._local_stack
+                else:
+                    h.update(self.read_caller_fields())
+                h["enabled"] = (self.hook or {}).get("enabled", True)
                 self.dismiss(validate_hook(h))
         except ValueError as exc:
             error = self.query_one("#monitor_error", Label)
             error.update(str(exc))
             error.display = True
+
+
+class ProfileCallerDialog(MonitorDialog):
+    def __init__(self, profiles, selected):
+        super().__init__()
+        self.profiles = profiles
+        self.selected = selected
+
+    def compose_hook_fields(self):
+        profile = next(p for p in self.profiles if p["id"] == self.selected)
+        settings = profile.get("callerSettings")
+        yield from self.caller_fields(settings or {})
+        yield Label("Apply to profiles", id="monitor_apply_profiles_title")
+        for index, profile in enumerate(self.profiles):
+            with Horizontal(classes="monitor-capture-row"):
+                yield Switch(value=settings is not None and profile.get("callerSettings") == settings,
+                             id=f"caller_profile_{index}")
+                yield Label(profile["name"])
+
+    def on_mount(self, event):
+        event.prevent_default()
+        self.query_one("#monitor_dialog_title", Label).update("Profile caller settings")
+        self.query_one("#monitor_caller", Input).focus()
+
+    def on_button_pressed(self, event):
+        event.stop()
+        event.prevent_default()
+        if event.button.id == "monitor_cancel":
+            self.dismiss(None)
+            return
+        try:
+            settings = caller_settings({
+                "callerFilter": self.query_one("#monitor_caller", Input).value,
+                "callerMatch": self.query_one("#monitor_caller_match", Select).value,
+                "stackDepth": self.query_one("#monitor_stack_depth", Select).value,
+            })
+            selected = [p["id"] for i, p in enumerate(self.profiles)
+                        if self.query_one(f"#caller_profile_{i}", Switch).value]
+            if not selected:
+                raise ValueError("Select at least one profile")
+            self.dismiss((settings, selected))
+        except ValueError as error:
+            label = self.query_one("#monitor_error", Label)
+            label.update(str(error))
+            label.display = True
 
 
 class RestoreHooksDialog(ModalScreen):
@@ -230,6 +353,23 @@ class MonitorProfileTable(DataTable):
             event.stop()
             self.move_cursor(row=row)
             self.post_message(self.ToggleRequested(profile_id))
+
+
+class MonitorHookTable(DataTable):
+    class ToggleRequested(Message):
+        def __init__(self, row_key):
+            super().__init__()
+            self.row_key = row_key
+
+    def on_click(self, event):
+        meta = event.style.meta
+        row = meta.get("row", -1)
+        if (event.button == 1 and meta.get("column") == 0
+                and not meta.get("out_of_bounds") and 0 <= row < self.row_count):
+            event.prevent_default()
+            event.stop()
+            self.move_cursor(row=row)
+            self.post_message(self.ToggleRequested(self.ordered_rows[row].key.value))
 
 
 class MonitorActionsMenu(ModalScreen):
@@ -417,12 +557,11 @@ class MonitorPane(Vertical):
                                 yield ModalButton("+ Add", id="monitor_add")
                                 yield ModalButton("Edit", id="monitor_edit")
                                 yield Button("Remove", id="monitor_remove")
-                                yield ModalButton("Details", id="monitor_hook_details")
                             with Horizontal(id="monitor_hook_restore_group"):
                                 yield ModalButton("Restore missing hooks", id="monitor_restore")
                         yield Rule(classes="section_separator")
                         yield Label("", id="monitor_hooks_empty", classes="monitor_empty")
-                        yield DataTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
+                        yield MonitorHookTable(id="monitor_hooks", cursor_type="row", classes="monitor_table")
                         yield Rule(classes="section_separator")
 
     def on_mount(self):
@@ -493,7 +632,9 @@ class MonitorPane(Vertical):
         profiles = self.profiles if all_hooks else [profile] if profile else []
         self.hook_rows = [(p, i) for p in profiles for i in range(len(p["hooks"]))]
         sort_column, reverse = self.hook_sorts.get(self.selected_profile, (None, False))
-        if sort_column == "state":
+        if sort_column == "enabled":
+            self.hook_rows.sort(key=lambda row: row[0]["hooks"][row[1]].get("enabled", True), reverse=reverse)
+        elif sort_column == "state":
             self.hook_rows.sort(key=lambda row: self.hook_status(*row)[0].casefold(), reverse=reverse)
         elif sort_column == "profile":
             self.hook_rows.sort(key=lambda row: row[0]["name"].casefold(), reverse=reverse)
@@ -502,10 +643,10 @@ class MonitorPane(Vertical):
         signatures = [signature(p["hooks"][i]) for p, i in self.hook_rows]
 
         available = self.hook_panel_content_width()
-        column_count = 3 if all_hooks else 2
+        column_count = 4 if all_hooks else 3
         profile_width = min(17, max(10, width // 8)) if all_hooks else 0
         available -= table.scrollbar_size_vertical + column_count * 2 * table.cell_padding
-        method_width = max(15, available - self.HOOK_STATE_WIDTH - profile_width)
+        method_width = max(15, available - self.HOOK_STATE_WIDTH - profile_width - 6)
         if all_hooks:
             method_width = max(method_width, max(map(cell_len, signatures), default=0))
         method_column = table.columns.get("method")
@@ -515,7 +656,7 @@ class MonitorPane(Vertical):
         )
         table.clear(columns=resize_columns)
         if resize_columns:
-            columns = [("state", "State", self.HOOK_STATE_WIDTH)]
+            columns = [("enabled", "Active", 6), ("state", "State", self.HOOK_STATE_WIDTH)]
             if all_hooks:
                 columns.append(("profile", "Profile", profile_width))
             columns.append(("method", "Method overload", method_width))
@@ -526,7 +667,7 @@ class MonitorPane(Vertical):
             self._hooks_layout_width = width
         for (p, i), method in zip(self.hook_rows, signatures):
             state, _ = self.hook_status(p, i)
-            cells = [state]
+            cells = [enabled_cell(p["hooks"][i].get("enabled", True), self.app.current_theme.dark), state]
             if all_hooks:
                 cells.append(Text(p["name"], no_wrap=True, overflow="ellipsis"))
             cells.append(Text(method, no_wrap=True, overflow="ellipsis"))
@@ -552,7 +693,7 @@ class MonitorPane(Vertical):
                 - 1 - table.styles.margin.width)
 
     def hook_status(self, profile, row):
-        if not profile["enabled"]:
+        if not profile["enabled"] or not profile["hooks"][row].get("enabled", True):
             return "Disabled", ""
         if self.session is None or self.session is not self.app.frida_session:
             return "Not connected", ""
@@ -584,7 +725,6 @@ class MonitorPane(Vertical):
             button = self.query_one(f"#monitor_{key}", Button)
             button.display = p is not None
             button.disabled = connecting or not (p and p["hooks"])
-        self.query_one("#monitor_hook_details", Button).disabled = not self.hook_rows
         restore = self.query_one("#monitor_restore", Button)
         missing = len(missing_default_hooks(p))
         restore.display = self.query_one("#monitor_hook_restore_group").display = bool(missing)
@@ -609,6 +749,7 @@ class MonitorPane(Vertical):
             profile_id = profile["id"]
             actions.extend([
                 ("toggle", "Disable" if profile["enabled"] else "Enable"),
+                ("caller_settings", "Caller settings"),
                 ("rename", "Rename"),
                 ("delete", "Delete profile"),
             ])
@@ -642,6 +783,17 @@ class MonitorPane(Vertical):
                     profile["name"] = name
                     self.save(profiles, profile_id)
             self.app.push_screen(MonitorDialog(name=profile["name"]), rename)
+        elif action == "caller_settings":
+            def save_callers(result):
+                if result is None or self.app._connection_state == "connecting":
+                    return
+                settings, selected = result
+                updated = copy.deepcopy(self.profiles)
+                for target in updated:
+                    if target["id"] in selected:
+                        target["callerSettings"] = settings
+                self.save(updated, profile_id if profile_id in selected else selected[0])
+            self.app.push_screen(ProfileCallerDialog(self.profiles, profile_id), save_callers)
         elif action == "delete":
             self.save([p for p in profiles if p["id"] != profile_id])
         elif action == "retry":
@@ -1207,6 +1359,11 @@ class MonitorPane(Vertical):
             self.selected_profile = key.value
             self.refresh_hooks(reset_selection=True)
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected):
+        if event.data_table.id == "monitor_hooks":
+            event.stop()
+            self.show_hook()
+
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
         if event.data_table.id == "monitor_events":
             event.stop()
@@ -1223,8 +1380,27 @@ class MonitorPane(Vertical):
         self.hook_sorts[self.selected_profile] = (key, key == previous and not reverse)
         self.refresh_hooks(rebuild_columns=True)
 
+    def on_monitor_hook_table_toggle_requested(self, event):
+        event.stop()
+        table = self.query_one("#monitor_hooks", DataTable)
+        if event.row_key in table.rows:
+            self.toggle_hook(table.get_row_index(event.row_key))
+
+    def toggle_hook(self, row):
+        if self.app._connection_state == "connecting" or not 0 <= row < len(self.hook_rows):
+            return
+        profile, index = self.hook_rows[row]
+        profiles = copy.deepcopy(self.profiles)
+        target = next(p for p in profiles if p["id"] == profile["id"])
+        hook = target["hooks"][index]
+        hook["enabled"] = not hook.get("enabled", True)
+        self.save(profiles, self.selected_profile)
+
     def on_key(self, event):
-        if event.key == "space" and getattr(self.app.focused, "id", None) == "monitor_profiles":
+        if event.key == "space" and getattr(self.app.focused, "id", None) == "monitor_hooks":
+            event.stop()
+            self.toggle_hook(self.query_one("#monitor_hooks", DataTable).cursor_row)
+        elif event.key == "space" and getattr(self.app.focused, "id", None) == "monitor_profiles":
             event.stop()
             if self.selected_profile != ALL_HOOKS_ROW:
                 self.toggle_profile(self.selected_profile)
@@ -1267,9 +1443,6 @@ class MonitorPane(Vertical):
             self.app.action_send_to_sender()
             return
         p = self.profile()
-        if action == "hook_details":
-            self.show_hook()
-            return
         if self.app._connection_state == "connecting":
             return
         if action == "new":
@@ -1306,4 +1479,5 @@ class MonitorPane(Vertical):
                     else:
                         target["hooks"][row] = h
                     self.save(profiles)
-            self.app.push_screen(MonitorDialog(hook=None if action == "add" else target["hooks"][row]), save_hook)
+            self.app.push_screen(MonitorDialog(hook=None if action == "add" else target["hooks"][row],
+                                                  profile_caller=target.get("callerSettings", {})), save_hook)

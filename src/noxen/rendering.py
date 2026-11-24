@@ -1,3 +1,4 @@
+from noxen.stack_format import format_stack_frame
 from datetime import datetime, timedelta, timezone
 import unicodedata
 import json
@@ -1096,7 +1097,7 @@ def _stack_lines(trace: list, stack_depth: int, show_empty: bool = False) -> lis
         return ["", _section("STACK TRACE"), "  [dim]No stack trace captured.[/dim]"] if show_empty else []
     lines = ["", _section("STACK TRACE")]
     for line in trace[:stack_depth]:
-        lines.append(f"  [dim]{_markup(line)}[/dim]")
+        lines.append(f"  [dim]{_markup(format_stack_frame(line))}[/dim]")
     if len(trace) > stack_depth:
         lines.append(f"  [dim]... (+{len(trace) - stack_depth} more)[/dim]")
     return lines

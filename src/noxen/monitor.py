@@ -6,12 +6,14 @@ import uuid
 
 from rich.text import Text
 
+from noxen.stack_format import format_stack_frame
+
 from noxen.rendering import (capture_datetime, capture_order_label, capture_order_sort_value, decode_intent_flags, detail_field_prefix,
                              format_capture_time, format_uri_grant_flags)
 
 MAX_PROFILES = 32
 MAX_HOOKS = 128
-PROFILE_FORMAT_VERSION = 12
+PROFILE_FORMAT_VERSION = 13
 _INTENT = "android.content.Intent"
 _RESOLVER = "android.content.ContentResolver"
 _TRANSPORT = "android.content.ContentProvider$Transport"
@@ -118,6 +120,54 @@ def validate_hook(hook):
         if type(value) is not bool:
             raise ValueError("Capture options must be booleans")
         result[field] = value
+    enabled = hook.get("enabled", True)
+    if type(enabled) is not bool:
+        raise ValueError("Hook enabled state must be boolean")
+    if not enabled:
+        result["enabled"] = False
+    depth = hook.get("stackDepth", 16)
+    if type(depth) is not int or depth not in (16, 32, 64):
+        raise ValueError("Stack depth must be 16, 32 or 64")
+    caller = hook.get("callerFilter", "")
+    if not isinstance(caller, str) or len(caller) > 256 or any(ord(c) < 32 for c in caller):
+        raise ValueError("Caller filter must contain up to 256 printable characters")
+    mode = hook.get("callerMatch", "direct")
+    if mode not in ("direct", "anywhere"):
+        raise ValueError("Caller match must be direct or anywhere")
+    if depth != 16:
+        result["stackDepth"] = depth
+    if caller.strip():
+        result["callerFilter"] = caller.strip()
+        result["callerMatch"] = mode
+    inherit = hook.get("useProfileCaller", not (caller.strip() or depth != 16))
+    if type(inherit) is not bool:
+        raise ValueError("Use profile settings must be boolean")
+    if not inherit:
+        result["useProfileCaller"] = False
+    elif "useProfileCaller" in hook:
+        result["useProfileCaller"] = True
+    return result
+
+
+def caller_settings(settings):
+    if not isinstance(settings, dict):
+        raise ValueError("Invalid caller settings")
+    checked = validate_hook(dict(settings, **{"class": "Profile", "method": "settings", "args": []}))
+    return {key: checked[key] for key in ("callerFilter", "callerMatch", "stackDepth") if key in checked}
+
+
+def effective_hook(profile, hook):
+    result = copy.deepcopy(hook)
+    inherit = hook.get("useProfileCaller", not (hook.get("callerFilter") or hook.get("stackDepth", 16) != 16))
+    if inherit:
+        for key in ("callerFilter", "callerMatch", "stackDepth"):
+            result.pop(key, None)
+        result.update(profile.get("callerSettings", {}))
+        if result.get("callerFilter"):
+            result["captureStack"] = True
+    if not result.get("captureStack", False):
+        result.pop("callerFilter", None)
+        result.pop("callerMatch", None)
     return result
 
 
@@ -340,6 +390,18 @@ def _all_default_profiles():
             )
         ],
     })
+    profiles.append({
+        "id": "string-equals", "name": "String Comparisons", "enabled": False,
+        "hooks": [validate_hook({"class": _STRING, "method": method, "args": args})
+                  for method, args in (
+                      ("equals", ["java.lang.Object"]),
+                      ("equalsIgnoreCase", [_STRING]),
+                      ("startsWith", [_STRING]),
+                      ("startsWith", [_STRING, "int"]),
+                      ("endsWith", [_STRING]),
+                      ("contains", ["java.lang.CharSequence"]),
+                  )],
+    })
     return profiles
 
 
@@ -369,7 +431,10 @@ def validate_profiles(profiles):
             raise ValueError(f"Maximum {MAX_HOOKS} hooks across profiles")
         ids.add(pid)
         names.add(name.casefold())
-        result.append({"id": pid, "name": name, "enabled": p["enabled"], "hooks": hooks})
+        profile = {"id": pid, "name": name, "enabled": p["enabled"], "hooks": hooks}
+        if "callerSettings" in p:
+            profile["callerSettings"] = caller_settings(p["callerSettings"])
+        result.append(profile)
     return result
 
 
@@ -377,11 +442,14 @@ def default_profiles():
     return [p for p in _all_default_profiles() if p["id"] not in ("content-provider", "provider-inbound")]
 
 
-def _retire_provider_profiles(profiles):
+def _normalize_builtin_profiles(profiles):
     supported = {"query", "getType", "insert", "update", "delete", "call", "openFile", "openAssetFile",
                  "openTypedAssetFile", "openFileDescriptor", "openInputStream", "openOutputStream", "openTypedAssetFileDescriptor"}
     result = []
     for profile in profiles:
+        if (profile["id"] == "string-equals" and profile["name"] == "String Equals"
+                and not any(p["name"].casefold() == "string comparisons" for p in profiles)):
+            profile = dict(profile, name="String Comparisons")
         if profile["id"] in ("content-provider", "provider-inbound"):
             profile = dict(profile, hooks=[h for h in profile["hooks"]
                            if not (h["class"] in (_RESOLVER, _TRANSPORT) and h["method"] in supported)])
@@ -404,7 +472,7 @@ def load_profiles(raw):
                 raise ValueError("Unsupported Monitor profile format")
             profiles = validate_profiles(saved.get("profiles"))
             if version == PROFILE_FORMAT_VERSION:
-                return _retire_provider_profiles(profiles), None
+                return _normalize_builtin_profiles(profiles), None
             new_defaults = _all_default_profiles()[version + 1:]
         else:
             raise ValueError("Unsupported Monitor profile format")
@@ -413,15 +481,17 @@ def load_profiles(raw):
             if (p["id"] == "content-provider" and p["name"] == "Content Provider"
                     and all(other["name"].casefold() != "content resolver" for other in profiles)):
                 p["name"] = "Content Resolver"
+        # Retired provider hooks must not consume capacity while adding defaults.
+        profiles = _normalize_builtin_profiles(profiles)
         # Add only profiles introduced since this project was saved.
-        for default in new_defaults:
+        for default in _normalize_builtin_profiles(new_defaults):
             if any(p["id"] == default["id"] or p["name"].casefold() == default["name"].casefold()
                    for p in profiles):
                 continue
             hook_count = sum(len(p["hooks"]) for p in profiles)
             if len(profiles) < MAX_PROFILES and hook_count + len(default["hooks"]) <= MAX_HOOKS:
                 profiles.append(default)
-        return _retire_provider_profiles(profiles), None
+        return _normalize_builtin_profiles(profiles), None
     except (ValueError, TypeError):
         return default_profiles(), "Saved Monitor profiles are invalid; loaded the default profiles."
 
@@ -431,8 +501,8 @@ def new_profile(name):
 
 
 def enabled_hooks(profiles):
-    return [dict(copy.deepcopy(h), profile=p["id"], profileName=p["name"], index=i)
-            for p in profiles if p["enabled"] for i, h in enumerate(p["hooks"])]
+    return [dict(effective_hook(p, h), profile=p["id"], profileName=p["name"], index=i)
+            for p in profiles if p["enabled"] for i, h in enumerate(p["hooks"]) if h.get("enabled", True)]
 
 
 def event_method_label(event):
@@ -678,6 +748,10 @@ def render_event_detail(event) -> Text:
         call_field("Cipher", display_value(event["transformation"]))
     if "sourcePath" in event:
         call_field("Path" if event.get("method") == "delete" else "Source", display_value(event["sourcePath"]))
+    if event.get("callerFilterError"):
+        call_field("Caller filter", "Stack unavailable; event retained")
+    if "receiver" in event:
+        call_field("Receiver", display_value(event["receiver"]))
     if "arguments" in event:
         section("ARGUMENTS")
         names = _argument_names(event)
@@ -772,7 +846,9 @@ def render_event_detail(event) -> Text:
         text.append(" (original exception propagated)", "dim")
     if "stack" in event:
         section("STACK")
+        if event.get("stackTruncated"):
+            text.append("  Stack may be incomplete (depth limit reached)", "dim")
         stack = event["stack"]
         for frame in stack if isinstance(stack, list) else ["unavailable"]:
-            text.append(f"\n  {frame}", "dim")
+            text.append(f"\n  {format_stack_frame(frame)}", "dim")
     return text

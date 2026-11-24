@@ -450,6 +450,27 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
   }
   function captureCall(method, receiver, args, specs, thread) {
     if (!specs.length) return method.apply(receiver, args);
+    let trace = null;
+    const needsTrace = specs.some(s => s.captureStack || s.callerFilter);
+    if (needsTrace) {
+      const depth = Math.max(...specs.map(s => s.stackDepth || 16));
+      trace = inspect(() => Java.backtrace({ limit: depth }).frames);
+      specs = specs.filter(spec => {
+        if (!spec.callerFilter || !Array.isArray(trace)) return true;
+        const frames = trace.slice(0, spec.stackDepth || 16);
+        // Frida includes the hooked method as the first frame.
+        if (frames[0]?.className === spec.class && frames[0]?.methodName === spec.method) frames.shift();
+        const candidates = spec.callerMatch === 'anywhere' ? frames : frames.slice(0, 1);
+        const pattern = spec.callerFilter.split('').map(char => {
+          if (char === '*') return '.*';
+          if (char === '?') return '.';
+          return char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }).join('');
+        const matcher = new RegExp('^' + pattern + '$');
+        return candidates.some(frame => matcher.test(frame.className + '.' + frame.methodName));
+      });
+      if (!specs.length) return method.apply(receiver, args);
+    }
     const webSpec = webSettingsHooks.length ? specs.find(spec =>
       (spec.profile === 'webview' && spec.class === WEB_VIEW) || isWebSetting(spec)) : null;
     if (queue.length >= MAX_QUEUED_EVENTS) {
@@ -461,12 +482,12 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
     }
     activeCalls++;
     try {
-      return recordCall(method, receiver, args, specs, thread, webSpec);
+      return recordCall(method, receiver, args, specs, thread, webSpec, trace);
     } finally {
       activeCalls--;
     }
   }
-  function recordCall(method, receiver, args, specs, thread, webSpec) {
+  function recordCall(method, receiver, args, specs, thread, webSpec, trace) {
     const generation = webGeneration;
     const event = { ...captureStamp(), id: ++sequence, revision: revision,
       profiles: specs.map(s => s.profileName),
@@ -482,6 +503,16 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
       processArguments(event, receiver, args);
     } else if (specs.some(s => s.captureArguments)) {
       event.arguments = specs[0].args.map((_, i) => inspect(() => argumentValue(specs[0], args, i)));
+      if (event.class === STRING
+          && ['equals', 'equalsIgnoreCase', 'startsWith', 'endsWith', 'contains'].includes(event.method)) {
+        event.receiver = inspect(() => value(receiver, STRING));
+        event.arguments[0] = inspect(() => {
+          const arg = args[0];
+          if (arg != null && (typeof arg === 'string' || arg.$className === STRING))
+            return value(typeof arg === 'string' ? arg : Java.cast(arg, Java.use(STRING)), STRING);
+          return value(arg, arg == null ? event.types[0] : arg.$className || event.types[0]);
+        });
+      }
       if (event.class === URL_CLASS && event.method === 'openConnection')
         event.destination = inspect(() => urlDestination(receiver));
       if (event.class === CIPHER && event.method === 'init')
@@ -489,8 +520,12 @@ function createMonitor(Java, sendMessage, schedule, captureStamp = () => ({ time
       if (event.class === FILE && (event.method === 'delete' || event.method === 'renameTo'))
         event.sourcePath = inspect(() => value(receiver, FILE));
     }
-    if (specs.some(s => s.captureStack))
-      event.stack = inspect(() => Java.backtrace({ limit: 16 }).frames.map(f => f.signature));
+    if (specs.some(s => s.callerFilter) && !Array.isArray(trace)) event.callerFilterError = true;
+    if (specs.some(s => s.captureStack)) {
+      const depth = Math.max(...specs.filter(s => s.captureStack).map(s => s.stackDepth || 16));
+      event.stack = Array.isArray(trace) ? trace.slice(0, depth).map(f => f.signature) : trace;
+      if (Array.isArray(trace) && trace.length >= depth) event.stackTruncated = true;
+    }
     let result;
     try { result = method.apply(receiver, args); }
     catch (error) {

@@ -306,13 +306,54 @@ class MonitorModelTests(unittest.TestCase):
         self.assertIn('"[bold]:cd:[/bold]"', detail.plain)
         self.assertNotIn(('"[bold]:cd:[/bold]"', "dim"), spans)
 
+    def test_disabled_hook_preserves_settings_and_profile_gates_activation(self):
+        hook = {"class": "Example", "method": "run", "args": [], "enabled": False,
+                "callerFilter": "app.*", "callerMatch": "anywhere", "stackDepth": 32}
+        profiles = validate_profiles([{"id": "custom", "name": "Custom", "enabled": True, "hooks": [hook]}])
+        self.assertEqual(enabled_hooks(profiles), [])
+        restored, error = load_profiles(json.dumps({"version": PROFILE_FORMAT_VERSION, "profiles": profiles}))
+        self.assertIsNone(error)
+        self.assertEqual(restored, profiles)
+        restored[0]["hooks"][0]["enabled"] = True
+        self.assertEqual(len(enabled_hooks(restored)), 1)
+        restored[0]["enabled"] = False
+        self.assertEqual(enabled_hooks(restored), [])
+        with self.assertRaises(ValueError):
+            validate_hook(dict(hook, enabled="false"))
+
+    def test_profile_caller_inheritance_and_explicit_overrides(self):
+        profiles = validate_profiles([{
+            "id": "custom", "name": "Custom", "enabled": True,
+            "callerSettings": {"callerFilter": "app.*", "callerMatch": "anywhere", "stackDepth": 32},
+            "hooks": [
+                {"class": "Example", "method": "inherited", "args": []},
+                {"class": "Example", "method": "legacy", "args": [], "callerFilter": "legacy.*", "captureStack": True},
+                {"class": "Example", "method": "unfiltered", "args": [], "useProfileCaller": False},
+            ],
+        }])
+        inherited, legacy, unfiltered = enabled_hooks(profiles)
+        self.assertEqual(inherited["callerFilter"], "app.*")
+        self.assertEqual(inherited["callerMatch"], "anywhere")
+        self.assertEqual(inherited["stackDepth"], 32)
+        self.assertTrue(inherited["captureStack"])
+        self.assertEqual(legacy["callerFilter"], "legacy.*")
+        self.assertNotIn("callerFilter", unfiltered)
+        restored, error = load_profiles(json.dumps({"version": PROFILE_FORMAT_VERSION, "profiles": profiles}))
+        self.assertIsNone(error)
+        self.assertEqual(restored, profiles)
+        profiles[0]["callerSettings"]["callerFilter"] = "changed.*"
+        self.assertEqual(enabled_hooks(profiles)[0]["callerFilter"], "changed.*")
+        self.assertEqual(enabled_hooks(profiles)[1]["callerFilter"], "legacy.*")
+
     def test_validation_and_roundtrip(self):
         profiles = default_profiles()
         self.assertEqual(load_profiles(json.dumps(profiles[:1])), (profiles, None))
         for version in range(1, PROFILE_FORMAT_VERSION):
             restored, error = load_profiles(json.dumps({"version": version, "profiles": profiles[:1]}))
             self.assertIsNone(error)
-            self.assertEqual(restored, [profiles[0], *profiles[version:]])
+            # Version 12 introduced Incoming Provider, now retired from Monitor.
+            first_new = version if version < 12 else version - 1
+            self.assertEqual(restored, [profiles[0], *profiles[first_new:]])
             self.assertFalse(any(p["id"] in ("content-provider", "provider-inbound") for p in restored))
         current = {"version": PROFILE_FORMAT_VERSION, "profiles": profiles[:1]}
         self.assertEqual(load_profiles(json.dumps(current)), (profiles[:1], None))
@@ -520,18 +561,18 @@ class MonitorUITests(IsolatedAppTestCase):
                 await pilot.click("#monitor_save")
                 await wait_until(lambda: bool(requests))
                 self.assertTrue(requests[-1][0][0]["captureStack"])
-                self.assertEqual([table.get_row_at(i)[0] for i in range(2)], ["Active", "Active"])
+                self.assertEqual([table.get_row_at(i)[1] for i in range(2)], ["Active", "Active"])
 
                 await pilot.click("#monitor_edit")
                 app.screen.query_one("#monitor_method", Input).value = "getAction"
                 app.screen.query_one("#monitor_args", Input).value = ""
                 await pilot.click("#monitor_save")
                 await wait_until(lambda: len(requests) == 2)
-                self.assertEqual([table.get_row_at(i)[0] for i in range(2)], ["Pending", "Active"])
+                self.assertEqual([table.get_row_at(i)[1] for i in range(2)], ["Pending", "Active"])
                 report(2, ["Error", "Active"])
                 report(1, ["Active", "Active"])
                 pane.drain()
-                self.assertEqual([table.get_row_at(i)[0] for i in range(2)], ["Error", "Active"])
+                self.assertEqual([table.get_row_at(i)[1] for i in range(2)], ["Error", "Active"])
 
     async def test_capture_order_column_is_optional_and_sorts_numerically_in_both_tables(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -935,12 +976,11 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertFalse(app.query_one("#monitor_remove").display)
                 self.assertFalse(app.query_one("#monitor_restore").display)
                 self.assertTrue(app.query_one("#monitor_new").display)
-                self.assertTrue(app.query_one("#monitor_hook_details").display)
+                self.assertFalse(app.query("#monitor_hook_details"))
                 profile_panel = app.query_one("#monitor_profile_panel")
                 hook_panel = app.query_one("#monitor_hook_panel")
                 self.assertEqual(hook_panel.region.x - profile_panel.region.right, 1)
                 self.assertTrue(profile_panel.region.contains_region(app.query_one("#monitor_new").region))
-                self.assertTrue(hook_panel.region.contains_region(app.query_one("#monitor_hook_details").region))
                 self.assertEqual(str(profile_panel.query_one(".monitor_profile_title", Label).render()), "Profiles")
                 self.assertEqual(str(hook_panel.query_one(".monitor_profile_title", Label).render()), "Hooks")
                 await pilot.press("space")
@@ -948,9 +988,9 @@ class MonitorUITests(IsolatedAppTestCase):
                 hooks = app.query_one("#monitor_hooks", DataTable)
                 self.assertEqual(hooks.row_count, sum(len(p["hooks"]) for p in pane.profiles))
                 provider_hook = len(pane.profiles[0]["hooks"])
-                self.assertEqual(hooks.get_row_at(provider_hook)[0], "Disabled")
-                self.assertEqual(hooks.get_row_at(provider_hook)[1].plain, "URI Grants")
-                self.assertEqual(hooks.get_row_at(provider_hook)[2].plain, signature(pane.profiles[1]["hooks"][0]))
+                self.assertEqual(hooks.get_row_at(provider_hook)[1], "Disabled")
+                self.assertEqual(hooks.get_row_at(provider_hook)[2].plain, "URI Grants")
+                self.assertEqual(hooks.get_row_at(provider_hook)[3].plain, signature(pane.profiles[1]["hooks"][0]))
                 hooks.focus()
                 await pilot.pause()
                 self.assertEqual(
@@ -964,43 +1004,43 @@ class MonitorUITests(IsolatedAppTestCase):
                 self.assertEqual(hooks.virtual_size.width, hooks.scrollable_content_region.width)
                 await pilot.resize_terminal(80, 24)
                 hooks.move_cursor(row=provider_hook)
-                await pilot.click("#monitor_hook_details")
+                hooks.focus()
+                await pilot.press("enter")
                 details = app.screen.query_one(TextArea).text
                 self.assertIn("android.app.ContextImpl.grantUriPermission(", details)
                 self.assertIn("Profile: URI Grants", details)
                 await pilot.press("escape")
                 self.assertIs(app.focused, hooks)
-                await pilot.click("#monitor_hooks", offset=(17, 0))
-                profile_names = [hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)]
+                await pilot.click("#monitor_hooks", offset=(25, 0))
+                profile_names = [hooks.get_row_at(i)[2].plain for i in range(hooks.row_count)]
                 self.assertEqual(profile_names, sorted(profile_names, key=str.casefold))
-                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[1].plain, "URI Grants")
-                await pilot.click("#monitor_hooks", offset=(17, 0))
-                self.assertEqual([hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)],
+                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[2].plain, "URI Grants")
+                await pilot.click("#monitor_hooks", offset=(25, 0))
+                self.assertEqual([hooks.get_row_at(i)[2].plain for i in range(hooks.row_count)],
                                  sorted(profile_names, key=str.casefold, reverse=True))
                 self.assertEqual(hooks.columns["profile"].label.plain, "Profile ↓")
-                await pilot.click("#monitor_hooks", offset=(2, 0))
+                await pilot.click("#monitor_hooks", offset=(10, 0))
                 self.assertEqual(hooks.columns["state"].label.plain, "State ↑")
                 profiles.move_cursor(row=profiles.get_row_index("webview"))
                 await pilot.pause()
                 hooks = app.query_one('#monitor_hooks', DataTable)
                 hooks.move_cursor(row=4)
-                narrow_width = list(hooks.columns.values())[1].width
+                narrow_width = hooks.columns["method"].width
                 await pilot.resize_terminal(140, 24)
-                self.assertEqual(list(hooks.columns.values())[1].width, narrow_width + 60)
+                self.assertEqual(hooks.columns["method"].width, narrow_width + 60)
                 self.assertEqual(hooks.cursor_row, 4)
                 await pilot.resize_terminal(80, 24)
-                self.assertEqual(list(hooks.columns.values())[1].width, narrow_width)
-                details_button = app.query_one("#monitor_hook_details")
-                details_button.focus()
+                self.assertEqual(hooks.columns["method"].width, narrow_width)
+                hooks.focus()
                 await pilot.press("enter")
                 self.assertIn("android.webkit.WebView.loadDataWithBaseURL(", app.screen.query_one(TextArea).text)
                 await pilot.press("escape")
-                self.assertIs(app.focused, details_button)
-                selected = hooks.get_row_at(hooks.cursor_row)[1].plain
-                await pilot.click("#monitor_hooks", offset=(17, 0))
-                methods = [hooks.get_row_at(i)[1].plain for i in range(hooks.row_count)]
+                self.assertIs(app.focused, hooks)
+                selected = hooks.get_row_at(hooks.cursor_row)[2].plain
+                await pilot.click("#monitor_hooks", offset=(25, 0))
+                methods = [hooks.get_row_at(i)[2].plain for i in range(hooks.row_count)]
                 self.assertEqual(methods, sorted(methods, key=str.casefold))
-                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[1].plain, selected)
+                self.assertEqual(hooks.get_row_at(hooks.cursor_row)[2].plain, selected)
                 await pilot.click("#monitor_edit")
                 self.assertEqual(app.screen.query_one("#monitor_method", Input).value, "loadDataWithBaseURL")
                 await pilot.click("#monitor_cancel")
