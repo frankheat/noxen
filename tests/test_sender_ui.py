@@ -26,6 +26,46 @@ async def settle(pilot, condition, timeout=5.0):
 
 
 class SenderUITests(IsolatedAppTestCase):
+    async def test_history_activity_flag_completion_clears_draft_warning_disconnected(self):
+        app = NoxenApp(SimpleNamespace(project=None, new_project=str(self.settings_path.parent / "history-flag"),
+                                       skip_device_scan=True))
+        async with app.run_test(size=(120, 42)) as pilot:
+            tabs = app.query_one("#main_tabs", TabbedContent)
+            tabs.active = "tab_history"
+            await pilot.pause()
+            app._history_selected_entry = {"id": 1, "method": "startActivity", "intent": {
+                "component": "dev.noxen.playground/.InvitationApprovalActivity", "action": None,
+                "data": None, "mimeType": None, "package": None, "flags": 0, "categories": [],
+                "selector": None, "clipData": None, "extras": None}}
+            await pilot.press("ctrl+r")
+            pane = app.query_one(SenderPane)
+            await settle(pilot, lambda: pane._editor_key is not None and "startActivity" in pane.editor.area.text)
+            tabs.active = "tab_sender"
+            await pilot.pause()
+            area = pane.editor.area
+            status = pane.editor.query_one(".json_status")
+            self.assertIn("FLAG_ACTIVITY_NEW_TASK", str(status.content))
+            self.assertEqual(app.sender_service.status()["state"], "disconnected")
+            self.assertIn('"flags": []', area.text)
+            area.focus()
+            area.move_cursor(area.location(area.text.index('"flags": []') + len('"flags": [')))
+            await pilot.press("ctrl+space")
+            self.assertTrue(area.popup.display)
+            self.assertEqual(area._matches[0][0], "FLAG_ACTIVITY_NEW_TASK")
+            await pilot.press("enter")
+            self.assertIn('"flags": ["FLAG_ACTIVITY_NEW_TASK"]', area.text)
+            self.assertEqual(str(status.content), "")
+            self.assertFalse(status.has_class("error"))
+            await settle(pilot, lambda: pane.selected()["request"].get("operation") == "startActivity")
+            self.assertIsNone(app.db.sender_draft(*pane._editor_key))
+            # The same status update applies to ordinary edits, including pasted text.
+            valid_text = area.text
+            area.load(valid_text.replace('"operation": "startActivity"', '"operation": "unknown"'))
+            await settle(pilot, lambda: "Unsupported Sender operation" in str(status.content))
+            area.load(valid_text)
+            await settle(pilot, lambda: str(status.content) == "")
+            self.assertFalse(status.has_class("error"))
+
     async def test_result_shows_query_summary_and_switches_to_raw_and_details(self):
         project = self.settings_path.parent / "result"
         app = NoxenApp(SimpleNamespace(project=None, new_project=str(project), skip_device_scan=True))

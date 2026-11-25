@@ -13,7 +13,7 @@ from textual.widgets.option_list import Option
 
 from noxen.modals import ModalButton
 from noxen.monitor_ui import RecordingDialog
-from noxen.sender import SenderError, render_sender_detail
+from noxen.sender import SenderError, render_sender_detail, validate_request
 from noxen.sender_service import endpoint_for_app, sender_io
 from noxen.textual_compat import is_select_empty
 from noxen import sender_json
@@ -224,8 +224,15 @@ class SenderPane(Vertical):
         row, area = self.selected(), self.editor.area
         if row is None or area.read_only:
             return
-        if self._saved_draft is not None and self._saved_draft[0] == area.full_text():
-            self.editor.say(self._saved_draft[1], error=True)
+        if area.full_text() == self._editor_baseline:
+            self.editor.say("")
+            return
+        try:
+            request = sender_json.parse(area.text, area.folds)
+            if request:
+                validate_request(request)
+        except ValueError as error:
+            self.editor.say(str(error), error=True)
         else:
             self.editor.say("")
 
