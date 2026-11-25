@@ -245,8 +245,6 @@ class ProfileCallerDialog(MonitorDialog):
             })
             selected = [p["id"] for i, p in enumerate(self.profiles)
                         if self.query_one(f"#caller_profile_{i}", Switch).value]
-            if not selected:
-                raise ValueError("Select at least one profile")
             self.dismiss((settings, selected))
         except ValueError as error:
             label = self.query_one("#monitor_error", Label)
@@ -789,10 +787,14 @@ class MonitorPane(Vertical):
                     return
                 settings, selected = result
                 updated = copy.deepcopy(self.profiles)
+                previous = profile.get("callerSettings")
                 for target in updated:
                     if target["id"] in selected:
                         target["callerSettings"] = settings
-                self.save(updated, profile_id if profile_id in selected else selected[0])
+                    elif previous is not None and target.get("callerSettings") == previous:
+                        # These switches were selected when the dialog opened; turning one off disables it.
+                        target.pop("callerSettings", None)
+                self.save(updated, profile_id)
             self.app.push_screen(ProfileCallerDialog(self.profiles, profile_id), save_callers)
         elif action == "delete":
             self.save([p for p in profiles if p["id"] != profile_id])

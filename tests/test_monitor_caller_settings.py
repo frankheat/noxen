@@ -1,12 +1,15 @@
 import itertools
 import json
+import tempfile
 import unittest
+from types import SimpleNamespace
 
 from textual.app import App
 from textual.widgets import Input, Select, Switch
 
+from noxen.app import NoxenApp
 from noxen.monitor import PROFILE_FORMAT_VERSION, effective_hook, enabled_hooks, load_profiles, validate_profiles
-from noxen.monitor_ui import MonitorDialog
+from noxen.monitor_ui import MonitorDialog, MonitorPane, ProfileCallerDialog
 
 
 class CallerSettingsTests(unittest.TestCase):
@@ -40,6 +43,42 @@ class CallerSettingsTests(unittest.TestCase):
 
 
 class CallerEditorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_profile_caller_settings_can_be_disabled_without_selecting_a_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = directory + "/caller.noxen"
+            settings = {"callerFilter": "app.*", "callerMatch": "direct", "stackDepth": 16}
+            other = {"callerFilter": "other.*", "callerMatch": "anywhere", "stackDepth": 32}
+            profiles = [
+                {"id": "first", "name": "First", "enabled": False, "hooks": [], "callerSettings": settings},
+                {"id": "second", "name": "Second", "enabled": False, "hooks": [], "callerSettings": settings},
+                {"id": "third", "name": "Third", "enabled": False, "hooks": [], "callerSettings": other},
+            ]
+            app = NoxenApp(SimpleNamespace(project=None, new_project=path, skip_device_scan=True))
+            app.db.set_info("monitor_profiles", json.dumps({"version": PROFILE_FORMAT_VERSION, "profiles": profiles}))
+            async with app.run_test(size=(100, 40)) as pilot:
+                pane = app.query_one(MonitorPane)
+                pane.run_profile_action("first", "caller_settings", None)
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ProfileCallerDialog)
+                self.assertTrue(app.screen.query_one("#caller_profile_0", Switch).value)
+                self.assertTrue(app.screen.query_one("#caller_profile_1", Switch).value)
+                self.assertFalse(app.screen.query_one("#caller_profile_2", Switch).value)
+                app.screen.query_one("#caller_profile_0", Switch).value = False
+                app.screen.query_one("#caller_profile_1", Switch).value = False
+                await pilot.click("#monitor_save")
+                await pilot.pause()
+                self.assertNotIn("callerSettings", pane.profiles[0])
+                self.assertNotIn("callerSettings", pane.profiles[1])
+                self.assertEqual(pane.profiles[2]["callerSettings"], other)
+            app.db.close()
+            reopened = NoxenApp(SimpleNamespace(project=path, new_project=None, skip_device_scan=True))
+            async with reopened.run_test(size=(100, 40)):
+                restored = reopened.query_one(MonitorPane).profiles
+                self.assertNotIn("callerSettings", restored[0])
+                self.assertNotIn("callerSettings", restored[1])
+                self.assertEqual(restored[2]["callerSettings"], other)
+            reopened.db.close()
+
     async def test_initial_editor_state_matches_effective_configuration(self):
         app = App()
         async with app.run_test(size=(100, 40)) as pilot:
