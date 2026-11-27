@@ -563,11 +563,11 @@ class SenderUITests(IsolatedAppTestCase):
                 service = app.sender_service
                 await service.connect(endpoint, "test.app", service.token)
                 first = service.save_request("1", {"operation": "sendBroadcast", "intent": {"action": "test.PING"}})
-                service.save_request("2", {"operation": "query", "uri": "content://test/notes"})
+                second = service.save_request("2", {"operation": "query", "uri": "content://test/notes"})
                 app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
-                await pilot.pause(0.6)
                 pane = app.query_one(SenderPane)
                 area = pane.editor.area
+                await settle(pilot, lambda: pane._editor_key == (first["id"], first["revision"]) and not area.read_only)
                 self.assertEqual(area.text, '{\n    "operation": "sendBroadcast",\n    "intent": {\n'
                                             '        "action": "test.PING"\n    }\n}')
                 self.assertTrue(area._highlights[1])  # Colours do not depend on a grammar package.
@@ -576,16 +576,14 @@ class SenderUITests(IsolatedAppTestCase):
                 area.focus()
                 area.move_cursor((3, len('        "action": "test.PING"')))
                 await pilot.press("enter", "e", "x")
-                await pilot.pause(0.2)
+                await settle(pilot, lambda: area.popup.display)
                 self.assertTrue(area.popup.display)
                 await pilot.press("enter")
-                await pilot.pause(0.2)
                 await pilot.press("S", "t")
-                await pilot.pause(0.2)
+                await settle(pilot, lambda: area.popup.display)
+                self.assertTrue(area.popup.display)
                 await pilot.press("enter")
-                await pilot.pause(0.2)
                 await pilot.press("t", "o", "k")
-                await pilot.pause(0.2)
                 self.assertIn('        "action": "test.PING",\n        "extras": {\n'
                               '            "tok": {"type": "String", "value": ""}\n        }', area.text)
                 # The text is valid, so it is pending or, on a slow machine, already saved on its own.
@@ -599,19 +597,22 @@ class SenderUITests(IsolatedAppTestCase):
                 await pilot.press("ctrl+z")
                 area.move_cursor((4, 0))
                 await pilot.press("ctrl+o")
-                await pilot.pause(0.2)
                 self.assertIn('"extras": {⋯₁}', area.text)
 
                 # Unsaved text survives a visit to another request, and Send sends what is on screen.
-                tabs = list(pane.query(RequestTab))
-                await pilot.click(tabs[1])
-                await pilot.pause(0.6)
+                second_tab = next(tab for tab in pane.query(RequestTab) if tab.request_id == second["id"])
+                self.assertTrue(await pilot.click(second_tab, offset=(2, 1)))
+                await settle(pilot, lambda: pane._editor_key == (second["id"], second["revision"]))
                 self.assertIn('"query"', area.text)
-                await pilot.click(tabs[0])
-                await pilot.pause(0.6)
+                first_tab = next(tab for tab in pane.query(RequestTab) if tab.request_id == first["id"])
+                self.assertTrue(await pilot.click(first_tab, offset=(2, 1)))
+                send_button = pane.query_one("#sender_send")
+                await settle(pilot, lambda: pane._editor_key is not None and pane._editor_key[0] == first["id"]
+                             and not send_button.disabled)
                 self.assertIn('"extras": {⋯₁}', area.text)
-                await pilot.click("#sender_send")
-                await pilot.pause(0.6)
+                self.assertTrue(await pilot.click(send_button, offset=(2, 1)))
+                await settle(pilot, lambda: bool(sent) and not send_button.disabled and not pane.editor_dirty())
+                self.assertEqual(len(sent), 1)
                 self.assertEqual(sent[0]["intent"], {"action": "test.PING",
                                                      "extras": {"tok": {"type": "String", "value": ""}}})
                 self.assertFalse(pane.editor_dirty())
@@ -621,10 +622,10 @@ class SenderUITests(IsolatedAppTestCase):
                 area.move_cursor(area.document.end)
                 await pilot.press("x")
                 current = service.db.sender_request(first["id"])
-                service.save_request("1", {"operation": "sendBroadcast", "intent": {"action": "from.elsewhere"}},
-                                     first["id"], current["revision"])
+                updated = service.save_request("1", {"operation": "sendBroadcast", "intent": {"action": "from.elsewhere"}},
+                                               first["id"], current["revision"])
                 pane.refresh_sender()
-                await pilot.pause(0.6)
+                await settle(pilot, lambda: pane._editor_key == (updated["id"], updated["revision"]))
                 self.assertIn("from.elsewhere", area.text)
                 self.assertFalse(pane.editor_dirty())
                 self.assertEqual(service.db.sender_request(first["id"])["request"]["intent"]["action"], "from.elsewhere")
@@ -634,11 +635,10 @@ class SenderUITests(IsolatedAppTestCase):
                 pane._requests = service.db.sender_requests()
                 self.assertIsNone(pane.save_editor())
                 pane.select_request(first["id"])
-                await pilot.pause(0.6)
+                await settle(pilot, lambda: not send_button.disabled)
 
                 # Send validates the visible text even before autosave can run.
                 before = service.db.sender_request(first["id"])
-                send_button = pane.query_one("#sender_send")
                 with patch("noxen.sender_ui.AUTOSAVE_DELAY", 60):
                     area.focus()
                     area.move_cursor(area.document.end)
