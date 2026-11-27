@@ -250,14 +250,16 @@ class JsonRequestEditor(Vertical):
     JsonRequestEditor > .json_status.error { color: $error; }
     """
 
-    def __init__(self, root="request", escape_leaves=True, **kwargs):
+    def __init__(self, root="request", escape_leaves=True, *, show_status=True, **kwargs):
         super().__init__(**kwargs)
         self.root, self.escape_leaves = root, escape_leaves
+        self.show_status = show_status
 
     def compose(self):
         yield JsonArea(root=self.root, escape_leaves=self.escape_leaves)
         yield CompletionList()
-        yield Label("", classes="json_status", markup=False)
+        if self.show_status:
+            yield Label("", classes="json_status", markup=False)
 
     @property
     def area(self):

@@ -130,6 +130,8 @@ class SenderPane(Vertical):
     SenderPane #sender_tabs .request_tab.-selected { border: round $accent; color: $accent; }
     SenderPane .side_header Button.-selected { border: round $accent; color: $accent; }
     SenderPane #sender_split { height: 1fr; }
+    SenderPane #sender_request_status { width: 1fr; height: auto; min-height: 1; margin: 0 1; color: $foreground-muted; }
+    SenderPane #sender_request_status.error { color: $error; }
     SenderPane .sender_side { width: 1fr; height: 1fr; margin: 0 1; }
     SenderPane #sender_result_side { border-left: solid $foreground-muted; padding-left: 1; }
     SenderPane.stacked #sender_result_side { border-left: none; padding-left: 0; }
@@ -189,7 +191,7 @@ class SenderPane(Vertical):
                 with Horizontal(classes="side_header"):
                     yield ModalButton("Send", id="sender_send")
                     yield ModalButton("Cancel", id="sender_cancel_run", tooltip="Ask a running query or file read to stop")
-                yield JsonRequestEditor(id="sender_request_detail")
+                yield JsonRequestEditor(id="sender_request_detail", show_status=False)
             with Vertical(classes="sender_side", id="sender_result_side"):
                 with Horizontal(classes="side_header"):
                     yield ModalButton("‹", id="sender_run_older")
@@ -199,6 +201,7 @@ class SenderPane(Vertical):
                     yield ModalButton("Details", id="sender_result_details", disabled=True, tooltip="Show timing and sender")
                 yield SenderResultLog(id="sender_run_detail", markup=False, highlight=False, auto_scroll=False, wrap=True,
                                       min_width=1)
+        yield Label("", id="sender_request_status", markup=False)
         yield Rule(classes="section_separator")
 
     def on_resize(self):
@@ -220,21 +223,26 @@ class SenderPane(Vertical):
         area = self.editor.area
         return not area.read_only and area.full_text() != self._editor_baseline
 
+    def show_request_status(self, message, *, error=False):
+        status = self.query_one("#sender_request_status", Label)
+        status.set_class(error, "error")
+        status.update(Text(message))
+
     def show_editor_state(self):
         row, area = self.selected(), self.editor.area
         if row is None or area.read_only:
             return
         if area.full_text() == self._editor_baseline:
-            self.editor.say("")
+            self.show_request_status("")
             return
         try:
             request = sender_json.parse(area.text, area.folds)
             if request:
                 validate_request(request)
         except ValueError as error:
-            self.editor.say(str(error), error=True)
+            self.show_request_status(str(error), error=True)
         else:
-            self.editor.say("")
+            self.show_request_status("")
 
     def editor_needs_save(self):
         return self.editor_dirty() or (not self.editor.area.read_only and self._saved_draft is not None)
@@ -272,7 +280,7 @@ class SenderPane(Vertical):
     def _editor_write_failed(self, error):
         self._editor_write_error = str(error)
         self._retry_save = isinstance(error, (OSError, sqlite3.Error))
-        self.editor.say(f"Could not save draft: {error}", error=True)
+        self.show_request_status(f"Could not save draft: {error}", error=True)
 
     def save_editor(self, quiet=False, *, for_send=False):
         """Save the JSON on screen. Returns the saved request, or None if it is not valid.
@@ -341,7 +349,7 @@ class SenderPane(Vertical):
             self._saved_draft = None
             area.read_only = True
             area.load("")
-            self.editor.say("No requests yet. Press + to create one.")
+            self.show_request_status("No requests yet. Press + to create one.")
         elif run is not None and self._run_id is not None:
             key = (row["id"], row["revision"])
             if run["id"] != self._editor_run_id or key != self._editor_key:
