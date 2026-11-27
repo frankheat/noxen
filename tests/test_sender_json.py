@@ -1,9 +1,10 @@
+import json
 import unittest
 
 from textual.app import App
 
 from noxen.sender import OPERATIONS, validate_request
-from noxen.sender_json import (apply_completion, completions, expand, format_request, highlights, parse,
+from noxen.sender_json import (apply_completion, completions, expand, format_request, highlights, parse, pretty_json,
                                toggle_fold)
 from noxen.sender_json_editor import JsonRequestEditor
 
@@ -224,6 +225,36 @@ class SenderJsonTests(unittest.TestCase):
             with self.subTest(literal=literal), self.assertRaisesRegex(ValueError, "must be finite"):
                 parse('{"value":' + literal + '}')
 
+    def test_pretty_json_preserves_values_order_and_literals(self):
+        text = r' { "z" : [true,null,{},[],-0,1.0000000000000000001e+02,], "a":"é \u00e9 \/ \" , }", } '
+        formatted, cursor = pretty_json(text, text.index("é"))
+        self.assertEqual(json.loads(formatted), parse(text))
+        self.assertEqual(list(json.loads(formatted)), ["z", "a"])
+        self.assertIn(r'"é \u00e9 \/ \" , }"', formatted)
+        self.assertIn("1.0000000000000000001e+02", formatted)
+        self.assertIn("        -0,", formatted)
+        self.assertEqual(formatted[cursor], "é")
+        self.assertEqual(pretty_json(formatted, cursor), (formatted, cursor))
+
+    def test_pretty_json_matches_standard_indentation(self):
+        for request in (
+            {}, {"draft": {"nested": [[], [{}], [1, 2], False, None]}},
+            {"operation": "query", "projection": ["title", "body"], "selectionArgs": ["a,b"]},
+            {"operation": "sendBroadcast", "intent": {"flags": ["FLAG_GRANT_READ_URI_PERMISSION"],
+                                                     "extras": {"hello": {"type": "String", "value": "☕"}}}},
+            {"values": list(range(1000))},
+        ):
+            with self.subTest(name=next(iter(request), "empty")):
+                inline = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
+                self.assertEqual(pretty_json(inline, len(inline))[0], json.dumps(request, ensure_ascii=False, indent=4))
+
+    def test_pretty_json_rejects_invalid_input(self):
+        for text in ("{", '{"x":}', '{"x":1} garbage', "[]", "null", '{"x":NaN}', '{"x":1e999}',
+                     '{"x":1,"x":2}', r'{"x":1,"\u0078":2}', '{"x":{⋯₉}}',
+                     '{"x":' + "[" * 1500 + "0" + "]" * 1500 + "}"):
+            with self.subTest(text=text[:40]), self.assertRaises(ValueError):
+                pretty_json(text, 0)
+
     def test_highlight_spans_are_byte_offsets_per_line(self):
         spans = highlights('{\n  "k€y": "v", "n": -1.5e3, "b": true, {⋯₁}\n}')
         self.assertEqual(spans[1][0], (2, 9, "json.key"))        # € is three bytes.
@@ -232,6 +263,50 @@ class SenderJsonTests(unittest.TestCase):
 
 
 class SenderFlagEditorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_format_shortcut_preserves_folded_text_and_supports_undo(self):
+        class EditorApp(App):
+            def compose(self):
+                yield JsonRequestEditor()
+                yield JsonRequestEditor(root="intent", id="intercept")
+
+        async with EditorApp().run_test() as pilot:
+            editor = pilot.app.query_one(JsonRequestEditor).area
+            folded = '{"x":{⋯₂},"literal":"{⋯₁}"}'
+            hidden = {1: '{"number":-0}', 2: '{"nested":{⋯₁}}'}
+            editor.load(" ")
+            editor.focus()
+            editor.set_text(folded, 0)
+            editor.folds.update(hidden)
+            await pilot.press("alt+f")
+            self.assertEqual(json.loads(editor.text), {"x": {"nested": {"number": 0}}, "literal": "{⋯₁}"})
+            self.assertIn('"number": -0', editor.text)
+            formatted = editor.text
+            await pilot.press("alt+f")  # Idempotent, including the undo history.
+            await pilot.press("ctrl+z")
+            self.assertEqual(editor.text, folded)
+            self.assertEqual(editor.folds, hidden)
+            self.assertEqual(parse(editor.full_text()), json.loads(formatted))
+            await pilot.press("ctrl+y")
+            self.assertEqual(editor.text, formatted)
+
+            for draft in ("", '{"x":', '{"x":1,"x":2}'):
+                editor.load(draft)
+                original_selection = editor.selection
+                await pilot.press("alt+f")
+                self.assertEqual(editor.text, draft)
+                self.assertEqual(editor.selection, original_selection)
+
+            inline = '{"x":1}'
+            editor.load(inline)
+            editor.read_only = True
+            await pilot.press("alt+f")
+            self.assertEqual(editor.text, inline)
+            intercept = pilot.app.query_one("#intercept", JsonRequestEditor).area
+            intercept.load(inline)
+            intercept.focus()
+            await pilot.press("alt+f")
+            self.assertEqual(intercept.text, inline)
+
     async def test_column_name_has_no_type_popup_but_type_field_does(self):
         class EditorApp(App):
             def compose(self):

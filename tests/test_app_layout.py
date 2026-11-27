@@ -149,7 +149,7 @@ class ShortcutOrderTests(IsolatedAppTestCase):
             await open_tab("tab_sender")
             sender = app.query_one(SenderPane)
             sender.editor.area.focus()
-            await expect("ctrl+q", "alt+left", "alt+right", "ctrl+r", "ctrl+space", "ctrl+o", "ctrl+n")
+            await expect("ctrl+q", "alt+left", "alt+right", "ctrl+r", "ctrl+space", "ctrl+o", "ctrl+n", "alt+f")
             sender.query_one("#sender_new").focus()
             await expect("ctrl+q", "alt+left", "alt+right", "ctrl+r")
             await open_tab("tab_history")

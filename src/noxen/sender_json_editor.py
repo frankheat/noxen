@@ -40,6 +40,7 @@ class JsonArea(TextArea):
         Binding("ctrl+space", "suggest", "Suggest", priority=True),
         Binding("ctrl+o", "fold", "Fold", priority=True),
         Binding("ctrl+n", "unfold_all", "Unfold all", priority=True),
+        Binding("alt+f", "format_json", "Format JSON", priority=True),
     ]
 
     def __init__(self, root="request", escape_leaves=True, **kwargs):
@@ -152,6 +153,31 @@ class JsonArea(TextArea):
 
     def action_suggest(self):
         self.show_completions(always=True)
+
+    def check_action(self, action, parameters):
+        if action == "format_json":
+            return self.root == "request"
+        return super().check_action(action, parameters)
+
+    def action_format_json(self):
+        if self.root != "request" or self.read_only or not self.text.strip():
+            return
+        try:
+            full = self.full_text()
+            offset = self.offset()
+            if full != self.text:
+                offset = len(sender_json.expand(self.text[:offset], self.folds))
+            formatted, cursor = sender_json.pretty_json(full, offset)
+        except (ValueError, RecursionError) as error:
+            reason = "JSON is nested too deeply" if isinstance(error, RecursionError) else str(error)
+            self.notify(f"Could not format JSON: {reason}", severity="warning")
+            return
+        self.close_completions()
+        if formatted != self.text:
+            self.history.checkpoint()
+            # Keep the hidden blocks available if Undo restores their markers.
+            self.set_text(formatted, cursor)
+            self.history.checkpoint()
 
     # ------------------------------------------------------------ folding
 

@@ -26,6 +26,34 @@ async def settle(pilot, condition, timeout=5.0):
 
 
 class SenderUITests(IsolatedAppTestCase):
+    async def test_format_json_uses_sender_autosave_for_requests_and_drafts(self):
+        app = NoxenApp(SimpleNamespace(project=None, new_project=str(self.settings_path.parent / "format-json"),
+                                       skip_device_scan=True))
+        async with app.run_test(size=(120, 42)) as pilot:
+            initial = {"operation": "query", "uri": "content://demo/notes"}
+            request = app.sender_service.save_request("Notes", initial)
+            app.query_one("#main_tabs").active = "tab_sender"
+            pane = app.query_one(SenderPane)
+            await settle(pilot, lambda: pane.selected() is not None and pane.editor.area.text.startswith("{"))
+            area = pane.editor.area
+            area.focus()
+            invalid = {"operation": "query", "uri": "invalid"}
+            area.load(json.dumps(invalid, separators=(",", ":")))
+            await pilot.press("alt+f")
+            self.assertEqual(area.text, json.dumps(invalid, indent=4))
+            await settle(pilot, lambda: app.db.sender_draft(*pane._editor_key) is not None)
+            self.assertEqual(app.db.sender_draft(*pane._editor_key)[0], area.text)
+            self.assertEqual(app.db.sender_request(request["id"]), request)
+
+            valid = {**initial, "projection": ["title", "body"]}
+            area.load(json.dumps(valid, separators=(",", ":")))
+            await pilot.press("alt+f")
+            self.assertEqual(area.text, json.dumps(valid, indent=4))
+            await settle(pilot, lambda: app.db.sender_request(request["id"])["revision"] > request["revision"])
+            saved = app.db.sender_request(request["id"])
+            self.assertEqual(saved["request"]["projection"], valid["projection"])
+            self.assertIsNone(app.db.sender_draft(saved["id"], saved["revision"]))
+
     async def test_history_activity_flag_completion_clears_draft_warning_disconnected(self):
         app = NoxenApp(SimpleNamespace(project=None, new_project=str(self.settings_path.parent / "history-flag"),
                                        skip_device_scan=True))

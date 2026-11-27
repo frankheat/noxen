@@ -13,6 +13,7 @@ from noxen.sender import (
 )
 
 INDENT = "    "
+MAX_FORMAT_DEPTH = 256
 SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 FOLD = re.compile(r"([\{\[])⋯([₀-₉]+)[\}\]]")
 TOKEN = re.compile(r"""
@@ -486,12 +487,17 @@ def _number(subscript):
 
 def expand(text, folds, _open=()):
     """The full text behind every fold marker, nested ones included."""
+    if not folds:
+        return text
+
     def restore(match):
-        number = _number(match.group(2))
+        if match.lastgroup != "fold":
+            return match.group()
+        number = _number(FOLD.fullmatch(match.group()).group(2))
         if number not in folds or number in _open:  # Unknown, or a marker inside its own content.
             return match.group()
         return expand(folds[number], folds, (*_open, number))
-    return FOLD.sub(restore, text)
+    return TOKEN.sub(restore, text)
 
 
 def parse(text, folds=None):
@@ -528,6 +534,40 @@ def parse(text, folds=None):
                            parse_float=finite_float, parse_constant=finite_float)
     except json.JSONDecodeError as error:
         raise ValueError(f"Line {error.lineno}, column {error.colno}: {error.msg}") from None
+    except RecursionError:
+        raise ValueError("JSON is nested too deeply") from None
     if not isinstance(value, dict):
         raise ValueError("A request is a JSON object: { ... }")
     return value
+
+
+def pretty_json(text, offset):
+    """Format validated editor JSON, keeping field order and literal spelling."""
+    parse(text)
+    lexemes = list(tokens(text))
+    parts, depth, length, cursor = [], 0, 0, None
+    previous = None
+    for index, (_, start, end, value) in enumerate(lexemes):
+        following = lexemes[index + 1][3] if index + 1 < len(lexemes) else None
+        if value == "," and following in ("}", "]"):
+            continue  # The editor accepts trailing commas. Emit standard JSON.
+        if value in ("}", "]"):
+            depth -= 1
+        prefix = ""
+        if previous == ":":
+            prefix = " "
+        elif previous == "," or (previous in ("{", "[") and value not in ("}", "]")):
+            prefix = "\n" + INDENT * depth
+        elif value in ("}", "]") and previous not in ("{", "["):
+            prefix = "\n" + INDENT * depth
+        length += len(prefix)
+        if cursor is None and offset <= end:
+            cursor = length + max(0, offset - start)
+        parts.extend((prefix, value))
+        length += len(value)
+        if value in ("{", "["):
+            depth += 1
+            if depth > MAX_FORMAT_DEPTH:
+                raise ValueError(f"Cannot indent JSON beyond {MAX_FORMAT_DEPTH} levels")
+        previous = value
+    return "".join(parts), length if cursor is None else cursor
