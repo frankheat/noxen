@@ -5,6 +5,7 @@ import tempfile
 from unittest.mock import patch
 from types import SimpleNamespace
 
+from textual.errors import NoWidget
 from textual.widgets import TabbedContent, Input, Label, OptionList, Select
 
 from noxen.app import NoxenApp
@@ -456,15 +457,32 @@ class SenderUITests(IsolatedAppTestCase):
                 app.query_one("#main_tabs", TabbedContent).active = "tab_sender"
                 pane = app.query_one(SenderPane)
                 names = lambda: [str(tab.label) for tab in pane.query(RequestTab)]
-                tab = lambda name: next(t for t in pane.query(RequestTab) if str(t.label) == name)
                 await settle(pilot, lambda: names() == list("ABCDE") and pane.selected() is not None)
                 self.assertEqual(names(), list("ABCDE"))
 
                 async def open_menu(name):
-                    target = tab(name)
-                    target.scroll_visible()
-                    await pilot.pause()
-                    self.assertTrue(await pilot.click(target, button=3))
+                    def clickable_tab():
+                        # The worker can mount tabs before Textual lays them out.
+                        # Resolve the current widget and check where the click will land.
+                        target = next((t for t in pane.query(RequestTab) if str(t.label) == name), None)
+                        if target is None or not target.region:
+                            return None
+                        offset = (target.region.width // 2, target.region.height // 2)
+                        x, y = target.region.offset
+                        try:
+                            widget, _ = app.get_widget_at(x + offset[0], y + offset[1])
+                        except NoWidget:
+                            widget = None
+                        if widget is target:
+                            return target, offset
+                        target.scroll_visible(animate=False)
+                        return None
+
+                    await settle(pilot, clickable_tab)
+                    click = clickable_tab()
+                    self.assertIsNotNone(click, f"Sender tab {name!r} did not become clickable")
+                    target, offset = click
+                    self.assertTrue(await pilot.click(target, offset=offset, button=3))
                     # The editor also contains an OptionList. Wait until the
                     # context menu is mounted and owns keyboard focus.
                     await settle(pilot, lambda: isinstance(app.screen, SenderTabMenu)
